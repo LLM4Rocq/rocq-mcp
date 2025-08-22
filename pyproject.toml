@@ -1,0 +1,28 @@
+[tool.poetry]
+name = "rocq-mcp"
+version = "0.1.0"
+description = "Model Context Protocol (MCP) server for Rocq/Coq proof assistant using Petanque"
+authors = ["Guillaume Baudart <guillaume.baudart@inria.fr>"]
+readme = "README.md"
+license = "Apache-2.0"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+mcp = "^1.0.0"
+# Git dependency to use pytanque from GitHub
+pytanque = { git = "https://github.com/LLM4Rocq/pytanque.git" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.0.0"
+mypy = "^1.5.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+rocq-mcp = "rocq_mcp.server:cli"
+
+[tool.poetry.plugins."mcp.servers"]
+rocq = "rocq_mcp.server"

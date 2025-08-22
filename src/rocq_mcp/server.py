@@ -8,8 +8,13 @@ the Rocq/Coq proof assistant using the Petanque protocol.
 
 import argparse
 import asyncio
+import atexit
 import logging
 import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +31,74 @@ logger = logging.getLogger(__name__)
 
 # Global variables to maintain connection state
 petanque_client: Optional[Pytanque] = None
+petanque_process: Optional[subprocess.Popen] = None
 current_states: Dict[str, Any] = {}  # Store proof states by session ID
+
+
+def cleanup_petanque_process():
+    """Clean up the petanque process on exit."""
+    global petanque_process
+    if petanque_process is not None:
+        logger.info("Shutting down pet-server process...")
+        try:
+            petanque_process.terminate()
+            # Give it a moment to terminate gracefully
+            petanque_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("pet-server didn't terminate gracefully, killing...")
+            petanque_process.kill()
+            petanque_process.wait()
+        except Exception as e:
+            logger.error(f"Error during pet-server cleanup: {e}")
+        finally:
+            petanque_process = None
+            logger.info("pet-server process cleaned up")
+
+
+def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
+    """Start the petanque server process."""
+    global petanque_process
+    
+    if petanque_process is not None:
+        return  # Already running
+    
+    try:
+        # Start pet-server process
+        logger.info(f"Starting pet-server on {host}:{port}")
+        petanque_process = subprocess.Popen(
+            ["pet-server", "--address", host, "--port", str(port)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Give the server a moment to start
+        time.sleep(2)
+        
+        # Check if process is still running
+        if petanque_process.poll() is not None:
+            stdout, stderr = petanque_process.communicate()
+            raise RuntimeError(f"pet-server failed to start: {stderr}")
+        
+        logger.info(f"pet-server started successfully (PID: {petanque_process.pid})")
+        
+        # Register cleanup handlers
+        atexit.register(cleanup_petanque_process)
+        
+        # Handle signals for graceful shutdown
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, shutting down...")
+            cleanup_petanque_process()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+    except FileNotFoundError:
+        raise RuntimeError("pet-server command not found. Please ensure it's installed and in PATH.")
+    except Exception as e:
+        cleanup_petanque_process()
+        raise RuntimeError(f"Failed to start pet-server: {e}")
 
 
 def get_client() -> Pytanque:
@@ -35,7 +107,14 @@ def get_client() -> Pytanque:
     if petanque_client is None:
         # Default connection parameters - these can be made configurable
         host = os.environ.get("PETANQUE_HOST", "127.0.0.1")
-        port = int(os.environ.get("PETANQUE_PORT", "8765"))
+        port = int(os.environ.get("PETANQUE_PORT", "8833"))
+        
+        # Start petanque server if not already running
+        start_petanque_server(host, port)
+        
+        # Wait a bit more for the server to be fully ready
+        time.sleep(1)
+        
         petanque_client = Pytanque(host, port)
         petanque_client.connect()
         logger.info(f"Connected to Petanque server at {host}:{port}")
@@ -405,14 +484,27 @@ async def handle_call_tool(
 
             current_state = current_states[session_id]
             # Execute search command and capture feedback
-            search_command = f"Search {query}."
+            # If query contains spaces or special characters, wrap in quotes
+            if ' ' in query or any(c in query for c in ['_', '+', '-', '*', '(', ')', '[', ']']):
+                search_command = f'Search "{query}".'
+            else:
+                search_command = f"Search {query}."
             new_state = client.run(current_state, search_command)
 
             # Extract search results from feedback
             if new_state.feedback:
                 result = f"Search results for '{query}':\n"
+                result_lines = []
                 for level, msg in new_state.feedback:
-                    result += f"{msg}\n"
+                    result_lines.append(msg)
+                
+                # Limit output to avoid overwhelming responses
+                max_results = 50
+                if len(result_lines) > max_results:
+                    result += "\n".join(result_lines[:max_results])
+                    result += f"\n\n... and {len(result_lines) - max_results} more results (truncated for brevity)"
+                else:
+                    result += "\n".join(result_lines)
             else:
                 result = f"No results found for search query: {query}"
 
@@ -441,7 +533,7 @@ async def main():
         "--host", default="127.0.0.1", help="Petanque server host (default: 127.0.0.1)"
     )
     parser.add_argument(
-        "--port", type=int, default=8765, help="Petanque server port (default: 8765)"
+        "--port", type=int, default=8833, help="Petanque server port (default: 8833)"
     )
     args = parser.parse_args()
 

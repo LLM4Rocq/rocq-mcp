@@ -32,21 +32,15 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 
 ## Prerequisites
 
-1. **Install coq-lsp with Petanque support**:
-   ```bash
-   # Install dependencies
-   opam install lwt logs coq.8.20.0
-   
-   # Pin the correct version of coq-lsp
-   opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
-   ```
+**Install coq-lsp with Petanque support**:
+```bash
+# Install dependencies
+opam install lwt logs coq.8.20.0
 
-2. **Start the Petanque server**:
-   ```bash
-   pet-server  # Default port: 8765
-   # Or specify a custom port:
-   pet-server -p 9000
-   ```
+# Pin the correct version of coq-lsp
+opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
+```
+
 
 ## Installation
 
@@ -62,7 +56,7 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 ### Running the MCP Server
 
 ```bash
-# Default configuration (connects to localhost:8765)
+# Default configuration (start pet-server on localhost:8833)
 poetry run rocq-mcp
 
 # Custom Petanque server configuration  
@@ -74,7 +68,7 @@ poetry run rocq-mcp --host 127.0.0.1 --port 9000
 Run the following command to install rocq-mcp for claude code.
 
 ```bash
-claude mcp add rocq-mcp --env PETANQUE_HOST=127.0.0.1 PETANQUE_PORT=8765 -- poetry run rocq-mcp
+claude mcp add rocq-mcp -- poetry run rocq-mcp
 ```
 
 When you start a claude session, you can check the server with:
@@ -100,7 +94,6 @@ poetry run pytest tests/
 ### Common Issues
 
 **Server Connection Errors**
-- Ensure `pet-server` is running: `pet-server -p 8765`
 - Verify port availability
 - Check that coq-lsp is properly installed
 

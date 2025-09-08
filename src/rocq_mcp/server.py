@@ -10,7 +10,6 @@ import argparse
 import asyncio
 import atexit
 import logging
-import os
 import signal
 import subprocess
 import sys
@@ -31,41 +30,46 @@ logger = logging.getLogger(__name__)
 
 # Global variables to maintain connection state
 petanque_client: Optional[Pytanque] = None
-petanque_process: Optional[subprocess.Popen] = None
+petanque_server_process: Optional[subprocess.Popen] = None  # Only used for TCP mode
 current_states: Dict[str, Any] = {}  # Store proof states by session ID
+
+# Configuration
+use_tcp_mode: bool = False
+tcp_host: str = "127.0.0.1"
+tcp_port: int = 8833
 
 
 def cleanup_petanque_process():
-    """Clean up the petanque process on exit."""
-    global petanque_process
-    if petanque_process is not None:
+    """Clean up the petanque server process on exit (TCP mode only)."""
+    global petanque_server_process
+    if petanque_server_process is not None:
         logger.info("Shutting down pet-server process...")
         try:
-            petanque_process.terminate()
+            petanque_server_process.terminate()
             # Give it a moment to terminate gracefully
-            petanque_process.wait(timeout=5)
+            petanque_server_process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             logger.warning("pet-server didn't terminate gracefully, killing...")
-            petanque_process.kill()
-            petanque_process.wait()
+            petanque_server_process.kill()
+            petanque_server_process.wait()
         except Exception as e:
             logger.error(f"Error during pet-server cleanup: {e}")
         finally:
-            petanque_process = None
+            petanque_server_process = None
             logger.info("pet-server process cleaned up")
 
 
 def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
-    """Start the petanque server process."""
-    global petanque_process
+    """Start the petanque server process (TCP mode only)."""
+    global petanque_server_process
     
-    if petanque_process is not None:
+    if petanque_server_process is not None:
         return  # Already running
     
     try:
         # Start pet-server process
         logger.info(f"Starting pet-server on {host}:{port}")
-        petanque_process = subprocess.Popen(
+        petanque_server_process = subprocess.Popen(
             ["pet-server", "--address", host, "--port", str(port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -76,11 +80,11 @@ def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
         time.sleep(2)
         
         # Check if process is still running
-        if petanque_process.poll() is not None:
-            stdout, stderr = petanque_process.communicate()
+        if petanque_server_process.poll() is not None:
+            stdout, stderr = petanque_server_process.communicate()
             raise RuntimeError(f"pet-server failed to start: {stderr}")
         
-        logger.info(f"pet-server started successfully (PID: {petanque_process.pid})")
+        logger.info(f"pet-server started successfully (PID: {petanque_server_process.pid})")
         
         # Register cleanup handlers
         atexit.register(cleanup_petanque_process)
@@ -105,19 +109,22 @@ def get_client() -> Pytanque:
     """Get or create Petanque client connection."""
     global petanque_client
     if petanque_client is None:
-        # Default connection parameters - these can be made configurable
-        host = os.environ.get("PETANQUE_HOST", "127.0.0.1")
-        port = int(os.environ.get("PETANQUE_PORT", "8833"))
-        
-        # Start petanque server if not already running
-        start_petanque_server(host, port)
-        
-        # Wait a bit more for the server to be fully ready
-        time.sleep(1)
-        
-        petanque_client = Pytanque(host, port)
-        petanque_client.connect()
-        logger.info(f"Connected to Petanque server at {host}:{port}")
+        if use_tcp_mode:
+            # TCP mode
+            # Start petanque server if not already running
+            start_petanque_server(tcp_host, tcp_port)
+            
+            # Wait a bit more for the server to be fully ready
+            time.sleep(1)
+            
+            petanque_client = Pytanque(tcp_host, tcp_port)
+            petanque_client.connect()
+            logger.info(f"Connected to Petanque server at {tcp_host}:{tcp_port}")
+        else:
+            # Stdio mode (default)
+            petanque_client = Pytanque(stdio=True)
+            petanque_client.connect()
+            logger.info("Connected to Petanque using stdio mode")
     return petanque_client
 
 
@@ -528,18 +535,29 @@ async def handle_call_tool(
 
 async def main():
     """Main entry point for the server."""
+    global use_tcp_mode, tcp_host, tcp_port
+    
     parser = argparse.ArgumentParser(description="Rocq MCP Server")
     parser.add_argument(
-        "--host", default="127.0.0.1", help="Petanque server host (default: 127.0.0.1)"
+        "--host", default="127.0.0.1", help="Petanque server host for TCP mode (default: 127.0.0.1)"
     )
     parser.add_argument(
-        "--port", type=int, default=8833, help="Petanque server port (default: 8833)"
+        "--port", type=int, default=8833, help="Petanque server port for TCP mode (default: 8833)"
+    )
+    parser.add_argument(
+        "--tcp", action="store_true", help="Use TCP mode instead of default stdio mode"
     )
     args = parser.parse_args()
 
-    # Set environment variables for client configuration
-    os.environ["PETANQUE_HOST"] = args.host
-    os.environ["PETANQUE_PORT"] = str(args.port)
+    # Set module-level configuration variables
+    if args.tcp:
+        use_tcp_mode = True
+        tcp_host = args.host
+        tcp_port = args.port
+        logger.info(f"Using TCP mode with host={args.host}, port={args.port}")
+    else:
+        use_tcp_mode = False
+        logger.info("Using stdio mode (default)")
 
     # Run the MCP server
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):

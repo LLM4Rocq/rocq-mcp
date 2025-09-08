@@ -1,0 +1,97 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  setup-ocaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.x
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git
+      
+      - name: Cache OCaml dependencies
+        id: cache-ocaml
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.opam
+            ~/.cache/opam
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq820-v1
+          restore-keys: |
+            ocaml-deps-${{ runner.os }}-5.2.x-coq820-
+            ocaml-deps-${{ runner.os }}-5.2.x-
+      
+      - name: Install Rocq and coq-lsp dependencies
+        if: steps.cache-ocaml.outputs.cache-hit != 'true'
+        run: |
+          opam install -y lwt logs coq.8.20.0
+          opam pin add -y coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
+
+  test:
+    needs: setup-ocaml
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+      
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
+      
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: poetry install
+      
+      - name: Install pytest
+        run: poetry add --group dev pytest pytest-cov
+      
+      - name: Setup OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.x
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git
+      
+      - name: Restore OCaml dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.opam
+            ~/.cache/opam
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq820-v1
+          restore-keys: |
+            ocaml-deps-${{ runner.os }}-5.2.x-coq820-
+            ocaml-deps-${{ runner.os }}-5.2.x-
+      
+      - name: Run tests
+        run: |
+          poetry run pytest -v

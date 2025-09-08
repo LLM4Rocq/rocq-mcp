@@ -1,6 +1,10 @@
 # Rocq MCP Server
 
-A Model Context Protocol (MCP) server that provides tools for interacting with the Rocq/Coq proof assistant using the Petanque protocol.
+[![Tests](https://github.com/llm4rocq/rocq-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/llm4rocq/rocq-mcp/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/llm4rocq/rocq-mcp/blob/main/LICENSE)
+
+A Model Context Protocol (MCP) server that provides tools for interacting with the Rocq/Coq proof assistant based on [Coq-LSP](https://github.com/ejgallego/coq-lsp) and [Petanque](https://github.com/LLM4Rocq/pytanque.git).
 
 ## Overview
 

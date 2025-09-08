@@ -32,8 +32,8 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 - **Position-based queries**: Get states at specific file positions
 - **Session management**: Support multiple concurrent proof sessions
 - **Two communication modes**: 
-  - **Stdio mode (default)**: Direct communication with `pet` process via stdin/stdout for better performance and simpler setup
-  - **TCP mode**: Traditional socket-based communication with `pet-server` for compatibility
+  - **Stdio mode (default)**: direct communication with `pet` process via stdin/stdout.
+  - **TCP mode**: socket-based communication with `pet-server` via TCP.
 
 ## Prerequisites
 

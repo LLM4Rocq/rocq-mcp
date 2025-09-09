@@ -49,11 +49,25 @@ opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
 
 ## Installation
 
+### Install from GitHub (Recommended)
+
+```bash
+uv pip install git+https://github.com/llm4rocq/rocq-mcp.git
+```
+
+### Development Installation
+
 1. Clone this repository
-2. Install dependencies:
+2. Install in editable mode:
    ```bash
    cd rocq-mcp
-   poetry install
+   uv pip install -e .
+   ```
+
+   Or use the project workflow:
+   ```bash
+   cd rocq-mcp
+   uv sync
    ```
 
 ## Usage
@@ -62,13 +76,19 @@ opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
 
 ```bash
 # Default: stdio mode (uses 'pet' command directly)
-poetry run rocq-mcp
+rocq-mcp
 
 # Use TCP mode for multi-client usage
-poetry run rocq-mcp --tcp
+rocq-mcp --tcp
 
 # TCP mode with custom server configuration  
-poetry run rocq-mcp --tcp --host 127.0.0.1 --port 8833
+rocq-mcp --tcp --host 127.0.0.1 --port 8833
+```
+
+**Development mode (if using `uv sync`):**
+```bash
+uv run rocq-mcp
+uv run rocq-mcp --tcp
 ```
 
 **Communication Modes:**
@@ -81,7 +101,10 @@ poetry run rocq-mcp --tcp --host 127.0.0.1 --port 8833
 Run the following command to install rocq-mcp for claude code.
 
 ```bash
-claude mcp add rocq-mcp -- poetry run rocq-mcp
+claude mcp add rocq-mcp -- rocq-mcp
+
+# if using uv
+claude mcp add rocq-mcp -- uv run rocq-mcp
 ```
 
 When you start a claude session, you can check the server with:
@@ -99,7 +122,11 @@ Then, simply ask claude a question.
 ### Testing
 
 ```bash
-poetry run pytest tests/
+# Install with dev dependencies
+uv sync --extra dev
+
+# Run tests
+uv run pytest tests/
 ```
 
 ## Troubleshooting

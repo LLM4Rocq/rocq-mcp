@@ -28,19 +28,14 @@ jobs:
             ~/.opam
             ~/.cache/opam
             _opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp-v1
           restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp-v1
 
       - name: Install Rocq and coq-lsp dependencies
         if: steps.cache-ocaml.outputs.cache-hit != 'true'
         run: |
-          opam install -y lwt logs coq.8.20.0
-          opam pin add -y coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
-          eval $(opam env)
-          echo $(opam env)
-          opam config list
-          opam list
+          opam install -y lwt logs coq-lsp
 
   test:
     needs: setup-ocaml
@@ -87,15 +82,11 @@ jobs:
             ~/.opam
             ~/.cache/opam
             _opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp-v1
           restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp-v1
        
       - name: Run tests
         run: |
           eval $(opam env)
-          echo $(opam env)
-          opam config list
-          opam list
-          export PATH="$(opam var bin):$PATH"
           uv run pytest -v

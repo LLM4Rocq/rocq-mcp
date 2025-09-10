@@ -18,8 +18,8 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 - **rocq_run_tactic**: Execute tactics or commands on the current proof state  
 - **rocq_get_goals**: Get the current proof goals for a session
 - **rocq_get_premises**: Get available premises (lemmas, definitions) for the current proof state
-- **rocq_parse_ast**: Parse a command and return its Abstract Syntax Tree
-- **rocq_get_state_at_position**: Get the proof state at a specific position in a file
+- **rocq_parse_ast**: Parse a command and return its Abstract Syntax Tree (only with the dev version of coq-lsp)
+- **rocq_get_state_at_position**: Get the proof state at a specific position in a file (only with the dev version of coq-lsp)
 - **rocq_get_file_toc**: Get table of contents (available definitions and theorems) for a Coq/Rocq file
 - **rocq_search**: Search for theorems, definitions, and other objects in the current context
 
@@ -27,7 +27,7 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 
 - **Interactive theorem proving**: Execute tactics and commands step by step
 - **Comprehensive feedback**: Access all Rocq messages (errors, warnings, search results)
-- **AST parsing**: Get abstract syntax trees for commands and file positions
+- **AST parsing**: Get abstract syntax trees for commands and file positions (only with the dev version of coq-lsp)
 - **State management**: Navigate proof states and compare them
 - **Position-based queries**: Get states at specific file positions
 - **Session management**: Support multiple concurrent proof sessions

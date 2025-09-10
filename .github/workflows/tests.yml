@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -27,6 +27,7 @@ jobs:
           path: |
             ~/.opam
             ~/.cache/opam
+            _opam
           key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
           restore-keys: |
             ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
@@ -85,6 +86,7 @@ jobs:
           path: |
             ~/.opam
             ~/.cache/opam
+            _opam
           key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
           restore-keys: |
             ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2

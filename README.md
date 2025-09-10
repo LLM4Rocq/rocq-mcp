@@ -40,10 +40,7 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 **Install coq-lsp with Petanque support**:
 ```bash
 # Install dependencies
-opam install lwt logs coq.8.20.0
-
-# Pin the correct version of coq-lsp
-opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
+opam install lwt logs coq-lsp
 ```
 
 

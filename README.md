@@ -58,13 +58,7 @@ uv pip install git+https://github.com/llm4rocq/rocq-mcp.git
 ### Development Installation
 
 1. Clone this repository
-2. Install in editable mode:
-   ```bash
-   cd rocq-mcp
-   uv pip install -e .
-   ```
-
-   Or use the project workflow:
+2. Use the project workflow:
    ```bash
    cd rocq-mcp
    uv sync
@@ -123,7 +117,7 @@ Then, simply ask claude a question.
 
 ```bash
 # Install with dev dependencies
-uv sync --extra dev
+uv sync --dev
 
 # Run tests
 uv run pytest tests/

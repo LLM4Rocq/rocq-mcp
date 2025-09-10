@@ -19,7 +19,7 @@ jobs:
           ocaml-compiler: 5.2.x
           opam-repositories: |
             default: https://github.com/ocaml/opam-repository.git
-      
+  
       - name: Cache OCaml dependencies
         id: cache-ocaml
         uses: actions/cache@v4
@@ -27,16 +27,19 @@ jobs:
           path: |
             ~/.opam
             ~/.cache/opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-coq820-v1
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
           restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-coq820-
-            ocaml-deps-${{ runner.os }}-5.2.x-
-      
+            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+
       - name: Install Rocq and coq-lsp dependencies
         if: steps.cache-ocaml.outputs.cache-hit != 'true'
         run: |
           opam install -y lwt logs coq.8.20.0
           opam pin add -y coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
+          eval $(opam env)
+          echo $(opam env)
+          opam config list
+          opam list
 
   test:
     needs: setup-ocaml
@@ -67,7 +70,7 @@ jobs:
       
       - name: Install dependencies
         if: steps.cached-uv-dependencies.outputs.cache-hit != 'true'
-        run: uv sync --extra dev
+        run: uv sync --dev
       
       - name: Setup OCaml
         uses: ocaml/setup-ocaml@v3
@@ -82,11 +85,15 @@ jobs:
           path: |
             ~/.opam
             ~/.cache/opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-coq820-v1
+          key: ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
           restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-coq820-
-            ocaml-deps-${{ runner.os }}-5.2.x-
-      
+            ocaml-deps-${{ runner.os }}-5.2.x-coq-lsp.8.20-v2
+       
       - name: Run tests
         run: |
+          eval $(opam env)
+          echo $(opam env)
+          opam config list
+          opam list
+          export PATH="$(opam var bin):$PATH"
           uv run pytest -v

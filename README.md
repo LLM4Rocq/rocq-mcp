@@ -51,11 +51,12 @@ opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
 ### Install from GitHub (Recommended)
 
 ```bash
-uv pip install git+https://github.com/llm4rocq/rocq-mcp.git
+pip install git+https://github.com/llm4rocq/rocq-mcp.git
 ```
 
 ### Development Installation
 
+We recommand using uv.
 1. Clone this repository
 2. Use the project workflow:
    ```bash
@@ -95,9 +96,12 @@ Run the following command to install rocq-mcp for claude code.
 
 ```bash
 claude mcp add rocq-mcp -- rocq-mcp
+```
 
-# if using uv
-claude mcp add rocq-mcp -- uv run rocq-mcp
+_Note:_ If you are using virtual envs, `rocq-mcp` may not be in the path by default. First, activate the venv, and copy the path returned by `which rocq-mcp`. Then install `rocq-mcp` using this absolute path:
+
+```bash
+claude mcp add rocq-mcp -- /path/to/rocq-mcp
 ```
 
 When you start a claude session, you can check the server with:
@@ -132,7 +136,7 @@ uv run pytest tests/
 
 **Installation Issues**
 - Ensure coq-lsp is properly installed
-- Install `lwt` and `logs` before `coq-lsp` (required for `pet-server`)
+- Install `lwt` and `logs` before `coq-lsp` (required for `pet` and `pet-server`)
 - Verify pytanque dependency is correctly resolved
 
 

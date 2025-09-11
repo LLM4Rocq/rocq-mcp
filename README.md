@@ -4,11 +4,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/llm4rocq/rocq-mcp/blob/main/LICENSE)
 
-A Model Context Protocol (MCP) server that provides tools for interacting with the Rocq/Coq proof assistant based on [Coq-LSP](https://github.com/ejgallego/coq-lsp) and [Petanque](https://github.com/LLM4Rocq/pytanque.git).
-
 ## Overview
 
-This MCP server exposes the functionality of the Rocq/Coq proof assistant through a set of tools that can be used by MCP-compatible clients (like Claude Desktop). It uses the Petanque protocol via the pytanque Python library to communicate with a coq-lsp server.
+This MCP server exposes the functionality of the Rocq/Coq proof assistant through a set of tools that can be used by MCP-compatible clients (like Claude Desktop). It uses the [Pytanque](https://github.com/LLM4Rocq/pytanque.git) to communicate with a [coq-lsp](https://github.com/LLM4Rocq/pytanque.git) via a Petanque server.
 
 ## Features
 
@@ -29,7 +27,7 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 - **Comprehensive feedback**: Access all Rocq messages (errors, warnings, search results)
 - **AST parsing**: Get abstract syntax trees for commands and file positions (only with the dev version of coq-lsp)
 - **State management**: Navigate proof states and compare them
-- **Position-based queries**: Get states at specific file positions
+- **Position-based queries**: Get states at specific file positions (only with the dev version of coq-lsp)
 - **Session management**: Support multiple concurrent proof sessions
 - **Two communication modes**: 
   - **Stdio mode (default)**: direct communication with `pet` process via stdin/stdout.

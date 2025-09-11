@@ -16,22 +16,23 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 - **rocq_run_tactic**: Execute tactics or commands on the current proof state  
 - **rocq_get_goals**: Get the current proof goals for a session
 - **rocq_get_premises**: Get available premises (lemmas, definitions) for the current proof state
-- **rocq_parse_ast**: Parse a command and return its Abstract Syntax Tree (only with the dev version of coq-lsp)
-- **rocq_get_state_at_position**: Get the proof state at a specific position in a file (only with the dev version of coq-lsp)
 - **rocq_get_file_toc**: Get table of contents (available definitions and theorems) for a Coq/Rocq file
 - **rocq_search**: Search for theorems, definitions, and other objects in the current context
+- **rocq_parse_ast**: Parse a command and return its Abstract Syntax Tree _(only with the dev version of coq-lsp)_
+- **rocq_get_state_at_position**: Get the proof state at a specific position in a file _(only with the dev version of coq-lsp)_
 
 ### Key Capabilities
 
-- **Interactive theorem proving**: Execute tactics and commands step by step
-- **Comprehensive feedback**: Access all Rocq messages (errors, warnings, search results)
-- **AST parsing**: Get abstract syntax trees for commands and file positions (only with the dev version of coq-lsp)
-- **State management**: Navigate proof states and compare them
-- **Position-based queries**: Get states at specific file positions (only with the dev version of coq-lsp)
-- **Session management**: Support multiple concurrent proof sessions
 - **Two communication modes**: 
   - **Stdio mode (default)**: direct communication with `pet` process via stdin/stdout.
   - **TCP mode**: socket-based communication with `pet-server` via TCP.
+- **Interactive theorem proving**: Execute tactics and commands step by step
+- **Comprehensive feedback**: Access all Rocq messages (errors, warnings, search results)
+- **State management**: Navigate proof states and compare them
+- **Session management**: Support multiple concurrent proof sessions
+
+- **AST parsing**: Get abstract syntax trees for commands and file positions _(only with the dev version of coq-lsp)_
+- **Position-based queries**: Get states at specific file positions _(only with the dev version of coq-lsp)_
 
 ## Prerequisites
 
@@ -39,8 +40,11 @@ This MCP server exposes the functionality of the Rocq/Coq proof assistant throug
 ```bash
 # Install dependencies
 opam install lwt logs coq-lsp
-```
 
+# Or install one of the dev versions of coq-lsp, e.g., for Coq.8.20
+opam install lwt logs coq.8.20.0
+opam pin add coq-lsp https://github.com/ejgallego/coq-lsp.git#v8.20
+```
 
 ## Installation
 

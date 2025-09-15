@@ -1,8 +1,8 @@
 # Rocq MCP Server
 
-[![Tests](https://github.com/llm4rocq/rocq-mcp/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/llm4rocq/rocq-mcp/actions/workflows/tests.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/llm4rocq/rocq-mcp/blob/main/LICENSE)
+[![Tests](https://img.shields.io/github/actions/workflow/status/llm4rocq/rocq-mcp/tests.yml?branch=main&style=for-the-badge)](https://github.com/llm4rocq/rocq-mcp/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=for-the-badge)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=for-the-badge)](https://github.com/llm4rocq/rocq-mcp/blob/main/LICENSE)
 
 ## Overview
 

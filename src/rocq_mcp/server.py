@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,11 +33,17 @@ logger = logging.getLogger(__name__)
 petanque_client: Optional[Pytanque] = None
 petanque_server_process: Optional[subprocess.Popen] = None  # Only used for TCP mode
 current_states: Dict[str, Any] = {}  # Store proof states by session ID
+watchdog_thread: Optional[threading.Thread] = None
+watchdog_stop_event: threading.Event = threading.Event()
 
 # Configuration
 use_tcp_mode: bool = False
 tcp_host: str = "127.0.0.1"
 tcp_port: int = 8833
+
+# Default timeout configuration (can be overridden by Claude)
+DEFAULT_READ_TIMEOUT: int = 120  # 2 minutes default read timeout
+DEFAULT_ROCQ_TIMEOUT: int = 60   # 1 minute default Rocq command timeout
 
 
 def cleanup_petanque_process():
@@ -105,6 +112,83 @@ def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
         raise RuntimeError(f"Failed to start pet-server: {e}")
 
 
+def check_pet_health() -> bool:
+    """Check if the pet process is still alive and responsive.
+
+    Returns True if healthy, False if dead or unresponsive.
+    """
+    global petanque_client
+    if petanque_client is None:
+        return False
+
+    if petanque_client.mode == "stdio":
+        if petanque_client.process is None:
+            return False
+        # Check if process is still running
+        return petanque_client.process.poll() is None
+
+    return True  # Socket mode - assume healthy
+
+
+def restart_pet_client():
+    """Kill and restart the pet client."""
+    global petanque_client
+
+    if petanque_client is not None:
+        logger.warning("Restarting pet client...")
+        try:
+            petanque_client.close()
+        except Exception as e:
+            logger.error(f"Error closing pet client: {e}")
+        petanque_client = None
+
+    # Clear session states since they're invalid after restart
+    current_states.clear()
+
+    # Get a fresh client
+    return get_client()
+
+
+def watchdog_monitor():
+    """Background thread that monitors pet process health."""
+    global petanque_client
+
+    while not watchdog_stop_event.is_set():
+        if petanque_client is not None and not check_pet_health():
+            logger.error("Watchdog detected dead pet process!")
+            try:
+                restart_pet_client()
+            except Exception as e:
+                logger.error(f"Watchdog failed to restart pet: {e}")
+
+        # Check every 30 seconds
+        watchdog_stop_event.wait(30)
+
+
+def start_watchdog():
+    """Start the watchdog thread."""
+    global watchdog_thread, watchdog_stop_event
+
+    if watchdog_thread is not None and watchdog_thread.is_alive():
+        return  # Already running
+
+    watchdog_stop_event.clear()
+    watchdog_thread = threading.Thread(target=watchdog_monitor, daemon=True)
+    watchdog_thread.start()
+    logger.info("Watchdog thread started")
+
+
+def stop_watchdog():
+    """Stop the watchdog thread."""
+    global watchdog_thread, watchdog_stop_event
+
+    watchdog_stop_event.set()
+    if watchdog_thread is not None:
+        watchdog_thread.join(timeout=5)
+        watchdog_thread = None
+    logger.info("Watchdog thread stopped")
+
+
 def get_client() -> Pytanque:
     """Get or create Petanque client connection."""
     global petanque_client
@@ -113,10 +197,10 @@ def get_client() -> Pytanque:
             # TCP mode
             # Start petanque server if not already running
             start_petanque_server(tcp_host, tcp_port)
-            
+
             # Wait a bit more for the server to be fully ready
             time.sleep(1)
-            
+
             petanque_client = Pytanque(tcp_host, tcp_port)
             petanque_client.connect()
             logger.info(f"Connected to Petanque server at {tcp_host}:{tcp_port}")
@@ -125,6 +209,15 @@ def get_client() -> Pytanque:
             petanque_client = Pytanque(stdio=True)
             petanque_client.connect()
             logger.info("Connected to Petanque using stdio mode")
+
+        # Start watchdog after connecting
+        start_watchdog()
+
+    # Health check before returning
+    if not check_pet_health():
+        logger.warning("Pet process unhealthy, restarting...")
+        return restart_pet_client()
+
     return petanque_client
 
 
@@ -179,7 +272,12 @@ async def handle_list_tools() -> List[types.Tool]:
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Optional timeout in seconds for command execution",
+                        "description": "Optional timeout in seconds for Rocq command execution (adds Timeout prefix to command). Default: 60s.",
+                        "default": None,
+                    },
+                    "read_timeout": {
+                        "type": "integer",
+                        "description": "Hard timeout in seconds for waiting for pet process response. If pet doesn't respond within this time, it will be killed and restarted. Default: 120s. Use higher values for heavy tactics like hammer.",
                         "default": None,
                     },
                 },
@@ -332,7 +430,9 @@ async def handle_call_tool(
         elif name == "rocq_run_tactic":
             session_id = arguments["session_id"]
             command = arguments["command"]
-            timeout = arguments.get("timeout")
+            # Use provided timeout or default
+            timeout = arguments.get("timeout") or DEFAULT_ROCQ_TIMEOUT
+            read_timeout = arguments.get("read_timeout") or DEFAULT_READ_TIMEOUT
 
             if session_id not in current_states:
                 return [
@@ -344,7 +444,7 @@ async def handle_call_tool(
 
             # Get current state and run the command
             current_state = current_states[session_id]
-            new_state = client.run(current_state, command, timeout=timeout)
+            new_state = client.run(current_state, command, timeout=timeout, read_timeout=read_timeout)
 
             # Update stored state
             current_states[session_id] = new_state
@@ -525,18 +625,40 @@ async def handle_call_tool(
     except PetanqueError as e:
         error_msg = f"Petanque error (code {e.code}): {e.message}"
         logger.error(error_msg)
+
+        # Check if this was a timeout - provide helpful guidance
+        if "timed out" in e.message.lower() or "killed" in e.message.lower():
+            error_msg += "\n\nNote: The pet process was killed due to timeout. "
+            error_msg += "This usually happens with heavy tactics like native_compute, vm_compute, or hammer on large goals. "
+            error_msg += "Consider: (1) using simpler tactics, (2) adding intermediate lemmas, or (3) increasing read_timeout parameter."
+            # Try to restart the client for future requests
+            try:
+                restart_pet_client()
+                error_msg += "\n\nThe pet process has been restarted. You'll need to start a new proof session."
+            except Exception as restart_err:
+                error_msg += f"\n\nFailed to restart pet: {restart_err}"
+
         return [types.TextContent(type="text", text=f"Error: {error_msg}")]
 
     except Exception as e:
         error_msg = f"Unexpected error: {str(e)}"
         logger.error(error_msg, exc_info=True)
+
+        # Check if pet is still healthy after unexpected error
+        if not check_pet_health():
+            try:
+                restart_pet_client()
+                error_msg += "\n\nNote: Pet process was unhealthy and has been restarted. You'll need to start a new proof session."
+            except Exception as restart_err:
+                error_msg += f"\n\nFailed to restart pet: {restart_err}"
+
         return [types.TextContent(type="text", text=f"Error: {error_msg}")]
 
 
 async def main():
     """Main entry point for the server."""
-    global use_tcp_mode, tcp_host, tcp_port
-    
+    global use_tcp_mode, tcp_host, tcp_port, DEFAULT_READ_TIMEOUT, DEFAULT_ROCQ_TIMEOUT
+
     parser = argparse.ArgumentParser(description="Rocq MCP Server")
     parser.add_argument(
         "--host", default="127.0.0.1", help="Petanque server host for TCP mode (default: 127.0.0.1)"
@@ -547,9 +669,20 @@ async def main():
     parser.add_argument(
         "--tcp", action="store_true", help="Use TCP mode instead of default stdio mode"
     )
+    parser.add_argument(
+        "--default-read-timeout", type=int, default=120,
+        help="Default read timeout in seconds for pet process responses (default: 120)"
+    )
+    parser.add_argument(
+        "--default-rocq-timeout", type=int, default=60,
+        help="Default Rocq command timeout in seconds (default: 60)"
+    )
     args = parser.parse_args()
 
     # Set module-level configuration variables
+    DEFAULT_READ_TIMEOUT = args.default_read_timeout
+    DEFAULT_ROCQ_TIMEOUT = args.default_rocq_timeout
+
     if args.tcp:
         use_tcp_mode = True
         tcp_host = args.host
@@ -559,20 +692,32 @@ async def main():
         use_tcp_mode = False
         logger.info("Using stdio mode (default)")
 
-    # Run the MCP server
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="rocq-mcp",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    logger.info(f"Timeouts: read={DEFAULT_READ_TIMEOUT}s, rocq={DEFAULT_ROCQ_TIMEOUT}s")
+
+    try:
+        # Run the MCP server
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="rocq-mcp",
+                    server_version="0.1.1",  # Version bump for timeout support
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    finally:
+        # Cleanup on exit
+        logger.info("Server shutting down, cleaning up...")
+        stop_watchdog()
+        if petanque_client is not None:
+            try:
+                petanque_client.close()
+            except Exception as e:
+                logger.error(f"Error closing pet client: {e}")
 
 
 def cli():

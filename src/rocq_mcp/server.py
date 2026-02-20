@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 petanque_client: Optional[Pytanque] = None
 petanque_server_process: Optional[subprocess.Popen] = None  # Only used for TCP mode
 current_states: Dict[str, Any] = {}  # Store proof states by session ID
+workspace_set_for: Optional[str] = None  # Track which workspace dir has been set
 
 # Configuration
 use_tcp_mode: bool = False
@@ -103,6 +104,25 @@ def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
     except Exception as e:
         cleanup_petanque_process()
         raise RuntimeError(f"Failed to start pet-server: {e}")
+
+
+def find_workspace_root(file_path: str) -> Optional[str]:
+    """Find the nearest parent directory containing _CoqProject."""
+    p = Path(file_path).resolve()
+    for parent in [p.parent] + list(p.parent.parents):
+        if (parent / "_CoqProject").exists():
+            return str(parent)
+    return None
+
+
+def ensure_workspace(client: Pytanque, file_path: str) -> None:
+    """Set the Petanque workspace if needed for the given file."""
+    global workspace_set_for
+    workspace_dir = find_workspace_root(file_path)
+    if workspace_dir and workspace_dir != workspace_set_for:
+        logger.info(f"Setting workspace to {workspace_dir}")
+        client.set_workspace(debug=False, dir=workspace_dir)
+        workspace_set_for = workspace_dir
 
 
 def get_client() -> Pytanque:
@@ -306,6 +326,9 @@ async def handle_call_tool(
 
             # Resolve absolute path
             abs_path = str(Path(file_path).resolve())
+
+            # Ensure workspace is set for _CoqProject load path
+            ensure_workspace(client, abs_path)
 
             # Start the proof session
             state = client.start(abs_path, theorem_name, pre_commands)

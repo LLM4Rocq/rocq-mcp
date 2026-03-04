@@ -22,7 +22,7 @@ from mcp.server.models import InitializationOptions
 import mcp.server.stdio
 import mcp.types as types
 
-from pytanque import Pytanque, PetanqueError
+from pytanque import Pytanque, PetanqueError, PytanqueMode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -117,12 +117,12 @@ def get_client() -> Pytanque:
             # Wait a bit more for the server to be fully ready
             time.sleep(1)
             
-            petanque_client = Pytanque(tcp_host, tcp_port)
+            petanque_client = Pytanque(tcp_host, tcp_port, mode=PytanqueMode.SOCKET)
             petanque_client.connect()
             logger.info(f"Connected to Petanque server at {tcp_host}:{tcp_port}")
         else:
             # Stdio mode (default)
-            petanque_client = Pytanque(stdio=True)
+            petanque_client = Pytanque(mode=PytanqueMode.STDIO)
             petanque_client.connect()
             logger.info("Connected to Petanque using stdio mode")
     return petanque_client

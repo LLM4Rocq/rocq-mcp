@@ -157,6 +157,24 @@ class TestSplitPreamble:
         assert preamble == ""
         assert "Theorem" in body
 
+    def test_from_dotted_module_multiline(self):
+        """BUG-4: Dots in qualified module names must not end the statement.
+
+        'From Coq.Reals Require Import' has a dot in 'Coq.Reals', but the
+        statement is NOT finished until the line ending with a period.
+        """
+        source = (
+            "From Coq.Reals Require Import\n"
+            "  Reals\n"
+            "  Rpower.\n\n"
+            "Theorem t : True.\n"
+        )
+        preamble, body = _split_preamble(source)
+        assert "From Coq.Reals" in preamble
+        assert "Reals" in preamble
+        assert "Rpower." in preamble
+        assert "Theorem" in body
+
 
 # ---------------------------------------------------------------------------
 # _clean_problem_statement
@@ -619,10 +637,10 @@ class TestVerifyInputValidation:
 
     def test_timeout(self, workspace, timeout_proof):
         """Diverging proof inside verification template should timeout."""
-        problem = "Theorem loop : True.\nAdmitted.\n"
+        problem = "Theorem loop_thm : True.\nAdmitted.\n"
         result = rocq_verify(
             proof=timeout_proof,
-            problem_name="loop",
+            problem_name="loop_thm",
             problem_statement=problem,
             workspace=str(workspace),
             timeout=3,

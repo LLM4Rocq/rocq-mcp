@@ -38,7 +38,7 @@ def build_verification_source(
         f"{clean_statement}\n"
         f"Proof.\n"
         f"apply M.{problem_name} || eapply M.{problem_name}.\n"
-        f"all: first [ assumption | reflexivity | auto | lia | lra | simpl; auto ].\n"
+        f"all: first [ assumption | reflexivity | auto | simpl; auto ].\n"
         f"Qed.\n\n"
         f"Print Assumptions {problem_name}.\n"
     )
@@ -94,7 +94,7 @@ def _split_preamble(source: str) -> tuple[str, str]:
         # Inside a multi-line statement (continuation of a From ... Require Import)
         if in_statement:
             preamble.append(line)
-            if "." in stripped:
+            if stripped.endswith("."):
                 in_statement = False
             continue
 
@@ -111,15 +111,15 @@ def _split_preamble(source: str) -> tuple[str, str]:
         # Preamble keyword
         if any(stripped.startswith(kw) for kw in preamble_kw):
             preamble.append(line)
-            # Check if statement is complete (has a '.')
-            if "." not in stripped:
+            # Check if statement is complete (ends with '.')
+            if not stripped.endswith("."):
                 in_statement = True
             continue
 
         # Line starting with '#[' (attribute like #[global], #[export])
         if stripped.startswith("#["):
             preamble.append(line)
-            if "." not in stripped:
+            if not stripped.endswith("."):
                 in_statement = True
             continue
 

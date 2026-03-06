@@ -33,7 +33,7 @@ def workspace(tmp_path_factory):
 def simple_proof():
     """A known-good simple proof: n + 0 = n by induction."""
     return (
-        "Require Import Arith.\n\n"
+        "From Coq Require Import Arith.\n\n"
         "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
         "Proof.\n"
         "  intros n. induction n as [| n' IH].\n"
@@ -47,7 +47,7 @@ def simple_proof():
 def simple_problem_statement():
     """The original problem statement for add_0_r (with Admitted)."""
     return (
-        "Require Import Arith.\n\n"
+        "From Coq Require Import Arith.\n\n"
         "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
         "Admitted.\n"
     )
@@ -57,7 +57,7 @@ def simple_problem_statement():
 def classical_proof():
     """A proof using classical logic (standard axiom: classic)."""
     return (
-        "Require Import Classical.\n\n"
+        "From Coq Require Import Classical.\n\n"
         "Theorem lem_example : forall P : Prop, P \\/ ~P.\n"
         "Proof.\n"
         "  intro P. apply classic.\n"
@@ -69,7 +69,7 @@ def classical_proof():
 def classical_problem():
     """Problem statement for the classical logic proof."""
     return (
-        "Require Import Classical.\n\n"
+        "From Coq Require Import Classical.\n\n"
         "Theorem lem_example : forall P : Prop, P \\/ ~P.\n"
         "Admitted.\n"
     )
@@ -79,7 +79,7 @@ def classical_problem():
 def cheating_proof():
     """A proof that redefines nat as bool to cheat."""
     return (
-        "Require Import Arith.\n\n"
+        "From Coq Require Import Arith.\n\n"
         "Definition nat := bool.\n"
         "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
         "Proof.\n"
@@ -110,7 +110,7 @@ def axiom_spoofing_proof():
 def admitted_proof():
     """A proof with Admitted inside (helper lemma admitted, not fully proved)."""
     return (
-        "Require Import Arith.\n\n"
+        "From Coq Require Import Arith.\n\n"
         "Lemma helper : forall n, n = n. Admitted.\n\n"
         "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
         "Proof.\n"
@@ -121,11 +121,17 @@ def admitted_proof():
 
 @pytest.fixture
 def timeout_proof():
-    """A proof that diverges (repeat idtac never terminates)."""
+    """A proof that loops forever, causing subprocess timeout.
+
+    Uses a recursive Ltac that truly diverges. The test must use a short
+    subprocess timeout (e.g. 3s) to trigger TimeoutExpired.
+    """
     return (
-        "Theorem loop : True.\n"
+        "Ltac loop := idtac; loop.\n"
+        "Theorem loop_thm : True.\n"
         "Proof.\n"
-        "  repeat idtac.\n"
+        "  loop.\n"
+        "Qed.\n"
     )
 
 
@@ -133,7 +139,7 @@ def timeout_proof():
 def braces_proof():
     """A proof using Rocq braces { } for subgoal focusing."""
     return (
-        "Require Import Arith.\n\n"
+        "From Coq Require Import Arith.\n\n"
         "Theorem add_comm_example : forall n m : nat, n + m = m + n.\n"
         "Proof.\n"
         "  intros n m.\n"

@@ -387,11 +387,15 @@ def _try_close_pet(pet: Any) -> None:
 
 
 def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
-    """Kill pet and set to None so next call respawns."""
-    pet = lifespan_state.get("pet_client")
-    if pet:
-        _kill_pet(pet)
-    lifespan_state["pet_client"] = None
+    """Kill pet and set to None so next call respawns.
+
+    Acquires _pet_lock to avoid racing with another thread using the client.
+    """
+    with _pet_lock:
+        pet = lifespan_state.get("pet_client")
+        if pet:
+            _kill_pet(pet)
+        lifespan_state["pet_client"] = None
 
 
 # ---------------------------------------------------------------------------

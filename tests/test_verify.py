@@ -606,6 +606,56 @@ class TestVerifyRejection:
         )
         assert result["verified"] is False
 
+    def test_end_module_escape(self, workspace):
+        """Proof containing 'End M.' to try to escape the module sandbox.
+
+        The proof tries to close Module M early, then declare an axiom at
+        top level. Rocq should reject this with a compilation error, which
+        is the safe outcome (verified=False).
+        """
+        escape_proof = (
+            "Theorem t : True.\n"
+            "Proof. exact I. Qed.\n"
+            "End M.\n"
+            "Axiom cheat : False.\n"
+            "Module M.\n"
+            "Theorem t2 : False. Proof. exact cheat. Qed.\n"
+        )
+        result = rocq_verify(
+            proof=escape_proof,
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.\n",
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
+    def test_module_m_in_problem_statement(self, workspace):
+        """Problem statement containing 'Module M.' must not break template.
+
+        A crafted problem_statement could try to reopen Module M after
+        End M. Rocq should reject this with a compilation error.
+        """
+        proof = (
+            "Theorem t : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        malicious_statement = (
+            "Theorem t : True.\n"
+            "Admitted.\n"
+            "Module M.\n"
+            "Axiom cheat : False.\n"
+            "End M.\n"
+        )
+        result = rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=malicious_statement,
+            workspace=str(workspace),
+        )
+        # Should fail: either the module structure is invalid, or the
+        # extra Module M. causes a redefinition error
+        assert result["verified"] is False
+
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 class TestVerifyInputValidation:

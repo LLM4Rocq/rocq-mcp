@@ -337,8 +337,11 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
         if pet.process:
             try:
                 os.setpgid(pet.process.pid, pet.process.pid)
+                pet._own_pgrp = True
             except OSError:
-                pass
+                pet._own_pgrp = False
+        else:
+            pet._own_pgrp = False
         lifespan_state["pet_client"] = pet
     return pet
 
@@ -353,18 +356,30 @@ def _pet_alive(pet: Any) -> bool:
 
 
 def _kill_pet(pet: Any) -> None:
-    """Kill pet and its entire process group."""
+    """Kill pet and its entire process group.
+
+    If the pet has its own process group (_own_pgrp=True), uses os.killpg
+    to kill the whole group (pet + coq-lsp). Otherwise falls back to
+    process.terminate()/kill() to avoid killing our own process group.
+    """
     if pet is None or pet.process is None:
         return
     try:
-        pgid = os.getpgid(pet.process.pid)
-        # Try graceful SIGTERM first
-        os.killpg(pgid, signal.SIGTERM)
+        if getattr(pet, "_own_pgrp", False):
+            # Safe: pet has its own process group
+            pgid = os.getpgid(pet.process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            # Fallback: only kill the direct child
+            pet.process.terminate()
         try:
             pet.process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            # Force kill
-            os.killpg(pgid, signal.SIGKILL)
+            if getattr(pet, "_own_pgrp", False):
+                pgid = os.getpgid(pet.process.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                pet.process.kill()
             pet.process.wait(timeout=3)
     except (OSError, ChildProcessError):
         # Process already dead or group doesn't exist

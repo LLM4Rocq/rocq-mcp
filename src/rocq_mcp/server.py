@@ -404,18 +404,86 @@ def _try_close_pet(pet: Any) -> None:
 def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
     """Kill pet and set to None so next call respawns.
 
-    Acquires _pet_lock to avoid racing with another thread using the client.
+    Does NOT acquire _pet_lock — this is intentional. After a timeout,
+    an orphaned thread may still hold the lock. The OS-level kill is safe
+    to call without the lock (it's a signal, not a protocol operation).
+    The next _ensure_pet call (under _pet_lock) will see the dead process
+    and respawn.
     """
-    with _pet_lock:
-        pet = lifespan_state.get("pet_client")
-        if pet:
-            _kill_pet(pet)
-        lifespan_state["pet_client"] = None
+    pet = lifespan_state.get("pet_client")
+    if pet:
+        _kill_pet(pet)
+    lifespan_state["pet_client"] = None
 
 
 # ---------------------------------------------------------------------------
 # Tool: rocq_query (Phase 1)
 # ---------------------------------------------------------------------------
+
+
+_MAX_QUERY_OUTPUT = 8000
+
+
+async def run_query(
+    command: str,
+    preamble: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_query (testable without FastMCP Context)."""
+    from pytanque import PetanqueError
+
+    timeout: float = lifespan_state["pet_timeout"]
+
+    def _run_query() -> list[tuple[int, str]]:
+        with _pet_lock:
+            pet = _ensure_pet(lifespan_state)
+            ws = str(Path(workspace).resolve())
+            pet.set_workspace(debug=False, dir=ws)
+
+            preamble_text = preamble.strip()
+            dummy_path = Path(ws) / "_rocq_mcp_query.v"
+            dummy_source = (
+                f"{preamble_text}\n"
+                "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
+            )
+            dummy_path.write_text(dummy_source)
+            try:
+                state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
+
+                cmd = command.strip()
+                if not cmd.endswith("."):
+                    cmd += "."
+                state = pet.run(state, cmd)
+                feedback = state.feedback or []
+                return [(lvl, msg) for lvl, msg in feedback]
+            finally:
+                dummy_path.unlink(missing_ok=True)
+
+    try:
+        feedback = await asyncio.wait_for(
+            asyncio.to_thread(_run_query),
+            timeout=timeout,
+        )
+        output = "\n".join(msg for _, msg in feedback)
+        if len(output) > _MAX_QUERY_OUTPUT:
+            output = (
+                output[:_MAX_QUERY_OUTPUT]
+                + f"\n... (truncated, {len(output)} total chars)"
+            )
+        return {"success": True, "output": output or "(no output)"}
+    except asyncio.TimeoutError:
+        _invalidate_pet(lifespan_state)
+        return {"success": False, "error": f"Query timed out after {timeout}s."}
+    except PetanqueError as e:
+        return {"success": False, "error": e.message}
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "error": "pet binary not found on PATH. Install coq-lsp.",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {e}"}
 
 
 @mcp.tool
@@ -441,66 +509,12 @@ async def rocq_query(
                   (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
     """
-    from pytanque import PetanqueError
-
-    workspace = workspace or ROCQ_WORKSPACE
-    lifespan_state: dict[str, Any] = ctx.lifespan_context
-    timeout: float = lifespan_state["pet_timeout"]
-
-    MAX_OUTPUT = 8000
-
-    def _run_query() -> list[tuple[int, str]]:
-        with _pet_lock:
-            pet = _ensure_pet(lifespan_state)
-            ws = str(Path(workspace).resolve())
-            pet.set_workspace(debug=False, dir=ws)
-
-            # Create a temporary file for query context.
-            # pet.start() requires a real .v file with a named theorem.
-            preamble_text = preamble.strip()
-            dummy_path = Path(ws) / "_rocq_mcp_query.v"
-            dummy_source = (
-                f"{preamble_text}\n"
-                "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
-            )
-            dummy_path.write_text(dummy_source)
-            try:
-                state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
-
-                # Run the query
-                cmd = command.strip()
-                if not cmd.endswith("."):
-                    cmd += "."
-                state = pet.run(state, cmd)
-                feedback = state.feedback or []
-                return [(lvl, msg) for lvl, msg in feedback]
-            finally:
-                dummy_path.unlink(missing_ok=True)
-
-    try:
-        feedback = await asyncio.wait_for(
-            asyncio.to_thread(_run_query),
-            timeout=timeout,
-        )
-        output = "\n".join(msg for _, msg in feedback)
-        if len(output) > MAX_OUTPUT:
-            output = (
-                output[:MAX_OUTPUT]
-                + f"\n... (truncated, {len(output)} total chars)"
-            )
-        return {"success": True, "output": output or "(no output)"}
-    except asyncio.TimeoutError:
-        _invalidate_pet(lifespan_state)
-        return {"success": False, "error": f"Query timed out after {timeout}s."}
-    except PetanqueError as e:
-        return {"success": False, "error": e.message}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "error": "pet binary not found on PATH. Install coq-lsp.",
-        }
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {e}"}
+    return await run_query(
+        command=command,
+        preamble=preamble,
+        workspace=workspace or ROCQ_WORKSPACE,
+        lifespan_state=ctx.lifespan_context,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -529,36 +543,16 @@ def _get_step_semaphore() -> asyncio.Semaphore:
     return _step_semaphore
 
 
-@mcp.tool
-async def rocq_step(
+async def run_step(
     tactic: str,
-    file: str = "",
-    theorem: str = "",
-    workspace: str = "",
-    ctx: Context = None,
+    file: str,
+    theorem: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
-    """Execute a tactic in an interactive proof session and return goals.
-
-    On first call, provide file and theorem to start a new session.
-    Subsequent calls only need the tactic.
-
-    If the session is lost (timeout, crash), you'll get an error.
-    Re-send file + theorem to start a new session, then replay
-    your tactics from your conversation history.
-
-    Send one tactic per call. Do NOT send Qed -- the proof is complete
-    when proof_finished is True.
-
-    Args:
-        tactic: The tactic to execute (e.g., "intros", "simpl", "lia").
-        file: Path to the .v file (relative to workspace). Required for first call.
-        theorem: Name of the theorem to prove. Required for first call.
-        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
-    """
+    """Core implementation of rocq_step (testable without FastMCP Context)."""
     from pytanque import PetanqueError
 
-    workspace = workspace or ROCQ_WORKSPACE
-    lifespan_state: dict[str, Any] = ctx.lifespan_context
     timeout: float = lifespan_state["pet_timeout"]
     sem = _get_step_semaphore()
 
@@ -640,6 +634,41 @@ async def rocq_step(
             }
         except Exception as e:
             return {"success": False, "error": f"Unexpected error: {e}"}
+
+
+@mcp.tool
+async def rocq_step(
+    tactic: str,
+    file: str = "",
+    theorem: str = "",
+    workspace: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Execute a tactic in an interactive proof session and return goals.
+
+    On first call, provide file and theorem to start a new session.
+    Subsequent calls only need the tactic.
+
+    If the session is lost (timeout, crash), you'll get an error.
+    Re-send file + theorem to start a new session, then replay
+    your tactics from your conversation history.
+
+    Send one tactic per call. Do NOT send Qed -- the proof is complete
+    when proof_finished is True.
+
+    Args:
+        tactic: The tactic to execute (e.g., "intros", "simpl", "lia").
+        file: Path to the .v file (relative to workspace). Required for first call.
+        theorem: Name of the theorem to prove. Required for first call.
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+    """
+    return await run_step(
+        tactic=tactic,
+        file=file,
+        theorem=theorem,
+        workspace=workspace or ROCQ_WORKSPACE,
+        lifespan_state=ctx.lifespan_context,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,12 @@
-"""Tests for the rocq_step tool (Phase 2, requires pet binary).
+"""Tests for rocq_step via the run_step function.
 
-These tests require the ``pet`` binary (from coq-lsp) to be available on PATH.
-Phase 2 tests are placeholders until a real FastMCP test client is used for
-Context injection.
+These tests call run_step directly with a lifespan_state dict,
+bypassing FastMCP Context injection.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +16,40 @@ pytestmark = pytest.mark.skipif(
     not PET_AVAILABLE, reason="pet not available"
 )
 
-PLACEHOLDER = pytest.mark.skip(reason="Phase 2 placeholder: requires FastMCP test client for Context injection")
+
+def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
+    return {
+        "pet_client": None,
+        "pet_timeout": pet_timeout,
+    }
+
+
+@pytest.fixture(autouse=True)
+def reset_session():
+    """Reset the module-level _session dict before each test."""
+    from rocq_mcp.server import _session
+    _session.update({"state": None, "file": None, "theorem": None, "history": []})
+    yield
+    _session.update({"state": None, "file": None, "theorem": None, "history": []})
+
+
+@pytest.fixture
+def lifespan_state():
+    from rocq_mcp.server import _invalidate_pet
+    state = _make_lifespan_state()
+    yield state
+    _invalidate_pet(state)
+
+
+@pytest.fixture
+def step_file(workspace):
+    """Create a .v file with a simple theorem for interactive proving."""
+    vfile = workspace / "step_test.v"
+    vfile.write_text(
+        "Theorem t : forall n : nat, n = n.\n"
+        "Proof. intros. reflexivity. Qed.\n"
+    )
+    return str(vfile)
 
 
 # ---------------------------------------------------------------------------
@@ -25,30 +59,47 @@ PLACEHOLDER = pytest.mark.skip(reason="Phase 2 placeholder: requires FastMCP tes
 class TestStepBasicWorkflow:
     """Core step-by-step proving workflow."""
 
-    @PLACEHOLDER
     @pytest.mark.asyncio
-    async def test_simple_proof_complete(self):
-        """Step through intros -> simpl -> reflexivity and reach proof_finished."""
-        # result1 = await rocq_step(tactic="intros n", file="test.v", theorem="add_0_r", ...)
-        # assert result1["success"] is True
-        # assert not result1["proof_finished"]
-        # result3 = await rocq_step(tactic="reflexivity", ...)
-        # assert result3["proof_finished"] is True
+    async def test_simple_proof_complete(self, workspace, lifespan_state, step_file):
+        """Step through intros -> reflexivity and reach proof_finished."""
+        from rocq_mcp.server import run_step
 
-    @PLACEHOLDER
-    @pytest.mark.asyncio
-    async def test_auto_session_start(self):
-        """First call with file+theorem starts session automatically."""
-        # result = await rocq_step(tactic="intros", file="test.v", theorem="t", ...)
-        # assert result["success"] is True
+        r1 = await run_step(
+            tactic="intros",
+            file=step_file,
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r1["success"] is True
+        assert r1["proof_finished"] is False
+        assert "n" in r1["goals"]  # should see hypothesis n : nat
 
-    @PLACEHOLDER
+        r2 = await run_step(
+            tactic="reflexivity",
+            file="",
+            theorem="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r2["success"] is True
+        assert r2["proof_finished"] is True
+
     @pytest.mark.asyncio
-    async def test_goals_returned(self):
-        """Each step returns the current goal state."""
-        # result = await rocq_step(tactic="intros n", file="test.v", theorem="t", ...)
-        # assert result["success"] is True
-        # assert len(result["goals"]) > 0
+    async def test_goals_returned(self, workspace, lifespan_state, step_file):
+        """First step returns the current goal state."""
+        from rocq_mcp.server import run_step
+
+        r = await run_step(
+            tactic="intros n",
+            file=step_file,
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r["success"] is True
+        assert "n = n" in r["goals"]
+        assert r["step"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -58,64 +109,173 @@ class TestStepBasicWorkflow:
 class TestStepEdgeCases:
     """Edge cases for interactive proving."""
 
-    @PLACEHOLDER
     @pytest.mark.asyncio
-    async def test_wrong_tactic(self):
+    async def test_wrong_tactic(self, workspace, lifespan_state, step_file):
         """Invalid tactic returns error but does not corrupt session state."""
-        # result2 = await rocq_step(tactic="omega_nonexistent", ...)
-        # assert result2["success"] is False
+        from rocq_mcp.server import run_step
 
-    @PLACEHOLDER
-    @pytest.mark.asyncio
-    async def test_new_session_replaces_old(self):
-        """Sending file+theorem starts a fresh session, discarding the old one."""
+        # Start session
+        r1 = await run_step(
+            tactic="intros n",
+            file=step_file,
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r1["success"] is True
 
-    @PLACEHOLDER
+        # Invalid tactic
+        r2 = await run_step(
+            tactic="omega_nonexistent",
+            file="",
+            theorem="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r2["success"] is False
+
+        # Session should still work with valid tactic
+        r3 = await run_step(
+            tactic="reflexivity",
+            file="",
+            theorem="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r3["success"] is True
+        assert r3["proof_finished"] is True
+
     @pytest.mark.asyncio
-    async def test_no_session_error(self):
+    async def test_no_session_error(self, workspace, lifespan_state):
         """Calling step without file+theorem when no session exists gives error."""
-        # result = await rocq_step(tactic="intros", ...)
-        # assert result["success"] is False
-        # assert "no active session" in result["error"].lower()
+        from rocq_mcp.server import run_step
 
-    @PLACEHOLDER
+        r = await run_step(
+            tactic="intros",
+            file="",
+            theorem="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r["success"] is False
+        assert "no active session" in r["error"].lower()
+
     @pytest.mark.asyncio
-    async def test_auto_dot_append(self):
+    async def test_auto_dot_append(self, workspace, lifespan_state, step_file):
         """Tactic without trailing dot gets one appended automatically."""
-        # result = await rocq_step(tactic="intros n", file="test.v", theorem="t", ...)
-        # assert result["success"] is True
+        from rocq_mcp.server import run_step
+
+        r = await run_step(
+            tactic="intros n",
+            file=step_file,
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_new_session_replaces_old(self, workspace, lifespan_state):
+        """Sending file+theorem starts a fresh session, discarding the old one."""
+        from rocq_mcp.server import run_step
+
+        file1 = workspace / "a.v"
+        file1.write_text("Theorem thm_a : True. Proof. exact I. Qed.\n")
+        file2 = workspace / "b.v"
+        file2.write_text("Theorem thm_b : 1 = 1. Proof. reflexivity. Qed.\n")
+
+        r1 = await run_step(
+            tactic="exact I",
+            file=str(file1),
+            theorem="thm_a",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r1["success"] is True
+
+        # Start new session — should reset
+        r2 = await run_step(
+            tactic="reflexivity",
+            file=str(file2),
+            theorem="thm_b",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert r2["success"] is True
+        assert r2["step"] == 1  # reset to 1, not 2
 
 
 # ---------------------------------------------------------------------------
-# Timeout and recovery
+# Timeout
 # ---------------------------------------------------------------------------
 
 class TestStepTimeout:
     """Timeout handling and session recovery after timeout."""
 
-    @PLACEHOLDER
     @pytest.mark.asyncio
-    async def test_timeout_kills_session(self):
-        """Non-terminating tactic -> timeout -> session lost."""
-        # assert result["success"] is False
-        # assert "timed out" in result["error"].lower()
+    async def test_timeout_kills_session(self, workspace):
+        """A very short timeout triggers a timeout error."""
+        from rocq_mcp.server import run_step, _invalidate_pet
 
-    @PLACEHOLDER
+        vfile = workspace / "timeout_test.v"
+        vfile.write_text(
+            "Ltac loop := idtac; loop.\n"
+            "Theorem t : True. Proof. loop. Qed.\n"
+        )
+
+        state = _make_lifespan_state(pet_timeout=1.0)
+        try:
+            r = await run_step(
+                tactic="loop",
+                file=str(vfile),
+                theorem="t",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r["success"] is False
+            assert "timed out" in r["error"].lower()
+        finally:
+            _invalidate_pet(state)
+
     @pytest.mark.asyncio
-    async def test_no_deadlock_after_timeout(self):
-        """After timeout, subsequent calls must NOT deadlock.
+    async def test_session_recovery_after_timeout(self, workspace):
+        """After timeout, can start a new session."""
+        from rocq_mcp.server import run_step, _invalidate_pet
 
-        This tests blocker B3: the asyncio.Semaphore must be released even
-        when the background thread is orphaned by asyncio.wait_for timeout.
-        """
+        vfile_bad = workspace / "timeout_test2.v"
+        vfile_bad.write_text(
+            "Ltac loop := idtac; loop.\n"
+            "Theorem t : True. Proof. loop. Qed.\n"
+        )
+        vfile_good = workspace / "good.v"
+        vfile_good.write_text(
+            "Theorem t2 : True. Proof. exact I. Qed.\n"
+        )
 
-    @PLACEHOLDER
-    @pytest.mark.asyncio
-    async def test_session_recovery_after_timeout(self):
-        """After timeout kills session, can start new session with file+theorem."""
-        # result = await rocq_step(
-        #     tactic="intros",
-        #     file="test.v", theorem="add_0_r",
-        #     ...
-        # )
-        # assert result["success"] is True
+        state = _make_lifespan_state(pet_timeout=1.0)
+        try:
+            # Trigger timeout
+            r1 = await run_step(
+                tactic="loop",
+                file=str(vfile_bad),
+                theorem="t",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r1["success"] is False
+
+            # Increase timeout for recovery
+            state["pet_timeout"] = 30.0
+
+            # Start new session — should work
+            r2 = await run_step(
+                tactic="exact I",
+                file=str(vfile_good),
+                theorem="t2",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r2["success"] is True
+            assert r2["proof_finished"] is True
+        finally:
+            _invalidate_pet(state)

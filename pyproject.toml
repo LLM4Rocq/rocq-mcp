@@ -9,7 +9,7 @@ dependencies = [
 
 [project.optional-dependencies]
 interactive = [
-    "pytanque",
+    "pytanque @ git+https://github.com/LLM4Rocq/pytanque",
 ]
 dev = [
     "pytest>=8.0",

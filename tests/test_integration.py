@@ -174,21 +174,101 @@ class TestCompileVerifyWorkflow:
 class TestQueryStepWorkflow:
     """End-to-end: query to search, then step to apply found lemma."""
 
-    @pytest.mark.asyncio
-    async def test_query_then_step(self):
-        """Use query to search for a lemma, then step to apply it."""
-        # Phase 1-2 placeholder: requires FastMCP test client for Context injection
-        # 1. query: Search (nat -> nat -> nat).
-        # 2. step: intros, apply Nat.add
-        pass
+    @pytest.fixture(autouse=True)
+    def _reset_session(self):
+        from rocq_mcp.server import _session
+        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+        yield
+        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+
+    @staticmethod
+    def _make_state(timeout: float = 30.0) -> dict:
+        return {"pet_client": None, "pet_timeout": timeout}
 
     @pytest.mark.asyncio
-    async def test_pet_respawns_after_kill(self):
-        """Kill pet via timeout, verify next call respawns it."""
-        # 1. Trigger timeout in rocq_step (repeat idtac)
-        # 2. Make a rocq_query call -- pet should respawn
-        # assert result["success"] is True
-        pass
+    async def test_query_then_step(self, workspace):
+        """Use query to find a lemma, then step through a proof using it."""
+        from rocq_mcp.server import run_query, run_step, _invalidate_pet
+
+        state = self._make_state()
+        try:
+            # Query: search for addition lemmas
+            qr = await run_query(
+                command="Search (nat -> nat -> nat).",
+                preamble="",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert qr["success"] is True
+            assert "Nat.add" in qr["output"]
+
+            # Step: prove a simple theorem using what we found
+            vfile = workspace / "query_step_test.v"
+            vfile.write_text(
+                "Theorem t : forall n : nat, n = n.\n"
+                "Proof. intros. reflexivity. Qed.\n"
+            )
+
+            r1 = await run_step(
+                tactic="intros",
+                file=str(vfile),
+                theorem="t",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r1["success"] is True
+            assert r1["proof_finished"] is False
+
+            r2 = await run_step(
+                tactic="reflexivity",
+                file="",
+                theorem="",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r2["success"] is True
+            assert r2["proof_finished"] is True
+        finally:
+            _invalidate_pet(state)
+
+    @pytest.mark.asyncio
+    async def test_pet_respawns_after_kill(self, workspace):
+        """Kill pet via timeout, verify next query call respawns it."""
+        from rocq_mcp.server import run_step, run_query, _invalidate_pet
+
+        vfile = workspace / "respawn_test.v"
+        vfile.write_text(
+            "Ltac loop := idtac; loop.\n"
+            "Theorem t : True. Proof. loop. Qed.\n"
+        )
+
+        state = self._make_state(timeout=1.0)
+        try:
+            # Trigger timeout — kills pet
+            r1 = await run_step(
+                tactic="loop",
+                file=str(vfile),
+                theorem="t",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert r1["success"] is False
+            assert "timed out" in r1["error"].lower()
+
+            # Increase timeout for recovery
+            state["pet_timeout"] = 30.0
+
+            # Query should respawn pet and work
+            qr = await run_query(
+                command="Check Nat.add.",
+                preamble="",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert qr["success"] is True
+            assert "nat" in qr["output"].lower()
+        finally:
+            _invalidate_pet(state)
 
 
 # =========================================================================

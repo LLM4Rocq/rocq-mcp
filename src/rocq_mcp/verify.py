@@ -81,13 +81,13 @@ def build_verification_source(
 
 
 def _clean_problem_statement(problem_statement: str) -> str:
-    """Strip trailing Admitted./Abort./admit. from the problem statement.
+    """Strip trailing Admitted./Abort./admit./give_up. from the problem statement.
 
     Only strips at end of text (not in the middle). Handles optional
     whitespace before the dot.
     """
     return re.sub(
-        r"\s*(Admitted|Abort|admit)\s*\.\s*$",
+        r"\s*(Admitted|Abort|admit|give_up)\s*\.\s*$",
         "",
         problem_statement,
     ).strip()

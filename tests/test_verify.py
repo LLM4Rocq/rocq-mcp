@@ -57,6 +57,11 @@ class TestCleanProblemStatement:
         cleaned = _clean_problem_statement("Theorem t : True.\nadmit.")
         assert "admit" not in cleaned
 
+    def test_trailing_give_up(self):
+        cleaned = _clean_problem_statement("Theorem t : True.\ngive_up.")
+        assert "give_up" not in cleaned
+        assert "Theorem t : True." in cleaned
+
     def test_admitted_with_spaces(self):
         """Admitted with optional spaces before/after the dot."""
         cleaned = _clean_problem_statement("Theorem t : True.\n  Admitted  .")

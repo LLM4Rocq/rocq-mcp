@@ -21,6 +21,22 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\bDrop\b"),
         "Forbidden command 'Drop' (escapes to OCaml toplevel)",
     ),
+    (
+        re.compile(r"\bSeparate Extraction\b"),
+        "Forbidden command 'Separate Extraction' (writes .ml/.mli files)",
+    ),
+    (
+        re.compile(r"\bCd\b"),
+        "Forbidden command 'Cd' (changes working directory)",
+    ),
+    (
+        re.compile(r'\bLoad "'),
+        "Forbidden command 'Load' (loads and executes external .v files)",
+    ),
+    (
+        re.compile(r"\bDeclare ML Module\b"),
+        "Forbidden command 'Declare ML Module' (loads arbitrary OCaml plugins)",
+    ),
 ]
 
 
@@ -65,6 +81,10 @@ def build_verification_source(
     if forbidden:
         raise ValueError(forbidden)
 
+    forbidden = _check_forbidden_commands(problem_statement)
+    if forbidden:
+        raise ValueError(forbidden)
+
     clean_statement = _clean_problem_statement(problem_statement)
 
     return (
@@ -86,11 +106,13 @@ def _clean_problem_statement(problem_statement: str) -> str:
     Only strips at end of text (not in the middle). Handles optional
     whitespace before the dot.
     """
-    return re.sub(
+    result = re.sub(
         r"\s*(Admitted|Abort|admit|give_up)\s*\.\s*$",
         "",
         problem_statement,
-    ).strip()
+    )
+    result = re.sub(r"\s*Proof\s*\.\s*$", "", result)
+    return result.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -239,10 +261,9 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
     current_type_parts: list[str] = []
 
     for line in lines:
-        if "Closed under the global context" in line:
-            return []
-
         stripped = line.strip()
+        if stripped == "Closed under the global context":
+            return []
         if not stripped or stripped == "Axioms:" or stripped.startswith("Axioms:"):
             continue
 

@@ -86,6 +86,12 @@ class TestCleanProblemStatement:
     def test_empty_string(self):
         assert _clean_problem_statement("") == ""
 
+    def test_proof_admitted_no_double_proof(self):
+        """Stripping 'Proof.\\nAdmitted.' must also strip trailing Proof."""
+        cleaned = _clean_problem_statement("Theorem t : True.\nProof.\nAdmitted.")
+        assert not cleaned.endswith("Proof.")
+        assert "Theorem t : True." in cleaned
+
 
 # ---------------------------------------------------------------------------
 # Axiom classification
@@ -229,6 +235,13 @@ class TestParseAssumptions:
         """Output that contains both noise and 'Closed under...'."""
         stdout = "add_0_r : \nClosed under the global context\n"
         assert _parse_assumptions_raw(stdout) == []
+
+    def test_closed_substring_in_type_not_fooled(self):
+        """An axiom whose type contains the 'Closed under...' string must NOT be treated as closed."""
+        stdout = 'cheat : let _ := "Closed under the global context" in False\n'
+        result = _parse_assumptions_raw(stdout)
+        assert len(result) == 1
+        assert result[0][0] == "cheat"
 
     # --- parse_and_classify_assumptions (higher-level) ---
 
@@ -414,6 +427,47 @@ class TestVerifyInputSanitization:
                 proof="Drop.\nTheorem t : True. Proof. exact I. Qed.",
                 problem_name="t",
                 problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_separate_extraction_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Separate Extraction nat.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_cd_in_proof_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Cd "/tmp".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_load_in_proof_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Load "/tmp/evil".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_declare_ml_module_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Declare ML Module "evil".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_forbidden_in_problem_statement(self):
+        """Forbidden commands in problem_statement must also be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement='Redirect "/tmp/evil" Print nat.\nTheorem t : True.\nAdmitted.',
             )
 
 

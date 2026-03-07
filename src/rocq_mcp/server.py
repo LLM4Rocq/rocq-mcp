@@ -16,6 +16,7 @@ from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 
 from rocq_mcp.verify import (
+    _check_forbidden_commands,
     build_verification_source,
     parse_and_classify_assumptions,
     verification_hint,
@@ -100,45 +101,42 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
     """
     ws = Path(workspace).resolve()
     with tempfile.NamedTemporaryFile(
-        suffix=".v",
-        mode="w",
-        delete=False,
-        dir=str(ws),
+        suffix=".v", mode="w", delete=False, dir=str(ws)
     ) as f:
         f.write(source)
         f.flush()
         tmp_path = f.name
 
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [ROCQ_COQC_BINARY, "-Q", str(ws), "Test", tmp_path],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=str(ws),
             start_new_session=True,
         )
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "timed_out": False,
-        }
-    except subprocess.TimeoutExpired as e:
-        return {
-            "returncode": -1,
-            "stdout": (
-                (e.stdout or b"").decode("utf-8", errors="replace")
-                if isinstance(e.stdout, bytes)
-                else (e.stdout or "")
-            ),
-            "stderr": (
-                (e.stderr or b"").decode("utf-8", errors="replace")
-                if isinstance(e.stderr, bytes)
-                else (e.stderr or "")
-            ),
-            "timed_out": True,
-        }
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return {
+                "returncode": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "timed_out": False,
+            }
+        except subprocess.TimeoutExpired:
+            # Kill the entire process group (coqc + any children)
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            stdout, stderr = proc.communicate()
+            return {
+                "returncode": -1,
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "timed_out": True,
+            }
     except FileNotFoundError:
         return {
             "returncode": -1,
@@ -187,6 +185,10 @@ def rocq_compile(
             "success": False,
             "error": f"Source exceeds maximum size ({ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
+
+    forbidden = _check_forbidden_commands(source)
+    if forbidden:
+        return {"success": False, "error": forbidden}
 
     result = _run_coqc(source, workspace, timeout)
 
@@ -346,7 +348,12 @@ _pet_lock = threading.Lock()
 
 def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
     """Lazy-initialize pet subprocess. Must be called with _pet_lock held."""
-    from pytanque import Pytanque, PytanqueMode
+    try:
+        from pytanque import Pytanque, PytanqueMode
+    except ImportError:
+        raise ImportError(
+            "pytanque is not installed. Install with: pip install 'rocq-mcp[interactive]'"
+        )
 
     pet = lifespan_state.get("pet_client")
     if pet is None or not _pet_alive(pet):
@@ -410,6 +417,8 @@ def _kill_pet(pet: Any) -> None:
 
 def _try_close_pet(pet: Any) -> None:
     """Close pytanque's pipe file descriptors without killing."""
+    if pet.process is None:
+        return
     for stream in [pet.process.stdin, pet.process.stdout, pet.process.stderr]:
         try:
             if stream:
@@ -459,10 +468,21 @@ async def run_query(
             ),
         }
 
+    forbidden = _check_forbidden_commands(command)
+    if forbidden:
+        return {"success": False, "error": forbidden}
+    forbidden = _check_forbidden_commands(preamble)
+    if forbidden:
+        return {"success": False, "error": forbidden}
+
     timeout: float = lifespan_state["pet_timeout"]
 
+    _temp_files: list[str] = []
+
     def _run_query() -> list[tuple[int, str]]:
-        with _pet_lock:
+        if not _pet_lock.acquire(timeout=timeout):
+            raise TimeoutError("Could not acquire pet lock")
+        try:
             pet = _ensure_pet(lifespan_state)
             ws = str(Path(workspace).resolve())
             pet.set_workspace(debug=False, dir=ws)
@@ -481,6 +501,7 @@ async def run_query(
                 f.write(dummy_source)
                 f.flush()
                 dummy_path = Path(f.name)
+            _temp_files.append(str(dummy_path))
             try:
                 state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
 
@@ -492,6 +513,8 @@ async def run_query(
                 return [(lvl, msg) for lvl, msg in feedback]
             finally:
                 dummy_path.unlink(missing_ok=True)
+        finally:
+            _pet_lock.release()
 
     sem = _get_pet_semaphore()
     try:
@@ -509,6 +532,9 @@ async def run_query(
             return {"success": True, "output": output or "(no output)"}
     except asyncio.TimeoutError:
         _invalidate_pet(lifespan_state)
+        # Clean up any temp files left by the orphaned thread
+        for p in _temp_files:
+            Path(p).unlink(missing_ok=True)
         return {"success": False, "error": f"Query timed out after {timeout}s."}
     except PetanqueError as e:
         return {"success": False, "error": e.message}
@@ -605,7 +631,9 @@ async def run_step(
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            with _pet_lock:
+            if not _pet_lock.acquire(timeout=timeout):
+                raise TimeoutError("Could not acquire pet lock")
+            try:
                 pet = _ensure_pet(lifespan_state)
 
                 # Start new session if file+theorem provided
@@ -655,6 +683,8 @@ async def run_step(
                     "proof_finished": new_state.proof_finished,
                     "step": len(_session["history"]),
                 }
+            finally:
+                _pet_lock.release()
 
         try:
             result = await asyncio.wait_for(
@@ -705,6 +735,9 @@ async def rocq_step(
 
     Send one tactic per call. Do NOT send Qed -- the proof is complete
     when proof_finished is True.
+
+    This server supports one interactive session at a time (single-client
+    stdio model). Do not use with multi-client transports (HTTP/SSE).
 
     Args:
         tactic: The tactic to execute (e.g., "intros", "simpl", "lia").

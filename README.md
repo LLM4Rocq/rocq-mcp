@@ -41,7 +41,7 @@ The server exposes four MCP tools:
 | **`rocq_compile`** | Compile Rocq source code and return structured errors. Use this as the first step for any proof -- 81% of proofs succeed via direct compilation. |
 | **`rocq_verify`** | Verify that a proof actually proves the original statement. Uses a conservative `Module M.` template to catch type redefinition cheating, `Admitted`/`Abort`, custom axioms, and statement mismatches. Standard mathematical axioms (classical logic, Reals, etc.) are accepted. |
 | **`rocq_query`** | Run a Rocq query command (`Search`, `Check`, `Print`, `About`) and return results. Requires `pet`. Does not modify any proof state. |
-| **`rocq_step`** | Execute a tactic in an interactive proof session and return goals. Requires `pet`. Provide `file` and `theorem` on the first call to start a session; subsequent calls only need the tactic. |
+| **`rocq_step`** | Execute a tactic in an interactive proof session and return goals. Requires `pet`. Provide a `.v` file path and `theorem` name on the first call to start a session; subsequent calls only need the tactic. Unlike `rocq_compile`/`rocq_verify` which accept source code strings, this tool requires the proof to be written to a file first. |
 
 ## Environment Variables
 
@@ -53,6 +53,19 @@ The server exposes four MCP tools:
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for `rocq_query` and `rocq_step` |
 | `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
 | `ROCQ_MAX_SOURCE_SIZE` | `1000000` | Maximum source size in bytes |
+
+## Security Model
+
+The verification tool (`rocq_verify`) wraps the submitted proof inside a Rocq `Module M.` sandbox. This prevents:
+
+- **Type redefinition cheating** (e.g., redefining `nat` as `bool`)
+- **Axiom spoofing** (user-declared axioms get an `M.` prefix, rejected by the stdlib whitelist)
+- **`Admitted`/`Abort` usage** (caught by `Print Assumptions`)
+- **Module escape attempts** (Rocq prevents reopening `Module M`)
+
+**Important:** The `problem_statement` parameter is treated as a **trusted anchor**. The server verifies that the proof proves the given statement, but does NOT verify that the statement itself is the correct problem. Callers must ensure `problem_statement` comes from a trusted source (e.g., a file on disk), not from the LLM being evaluated.
+
+Proofs containing `Redirect`, `Extraction`, or `Drop` commands are rejected to prevent filesystem side effects.
 
 ## Running
 

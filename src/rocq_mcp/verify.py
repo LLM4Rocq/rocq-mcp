@@ -4,6 +4,37 @@ from __future__ import annotations
 
 import re
 
+# ---------------------------------------------------------------------------
+# Forbidden command check
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\bRedirect\b"),
+        "Forbidden command 'Redirect' (writes Rocq output to arbitrary files)",
+    ),
+    (
+        re.compile(r'\bExtraction\s+"'),
+        "Forbidden command 'Extraction \"...\"' (extracts code to files)",
+    ),
+    (
+        re.compile(r"\bDrop\b"),
+        "Forbidden command 'Drop' (escapes to OCaml toplevel)",
+    ),
+]
+
+
+def _check_forbidden_commands(source: str) -> str | None:
+    """Check for dangerous Rocq commands in the source text.
+
+    Returns an error message string if a forbidden command is found,
+    or None if the source is clean.
+    """
+    for pattern, message in _FORBIDDEN_PATTERNS:
+        if re.search(pattern, source):
+            return message
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Module M. template
@@ -21,19 +52,24 @@ def build_verification_source(
     """Build the Module M. verification source.
 
     The template:
-    1. Places the preamble (imports) at the top level
-    2. Wraps the proof body in Module M. ... End M.
-    3. Places the cleaned problem statement outside the module
-    4. Applies M.theorem_name to prove the original statement
-    5. Runs Print Assumptions to check for axioms/admits
+    1. Wraps the entire proof (including imports) in Module M. ... End M.
+    2. Places the cleaned problem statement (with its own imports) outside
+    3. Applies M.theorem_name to prove the original statement
+    4. Runs Print Assumptions to check for axioms/admits
+
+    Imports (Require/From) work inside modules in Rocq, so there is no need
+    to split the preamble from the body.  This follows the same approach as
+    the proof_checker reference implementation.
     """
-    preamble, body = _split_preamble(proof)
+    forbidden = _check_forbidden_commands(proof)
+    if forbidden:
+        raise ValueError(forbidden)
+
     clean_statement = _clean_problem_statement(problem_statement)
 
     return (
-        f"{preamble}\n\n"
         f"Module M.\n"
-        f"{body}\n"
+        f"{proof}\n"
         f"End M.\n\n"
         f"{clean_statement}\n"
         f"Proof.\n"
@@ -57,79 +93,6 @@ def _clean_problem_statement(problem_statement: str) -> str:
     ).strip()
 
 
-def _split_preamble(source: str) -> tuple[str, str]:
-    """Split source into (preamble, body).
-
-    Preamble = leading block of Require/Import/From/Set/Open/Notation/etc. lines,
-    including blank lines and comments within that block.
-
-    Handles multi-line statements by tracking whether we're inside an
-    unfinished statement (no closing '.') or a multi-line comment.
-    """
-    lines = source.split("\n")
-    preamble_kw = (
-        "Require", "Import", "Export", "From", "Set", "Unset",
-        "Open", "Close", "Notation", "Declare", "Bind", "Delimit",
-        "Reserved", "Ltac", "Tactic",
-    )
-    preamble: list[str] = []
-    in_comment = 0  # nesting depth
-    in_statement = False  # inside a multi-line preamble statement
-
-    body_start = len(lines)  # default: everything is preamble
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-
-        # Track multi-line comments
-        in_comment += stripped.count("(*") - stripped.count("*)")
-        if in_comment < 0:
-            in_comment = 0
-
-        # Inside a multi-line comment: always preamble
-        if in_comment > 0 or stripped.endswith("*)"):
-            preamble.append(line)
-            continue
-
-        # Inside a multi-line statement (continuation of a From ... Require Import)
-        if in_statement:
-            preamble.append(line)
-            if stripped.endswith("."):
-                in_statement = False
-            continue
-
-        # Blank line: preamble
-        if not stripped:
-            preamble.append(line)
-            continue
-
-        # Comment-only line that opened and closed on same line
-        if stripped.startswith("(*") and "*)" in stripped:
-            preamble.append(line)
-            continue
-
-        # Preamble keyword
-        if any(stripped.startswith(kw) for kw in preamble_kw):
-            preamble.append(line)
-            # Check if statement is complete (ends with '.')
-            if not stripped.endswith("."):
-                in_statement = True
-            continue
-
-        # Line starting with '#[' (attribute like #[global], #[export])
-        if stripped.startswith("#["):
-            preamble.append(line)
-            if not stripped.endswith("."):
-                in_statement = True
-            continue
-
-        # Non-preamble line: body starts here
-        body_start = i
-        break
-
-    return "\n".join(preamble), "\n".join(lines[body_start:])
-
-
 # ---------------------------------------------------------------------------
 # Axiom whitelist
 # ---------------------------------------------------------------------------
@@ -141,41 +104,48 @@ def _split_preamble(source: str) -> tuple[str, str]:
 
 _KNOWN_SAFE_AXIOMS: set[str] = {
     # --- Classical logic ---
-    "classic",                                  # forall P : Prop, P \/ ~ P
-
+    "classic",  # forall P : Prop, P \/ ~ P
     # --- Extensionality ---
-    "functional_extensionality_dep",            # (forall x, f x = g x) -> f = g
-    "propositional_extensionality",             # (P <-> Q) -> P = Q
-    "proof_irrelevance",                        # forall (p1 p2 : P), p1 = p2
-    "JMeq_eq",                                  # JMeq x y -> x = y
-    "eq_rect_eq",                               # UIP / Streicher's K
-
+    "functional_extensionality_dep",  # (forall x, f x = g x) -> f = g
+    "propositional_extensionality",  # (P <-> Q) -> P = Q
+    "proof_irrelevance",  # forall (p1 p2 : P), p1 = p2
+    "JMeq_eq",  # JMeq x y -> x = y
+    "eq_rect_eq",  # UIP / Streicher's K
     # --- Choice and descriptions ---
-    "constructive_indefinite_description",      # sig form of indefinite choice
-    "constructive_definite_description",        # sig form of definite description
+    "constructive_indefinite_description",  # sig form of indefinite choice
+    "constructive_definite_description",  # sig form of definite description
     "dependent_unique_choice",
     "unique_choice",
     "relational_choice",
-    "epsilon",                                   # Hilbert epsilon
+    "epsilon",  # Hilbert epsilon
     "epsilon_spec",
-
     # --- Reals axiomatization (Coq.Reals.Raxioms) ---
-    "R", "R0", "R1",
-    "Rplus", "Rmult", "Ropp", "Rinv",
+    "R",
+    "R0",
+    "R1",
+    "Rplus",
+    "Rmult",
+    "Ropp",
+    "Rinv",
     "Rlt",
     "up",
     "R1_neq_R0",
-    "Rplus_comm", "Rplus_assoc",
-    "Rplus_opp_r", "Rplus_0_l",
-    "Rmult_comm", "Rmult_assoc",
-    "Rmult_1_l", "Rmult_plus_distr_l",
+    "Rplus_comm",
+    "Rplus_assoc",
+    "Rplus_opp_r",
+    "Rplus_0_l",
+    "Rmult_comm",
+    "Rmult_assoc",
+    "Rmult_1_l",
+    "Rmult_plus_distr_l",
     "Rinv_l",
-    "Rlt_asym", "Rlt_trans",
-    "Rplus_lt_compat_l", "Rmult_lt_compat_l",
+    "Rlt_asym",
+    "Rlt_trans",
+    "Rplus_lt_compat_l",
+    "Rmult_lt_compat_l",
     "archimed",
     "completeness",
     "total_order_T",
-
     # --- Decidability (used by classical reals) ---
     "sig_forall_dec",
 }

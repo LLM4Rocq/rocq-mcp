@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -59,7 +60,15 @@ mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
 # ---------------------------------------------------------------------------
 
 _CLEANUP_EXTENSIONS: tuple[str, ...] = (
-    ".v", ".vo", ".vok", ".vos", ".glob", ".aux", ".vio", ".timing",
+    ".v",
+    ".vo",
+    ".vok",
+    ".vos",
+    ".glob",
+    ".aux",
+    ".vio",
+    ".timing",
+    ".coqaux",
 )
 
 
@@ -91,7 +100,10 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
     """
     ws = Path(workspace).resolve()
     with tempfile.NamedTemporaryFile(
-        suffix=".v", mode="w", delete=False, dir=str(ws),
+        suffix=".v",
+        mode="w",
+        delete=False,
+        dir=str(ws),
     ) as f:
         f.write(source)
         f.flush()
@@ -104,6 +116,7 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
             text=True,
             timeout=timeout,
             cwd=str(ws),
+            start_new_session=True,
         )
         return {
             "returncode": result.returncode,
@@ -162,7 +175,7 @@ def rocq_compile(
         timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
     """
     workspace = workspace or ROCQ_WORKSPACE
-    timeout = timeout or ROCQ_COQC_TIMEOUT
+    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
 
     # Input validation
     err = _validate_workspace(workspace)
@@ -239,19 +252,19 @@ def rocq_verify(
         timeout: Verification timeout in seconds (default: ROCQ_VERIFY_TIMEOUT env var).
     """
     workspace = workspace or ROCQ_WORKSPACE
-    timeout = timeout or ROCQ_VERIFY_TIMEOUT
+    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_VERIFY_TIMEOUT
 
     # Input validation
     err = _validate_workspace(workspace)
     if err:
         return {"verified": False, "error": err}
 
-    if "." in problem_name:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", problem_name):
         return {
             "verified": False,
             "error": (
-                f"problem_name must be unqualified (no dots). Got: '{problem_name}'. "
-                "Use the short name, e.g., 'add_comm' not 'Nat.add_comm'."
+                f"problem_name must be a valid Rocq identifier "
+                f"(letters, digits, underscores, primes). Got: '{problem_name}'."
             ),
         }
 
@@ -261,10 +274,21 @@ def rocq_verify(
             "error": f"Proof exceeds maximum size ({ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
+    if len(problem_statement) > ROCQ_MAX_SOURCE_SIZE:
+        return {
+            "verified": False,
+            "error": f"Problem statement exceeds maximum size ({ROCQ_MAX_SOURCE_SIZE} bytes).",
+        }
+
     # Build the verification source
-    verification_source = build_verification_source(
-        proof, problem_name, problem_statement,
-    )
+    try:
+        verification_source = build_verification_source(
+            proof,
+            problem_name,
+            problem_statement,
+        )
+    except ValueError as e:
+        return {"verified": False, "error": str(e)}
 
     # Run coqc on the verification source
     result = _run_coqc(verification_source, workspace, timeout)
@@ -348,11 +372,7 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
 
 def _pet_alive(pet: Any) -> bool:
     """Check if the pet subprocess is still running."""
-    return (
-        pet is not None
-        and pet.process is not None
-        and pet.process.poll() is None
-    )
+    return pet is not None and pet.process is not None and pet.process.poll() is None
 
 
 def _kill_pet(pet: Any) -> None:
@@ -390,15 +410,12 @@ def _kill_pet(pet: Any) -> None:
 
 def _try_close_pet(pet: Any) -> None:
     """Close pytanque's pipe file descriptors without killing."""
-    try:
-        if pet.process and pet.process.stdin:
-            pet.process.stdin.close()
-        if pet.process and pet.process.stdout:
-            pet.process.stdout.close()
-        if pet.process and pet.process.stderr:
-            pet.process.stderr.close()
-    except Exception:
-        pass
+    for stream in [pet.process.stdin, pet.process.stdout, pet.process.stderr]:
+        try:
+            if stream:
+                stream.close()
+        except Exception:
+            pass
 
 
 def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
@@ -431,7 +448,16 @@ async def run_query(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context)."""
-    from pytanque import PetanqueError
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
 
     timeout: float = lifespan_state["pet_timeout"]
 
@@ -442,12 +468,19 @@ async def run_query(
             pet.set_workspace(debug=False, dir=ws)
 
             preamble_text = preamble.strip()
-            dummy_path = Path(ws) / "_rocq_mcp_query.v"
             dummy_source = (
                 f"{preamble_text}\n"
                 "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
             )
-            dummy_path.write_text(dummy_source)
+            with tempfile.NamedTemporaryFile(
+                suffix=".v",
+                mode="w",
+                delete=False,
+                dir=str(ws),
+            ) as f:
+                f.write(dummy_source)
+                f.flush()
+                dummy_path = Path(f.name)
             try:
                 state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
 
@@ -460,18 +493,20 @@ async def run_query(
             finally:
                 dummy_path.unlink(missing_ok=True)
 
+    sem = _get_pet_semaphore()
     try:
-        feedback = await asyncio.wait_for(
-            asyncio.to_thread(_run_query),
-            timeout=timeout,
-        )
-        output = "\n".join(msg for _, msg in feedback)
-        if len(output) > _MAX_QUERY_OUTPUT:
-            output = (
-                output[:_MAX_QUERY_OUTPUT]
-                + f"\n... (truncated, {len(output)} total chars)"
+        async with sem:
+            feedback = await asyncio.wait_for(
+                asyncio.to_thread(_run_query),
+                timeout=timeout,
             )
-        return {"success": True, "output": output or "(no output)"}
+            output = "\n".join(msg for _, msg in feedback)
+            if len(output) > _MAX_QUERY_OUTPUT:
+                output = (
+                    output[:_MAX_QUERY_OUTPUT]
+                    + f"\n... (truncated, {len(output)} total chars)"
+                )
+            return {"success": True, "output": output or "(no output)"}
     except asyncio.TimeoutError:
         _invalidate_pet(lifespan_state)
         return {"success": False, "error": f"Query timed out after {timeout}s."}
@@ -532,15 +567,17 @@ _session: dict[str, Any] = {
 # Async-level serialization to prevent deadlock on timeout.
 # Unlike threading.Lock, asyncio.Semaphore is released even when the
 # thread is orphaned by asyncio.wait_for timeout.
-_step_semaphore: asyncio.Semaphore | None = None
+# Shared across ALL pet operations (step + query) because pytanque's
+# stdio pipe is single-duplex.
+_pet_semaphore: asyncio.Semaphore | None = None
 
 
-def _get_step_semaphore() -> asyncio.Semaphore:
+def _get_pet_semaphore() -> asyncio.Semaphore:
     """Lazy-init the semaphore (must be created inside a running event loop)."""
-    global _step_semaphore
-    if _step_semaphore is None:
-        _step_semaphore = asyncio.Semaphore(1)
-    return _step_semaphore
+    global _pet_semaphore
+    if _pet_semaphore is None:
+        _pet_semaphore = asyncio.Semaphore(1)
+    return _pet_semaphore
 
 
 async def run_step(
@@ -551,12 +588,22 @@ async def run_step(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_step (testable without FastMCP Context)."""
-    from pytanque import PetanqueError
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
 
     timeout: float = lifespan_state["pet_timeout"]
-    sem = _get_step_semaphore()
+    sem = _get_pet_semaphore()
 
     async with sem:
+
         def _execute() -> dict[str, Any]:
             with _pet_lock:
                 pet = _ensure_pet(lifespan_state)
@@ -566,12 +613,14 @@ async def run_step(
                     ws = str(Path(workspace).resolve())
                     pet.set_workspace(debug=False, dir=ws)
                     state = pet.start(file, theorem)
-                    _session.update({
-                        "state": state,
-                        "file": file,
-                        "theorem": theorem,
-                        "history": [],
-                    })
+                    _session.update(
+                        {
+                            "state": state,
+                            "file": file,
+                            "theorem": theorem,
+                            "history": [],
+                        }
+                    )
 
                 current_state = _session.get("state")
                 if current_state is None:
@@ -589,15 +638,16 @@ async def run_step(
                     tac += "."
 
                 new_state = pet.run(current_state, tac)
-                _session["state"] = new_state
-                _session["history"].append(tac)
 
-                # Get goals
+                # Get goals before updating session state so that
+                # if goals() raises, the session is not advanced.
                 goals = pet.goals(new_state)
                 goals_list = goals or []
-                goals_text = "\n\n".join(
-                    g.pp or str(g) for g in goals_list
-                )
+
+                # Only update session after both run() and goals() succeed
+                _session["state"] = new_state
+                _session["history"].append(tac)
+                goals_text = "\n\n".join(g.pp or str(g) for g in goals_list)
 
                 return {
                     "success": True,

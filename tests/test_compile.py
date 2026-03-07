@@ -17,14 +17,13 @@ import pytest
 from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.server import rocq_compile
 
-pytestmark = pytest.mark.skipif(
-    not COQC_AVAILABLE, reason="coqc not available"
-)
+pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 
 
 # ---------------------------------------------------------------------------
 # Success cases
 # ---------------------------------------------------------------------------
+
 
 class TestCompileSuccess:
     """Sources that compile without error."""
@@ -45,9 +44,7 @@ class TestCompileSuccess:
 
     def test_multiline_import(self, workspace, multiline_import_proof):
         """Multi-line From ... Require Import must compile correctly."""
-        result = rocq_compile(
-            source=multiline_import_proof, workspace=str(workspace)
-        )
+        result = rocq_compile(source=multiline_import_proof, workspace=str(workspace))
         assert result["success"] is True
 
 
@@ -55,15 +52,13 @@ class TestCompileSuccess:
 # Error cases
 # ---------------------------------------------------------------------------
 
+
 class TestCompileErrors:
     """Sources that should fail compilation with a clear error."""
 
     def test_type_error(self, workspace):
         """A proof of an obviously false statement must fail."""
-        source = (
-            "Theorem bad : nat = bool.\n"
-            "Proof. reflexivity. Qed.\n"
-        )
+        source = "Theorem bad : nat = bool.\n" "Proof. reflexivity. Qed.\n"
         result = rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is False
         assert "error" in result
@@ -78,10 +73,7 @@ class TestCompileErrors:
 
     def test_missing_import(self, workspace):
         """Using R without importing Reals should fail."""
-        source = (
-            "Theorem test : forall x : R, x = x.\n"
-            "Proof. reflexivity. Qed.\n"
-        )
+        source = "Theorem test : forall x : R, x = x.\n" "Proof. reflexivity. Qed.\n"
         result = rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is False
         assert "error" in result
@@ -91,13 +83,12 @@ class TestCompileErrors:
 # Timeout
 # ---------------------------------------------------------------------------
 
+
 class TestCompileTimeout:
     """Diverging tactics should trigger timeout."""
 
     def test_diverging_tactic(self, workspace, timeout_proof):
-        result = rocq_compile(
-            source=timeout_proof, workspace=str(workspace), timeout=3
-        )
+        result = rocq_compile(source=timeout_proof, workspace=str(workspace), timeout=3)
         assert result["success"] is False
         assert "timed out" in result["error"].lower()
 
@@ -105,6 +96,7 @@ class TestCompileTimeout:
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
+
 
 class TestCompileInputValidation:
     """Edge cases around bad inputs (no coqc needed for some of these)."""
@@ -121,9 +113,7 @@ class TestCompileInputValidation:
 
     def test_oversized_source(self, workspace):
         """Source exceeding ROCQ_MAX_SOURCE_SIZE should be rejected early."""
-        result = rocq_compile(
-            source="x" * 2_000_000, workspace=str(workspace)
-        )
+        result = rocq_compile(source="x" * 2_000_000, workspace=str(workspace))
         assert result["success"] is False
         assert "size" in result["error"].lower()
 
@@ -140,6 +130,7 @@ class TestCompileInputValidation:
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
 
 class TestCompileCleanup:
     """Compilation should not leave temp files behind."""
@@ -161,8 +152,6 @@ class TestCompileCleanup:
     def test_no_artifacts_on_timeout(self, workspace, timeout_proof):
         """Even on timeout, temp files should be cleaned up."""
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_compile(
-            source=timeout_proof, workspace=str(workspace), timeout=3
-        )
+        rocq_compile(source=timeout_proof, workspace=str(workspace), timeout=3)
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"

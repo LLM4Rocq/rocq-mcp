@@ -1,10 +1,11 @@
 """Tests for rocq_verify tool and verification helpers in verify.py.
 
 Part A: Unit tests for verify.py helpers (NO coqc needed)
-    - TestSplitPreamble
     - TestCleanProblemStatement
     - TestAxiomClassification
     - TestParseAssumptions
+    - TestBuildVerificationSource
+    - TestVerifyInputSanitization
 
 Part B: Integration tests for rocq_verify (require coqc)
     - TestVerifySuccess
@@ -21,7 +22,6 @@ import pytest
 
 from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.verify import (
-    _split_preamble,
     _clean_problem_statement,
     _is_standard_axiom,
     _axiom_short_name,
@@ -30,155 +30,15 @@ from rocq_mcp.verify import (
     build_verification_source,
 )
 
-
 # =========================================================================
 # PART A: Unit tests (no coqc needed)
 # =========================================================================
 
 
 # ---------------------------------------------------------------------------
-# _split_preamble
-# ---------------------------------------------------------------------------
-
-class TestSplitPreamble:
-    """Test splitting Rocq source into preamble (imports) and body."""
-
-    def test_simple_split(self):
-        source = "Require Import Arith.\n\nTheorem t : True.\nProof. exact I. Qed."
-        preamble, body = _split_preamble(source)
-        assert "Require Import Arith." in preamble
-        assert "Theorem t" in body
-
-    def test_from_import(self):
-        source = "From Coq Require Import Arith.\nTheorem t : True.\n"
-        preamble, body = _split_preamble(source)
-        assert "From Coq" in preamble
-        assert "Theorem" in body
-
-    def test_multiline_from_import(self):
-        """Multi-line From ... Require Import with continuation lines."""
-        source = (
-            "From Coq Require Import\n"
-            "  Arith\n"
-            "  Lia.\n\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "From Coq" in preamble
-        assert "Arith" in preamble
-        assert "Lia." in preamble
-        assert "Theorem" in body
-
-    def test_notation_in_preamble(self):
-        source = (
-            'Require Import Reals.\n'
-            'Notation "x ^ y" := (Rpower x y).\n'
-            'Theorem t : True.\n'
-        )
-        preamble, body = _split_preamble(source)
-        assert "Notation" in preamble
-        assert "Theorem" in body
-
-    def test_multiline_comment(self):
-        """Multi-line comments spanning multiple lines stay in preamble."""
-        source = (
-            "Require Import Arith.\n"
-            "(* This is\n"
-            "   a multi-line\n"
-            "   comment *)\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "comment *)" in preamble
-        assert "Theorem" in body
-
-    def test_all_preamble(self):
-        """Source consisting only of import lines -> empty body."""
-        source = "Require Import Arith.\nRequire Import Lia."
-        preamble, body = _split_preamble(source)
-        assert "Arith" in preamble
-        assert "Lia" in preamble
-        assert body == ""
-
-    def test_empty_source(self):
-        preamble, body = _split_preamble("")
-        assert preamble == ""
-        assert body == ""
-
-    def test_set_and_open(self):
-        source = (
-            "Set Implicit Arguments.\n"
-            "Open Scope nat_scope.\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "Set Implicit" in preamble
-        assert "Open Scope" in preamble
-        assert "Theorem" in body
-
-    def test_attribute_line(self):
-        """Lines starting with #[...] (attributes) belong to preamble."""
-        source = "#[global] Hint Resolve eq_refl : core.\nTheorem t : True.\n"
-        preamble, body = _split_preamble(source)
-        assert "#[global]" in preamble
-        assert "Theorem" in body
-
-    def test_single_line_comment_in_preamble(self):
-        """A comment between imports stays in preamble."""
-        source = (
-            "Require Import Arith.\n"
-            "(* helper imports *)\n"
-            "Require Import Lia.\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "(* helper imports *)" in preamble
-        assert "Require Import Lia." in preamble
-        assert "Theorem" in body
-
-    def test_blank_lines_between_imports(self):
-        """Blank lines between imports remain in preamble."""
-        source = (
-            "Require Import Arith.\n"
-            "\n"
-            "Require Import Lia.\n"
-            "\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "Arith" in preamble
-        assert "Lia" in preamble
-        assert "Theorem" in body
-
-    def test_no_preamble(self):
-        """Source starting directly with a Theorem has empty preamble."""
-        source = "Theorem t : True.\nProof. exact I. Qed."
-        preamble, body = _split_preamble(source)
-        assert preamble == ""
-        assert "Theorem" in body
-
-    def test_from_dotted_module_multiline(self):
-        """BUG-4: Dots in qualified module names must not end the statement.
-
-        'From Coq.Reals Require Import' has a dot in 'Coq.Reals', but the
-        statement is NOT finished until the line ending with a period.
-        """
-        source = (
-            "From Coq.Reals Require Import\n"
-            "  Reals\n"
-            "  Rpower.\n\n"
-            "Theorem t : True.\n"
-        )
-        preamble, body = _split_preamble(source)
-        assert "From Coq.Reals" in preamble
-        assert "Reals" in preamble
-        assert "Rpower." in preamble
-        assert "Theorem" in body
-
-
-# ---------------------------------------------------------------------------
 # _clean_problem_statement
 # ---------------------------------------------------------------------------
+
 
 class TestCleanProblemStatement:
     """Test stripping trailing Admitted/Abort/admit from problem statements."""
@@ -225,6 +85,7 @@ class TestCleanProblemStatement:
 # ---------------------------------------------------------------------------
 # Axiom classification
 # ---------------------------------------------------------------------------
+
 
 class TestAxiomClassification:
     """Test _is_standard_axiom for correct accept/reject decisions.
@@ -313,6 +174,7 @@ class TestAxiomClassification:
 # Print Assumptions parser
 # ---------------------------------------------------------------------------
 
+
 class TestParseAssumptions:
     """Test _parse_assumptions_raw and parse_and_classify_assumptions."""
 
@@ -382,10 +244,7 @@ class TestParseAssumptions:
         assert len(details["standard"]) == 1
 
     def test_classify_suspicious(self):
-        stdout = (
-            "Axioms:\n"
-            "M.classic : False\n"
-        )
+        stdout = "Axioms:\n" "M.classic : False\n"
         verdict, details = parse_and_classify_assumptions(stdout)
         assert verdict == "suspicious"
         assert "suspicious" in details
@@ -408,6 +267,7 @@ class TestParseAssumptions:
 # ---------------------------------------------------------------------------
 # build_verification_source
 # ---------------------------------------------------------------------------
+
 
 class TestBuildVerificationSource:
     """Test that the Module M. template is constructed correctly."""
@@ -437,16 +297,17 @@ class TestBuildVerificationSource:
         )
         assert "Print Assumptions bar." in source
 
-    def test_preamble_outside_module(self):
-        """Imports should appear before Module M., not inside it."""
+    def test_entire_proof_inside_module(self):
+        """Entire proof (including imports) should be inside Module M."""
         source = build_verification_source(
             proof="Require Import Arith.\nTheorem t : True. Proof. exact I. Qed.",
             problem_name="t",
             problem_statement="Theorem t : True.\nAdmitted.",
         )
         module_pos = source.index("Module M.")
+        end_pos = source.index("End M.")
         require_pos = source.index("Require Import Arith.")
-        assert require_pos < module_pos
+        assert module_pos < require_pos < end_pos
 
     def test_strips_trailing_admitted(self):
         source = build_verification_source(
@@ -456,7 +317,7 @@ class TestBuildVerificationSource:
         )
         # The problem statement should appear outside the module WITHOUT Admitted
         # Find the text after "End M."
-        after_end = source[source.index("End M."):]
+        after_end = source[source.index("End M.") :]
         assert "Admitted" not in after_end
 
     def test_braces_in_proof_safe(self):
@@ -472,6 +333,83 @@ class TestBuildVerificationSource:
             problem_statement="Theorem t : forall n m, n + m = m + n.\nAdmitted.",
         )
         assert "{ apply Nat.add_comm. }" in source
+
+
+# ---------------------------------------------------------------------------
+# Input sanitization (injection attacks)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyInputSanitization:
+    """Test that malicious inputs are rejected."""
+
+    def test_problem_name_with_newline(self):
+        """Newlines in problem_name must be rejected by build_verification_source."""
+        # The server-level regex rejects this before build_verification_source
+        # is ever called, but let's verify the template isn't abusable either.
+        # build_verification_source doesn't validate problem_name itself,
+        # so we test via the server's rocq_verify which does the regex check.
+        # For a pure unit test, we verify the regex pattern rejects it.
+        import re
+
+        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
+        assert pattern.match("add_0_r\nAxiom cheat : False") is None
+
+    def test_problem_name_with_spaces(self):
+        import re
+
+        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
+        assert pattern.match("add_0_r Axiom cheat") is None
+
+    def test_problem_name_with_semicolon(self):
+        import re
+
+        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
+        assert pattern.match("add_0_r;evil") is None
+
+    def test_problem_name_valid_identifier(self):
+        """A valid Rocq identifier should work."""
+        source = build_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.",
+        )
+        assert "Module M." in source
+
+    def test_problem_name_with_prime(self):
+        """Primes are valid in Rocq identifiers: t'"""
+        source = build_verification_source(
+            proof="Theorem t' : True. Proof. exact I. Qed.",
+            problem_name="t'",
+            problem_statement="Theorem t' : True.\nAdmitted.",
+        )
+        assert "M.t'" in source
+
+    def test_redirect_in_proof_rejected(self):
+        """Proof containing Redirect command must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Redirect "/tmp/evil" Print nat.\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_extraction_in_proof_rejected(self):
+        """Proof containing Extraction to file must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Require Import Extraction.\nExtraction "/tmp/evil.ml" nat.\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_drop_in_proof_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Drop.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
 
 # =========================================================================
@@ -529,9 +467,7 @@ class TestVerifySuccess:
         )
         assert result["verified"] is True
 
-    def test_multiline_import_proof(
-        self, workspace, multiline_import_proof
-    ):
+    def test_multiline_import_proof(self, workspace, multiline_import_proof):
         """Proof with multi-line From...Require Import should verify."""
         problem = (
             "From Coq Require Import\n"
@@ -635,10 +571,7 @@ class TestVerifyRejection:
         A crafted problem_statement could try to reopen Module M after
         End M. Rocq should reject this with a compilation error.
         """
-        proof = (
-            "Theorem t : True.\n"
-            "Proof. exact I. Qed.\n"
-        )
+        proof = "Theorem t : True.\n" "Proof. exact I. Qed.\n"
         malicious_statement = (
             "Theorem t : True.\n"
             "Admitted.\n"
@@ -672,7 +605,7 @@ class TestVerifyInputValidation:
             workspace=str(workspace),
         )
         assert result["verified"] is False
-        assert "unqualified" in result["error"].lower()
+        assert "valid rocq identifier" in result["error"].lower()
 
     def test_bad_workspace(self, simple_proof, simple_problem_statement):
         """Non-existent workspace should return a clear error."""
@@ -709,14 +642,34 @@ class TestVerifyInputValidation:
         assert result["verified"] is False
         assert "size" in result["error"].lower()
 
+    def test_newline_in_problem_name(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
+        result = rocq_verify(
+            proof=simple_proof,
+            problem_name="add_0_r\nAxiom cheat : False",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
+    def test_space_in_problem_name(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
+        result = rocq_verify(
+            proof=simple_proof,
+            problem_name="add_0_r Axiom cheat",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 class TestVerifyCleanup:
     """Verification should not leave temp files behind."""
 
-    def test_no_artifacts_left(
-        self, workspace, simple_proof, simple_problem_statement
-    ):
+    def test_no_artifacts_left(self, workspace, simple_proof, simple_problem_statement):
         before = set(glob_mod.glob(str(workspace / "*")))
         rocq_verify(
             proof=simple_proof,

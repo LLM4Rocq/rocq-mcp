@@ -13,10 +13,10 @@ import pytest
 
 from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE
 
-
 # =========================================================================
 # Compile -> Verify workflow (Phase 0)
 # =========================================================================
+
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 class TestCompileVerifyWorkflow:
@@ -28,9 +28,7 @@ class TestCompileVerifyWorkflow:
         """Full happy path: compile succeeds -> verify succeeds."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
-            source=simple_proof, workspace=str(workspace)
-        )
+        compile_result = rocq_compile(source=simple_proof, workspace=str(workspace))
         assert compile_result["success"] is True
 
         verify_result = rocq_verify(
@@ -47,9 +45,7 @@ class TestCompileVerifyWorkflow:
         """Compile may succeed but verify catches the type-redefinition cheat."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
-            source=cheating_proof, workspace=str(workspace)
-        )
+        compile_result = rocq_compile(source=cheating_proof, workspace=str(workspace))
         # The cheat may or may not compile (depends on exact Rocq version)
         # The critical assertion is that verify rejects it.
         if compile_result["success"]:
@@ -67,9 +63,7 @@ class TestCompileVerifyWorkflow:
         """Proof using classical logic passes both compile and verify."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
-            source=classical_proof, workspace=str(workspace)
-        )
+        compile_result = rocq_compile(source=classical_proof, workspace=str(workspace))
         assert compile_result["success"] is True
 
         verify_result = rocq_verify(
@@ -80,9 +74,7 @@ class TestCompileVerifyWorkflow:
         )
         assert verify_result["verified"] is True
 
-    def test_axiom_spoofing_rejected_end_to_end(
-        self, workspace, axiom_spoofing_proof
-    ):
+    def test_axiom_spoofing_rejected_end_to_end(self, workspace, axiom_spoofing_proof):
         """CRITICAL: end-to-end test that axiom spoofing is caught.
 
         The proof declares ``Axiom classic : False`` (NOT from stdlib) and
@@ -110,9 +102,7 @@ class TestCompileVerifyWorkflow:
         """Proof with an Admitted helper: compile may pass, verify must reject."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
-            source=admitted_proof, workspace=str(workspace)
-        )
+        compile_result = rocq_compile(source=admitted_proof, workspace=str(workspace))
         if compile_result["success"]:
             verify_result = rocq_verify(
                 proof=admitted_proof,
@@ -139,9 +129,7 @@ class TestCompileVerifyWorkflow:
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
-    def test_multiline_import_compile_verify(
-        self, workspace, multiline_import_proof
-    ):
+    def test_multiline_import_compile_verify(self, workspace, multiline_import_proof):
         """Multi-line From...Require Import works end-to-end."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
@@ -170,6 +158,7 @@ class TestCompileVerifyWorkflow:
 # Query -> Step workflow (require pet)
 # =========================================================================
 
+
 @pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 class TestQueryStepWorkflow:
     """End-to-end: query to search, then step to apply found lemma."""
@@ -177,6 +166,7 @@ class TestQueryStepWorkflow:
     @pytest.fixture(autouse=True)
     def _reset_session(self):
         from rocq_mcp.server import _session
+
         _session.update({"state": None, "file": None, "theorem": None, "history": []})
         yield
         _session.update({"state": None, "file": None, "theorem": None, "history": []})
@@ -238,8 +228,7 @@ class TestQueryStepWorkflow:
 
         vfile = workspace / "respawn_test.v"
         vfile.write_text(
-            "Ltac loop := idtac; loop.\n"
-            "Theorem t : True. Proof. loop. Qed.\n"
+            "Ltac loop := idtac; loop.\n" "Theorem t : True. Proof. loop. Qed.\n"
         )
 
         state = self._make_state(timeout=1.0)
@@ -274,6 +263,7 @@ class TestQueryStepWorkflow:
 # =========================================================================
 # MiniF2F sample test (optional, runs only if workspace exists)
 # =========================================================================
+
 
 class TestMiniF2FSample:
     """Test with a real miniF2F problem if the workspace is available."""

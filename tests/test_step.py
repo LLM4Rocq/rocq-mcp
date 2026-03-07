@@ -12,9 +12,7 @@ import pytest
 
 from tests.conftest import PET_AVAILABLE
 
-pytestmark = pytest.mark.skipif(
-    not PET_AVAILABLE, reason="pet not available"
-)
+pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
 
 def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
@@ -28,6 +26,7 @@ def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
 def reset_session():
     """Reset the module-level _session dict before each test."""
     from rocq_mcp.server import _session
+
     _session.update({"state": None, "file": None, "theorem": None, "history": []})
     yield
     _session.update({"state": None, "file": None, "theorem": None, "history": []})
@@ -36,6 +35,7 @@ def reset_session():
 @pytest.fixture
 def lifespan_state():
     from rocq_mcp.server import _invalidate_pet
+
     state = _make_lifespan_state()
     yield state
     _invalidate_pet(state)
@@ -46,8 +46,7 @@ def step_file(workspace):
     """Create a .v file with a simple theorem for interactive proving."""
     vfile = workspace / "step_test.v"
     vfile.write_text(
-        "Theorem t : forall n : nat, n = n.\n"
-        "Proof. intros. reflexivity. Qed.\n"
+        "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
     )
     return str(vfile)
 
@@ -55,6 +54,7 @@ def step_file(workspace):
 # ---------------------------------------------------------------------------
 # Basic workflow
 # ---------------------------------------------------------------------------
+
 
 class TestStepBasicWorkflow:
     """Core step-by-step proving workflow."""
@@ -105,6 +105,7 @@ class TestStepBasicWorkflow:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestStepEdgeCases:
     """Edge cases for interactive proving."""
@@ -209,6 +210,7 @@ class TestStepEdgeCases:
 # Timeout
 # ---------------------------------------------------------------------------
 
+
 class TestStepTimeout:
     """Timeout handling and session recovery after timeout."""
 
@@ -219,8 +221,7 @@ class TestStepTimeout:
 
         vfile = workspace / "timeout_test.v"
         vfile.write_text(
-            "Ltac loop := idtac; loop.\n"
-            "Theorem t : True. Proof. loop. Qed.\n"
+            "Ltac loop := idtac; loop.\n" "Theorem t : True. Proof. loop. Qed.\n"
         )
 
         state = _make_lifespan_state(pet_timeout=1.0)
@@ -244,13 +245,10 @@ class TestStepTimeout:
 
         vfile_bad = workspace / "timeout_test2.v"
         vfile_bad.write_text(
-            "Ltac loop := idtac; loop.\n"
-            "Theorem t : True. Proof. loop. Qed.\n"
+            "Ltac loop := idtac; loop.\n" "Theorem t : True. Proof. loop. Qed.\n"
         )
         vfile_good = workspace / "good.v"
-        vfile_good.write_text(
-            "Theorem t2 : True. Proof. exact I. Qed.\n"
-        )
+        vfile_good.write_text("Theorem t2 : True. Proof. exact I. Qed.\n")
 
         state = _make_lifespan_state(pet_timeout=1.0)
         try:

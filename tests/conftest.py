@@ -18,6 +18,7 @@ PET_AVAILABLE: bool = shutil.which("pet") is not None
 # Workspace fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def workspace(tmp_path_factory):
     """Create a temporary workspace directory for coqc tests."""
@@ -28,6 +29,7 @@ def workspace(tmp_path_factory):
 # ---------------------------------------------------------------------------
 # Proof fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def simple_proof():

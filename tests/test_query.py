@@ -10,9 +10,7 @@ import pytest
 
 from tests.conftest import PET_AVAILABLE
 
-pytestmark = pytest.mark.skipif(
-    not PET_AVAILABLE, reason="pet not available"
-)
+pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
 
 def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
@@ -25,6 +23,7 @@ def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
 @pytest.fixture
 def lifespan_state():
     from rocq_mcp.server import _invalidate_pet
+
     state = _make_lifespan_state()
     yield state
     _invalidate_pet(state)
@@ -34,12 +33,14 @@ def lifespan_state():
 # Success cases
 # ---------------------------------------------------------------------------
 
+
 class TestQuerySuccess:
     """Queries that should return valid output."""
 
     @pytest.mark.asyncio
     async def test_search_nat(self, workspace, lifespan_state):
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="Search nat.",
             preamble="",
@@ -52,6 +53,7 @@ class TestQuerySuccess:
     @pytest.mark.asyncio
     async def test_check_type(self, workspace, lifespan_state):
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="Check Nat.add.",
             preamble="",
@@ -65,6 +67,7 @@ class TestQuerySuccess:
     async def test_with_preamble(self, workspace, lifespan_state):
         """Query with preamble for imports."""
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="Check Rplus.",
             preamble="From Coq Require Import Reals.\nOpen Scope R_scope.",
@@ -79,6 +82,7 @@ class TestQuerySuccess:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestQueryEdgeCases:
     """Edge cases for query input handling."""
 
@@ -86,6 +90,7 @@ class TestQueryEdgeCases:
     async def test_auto_append_dot(self, workspace, lifespan_state):
         """Command without trailing dot should get one appended automatically."""
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="Check Nat.add",
             preamble="",
@@ -98,6 +103,7 @@ class TestQueryEdgeCases:
     async def test_no_double_dot(self, workspace, lifespan_state):
         """Command already ending with dot should not get another one."""
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="Check Nat.add.",
             preamble="",
@@ -111,6 +117,7 @@ class TestQueryEdgeCases:
 # Error cases
 # ---------------------------------------------------------------------------
 
+
 class TestQueryErrors:
     """Queries that should fail gracefully."""
 
@@ -118,6 +125,7 @@ class TestQueryErrors:
     async def test_timeout(self, workspace):
         """A query that exceeds the timeout should return a timeout error."""
         from rocq_mcp.server import run_query
+
         # Use an extremely short timeout to trigger it
         state = _make_lifespan_state(pet_timeout=0.001)
         result = await run_query(
@@ -133,6 +141,7 @@ class TestQueryErrors:
     async def test_invalid_command(self, workspace, lifespan_state):
         """An invalid Rocq command should return an error."""
         from rocq_mcp.server import run_query
+
         result = await run_query(
             command="InvalidXYZCommand.",
             preamble="",

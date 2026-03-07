@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # Install Rocq/Coq via opam
+      # ----------------------------------------------------------------
+      - name: Install opam
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+
+      - name: Install Rocq
+        run: |
+          opam install rocq-prover --yes
+          eval $(opam env)
+          coqc --version
+
+      # ----------------------------------------------------------------
+      # Install Python + uv
+      # ----------------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      # ----------------------------------------------------------------
+      # Install project
+      # ----------------------------------------------------------------
+      - name: Install project (dev dependencies)
+        run: |
+          eval $(opam env)
+          uv pip install --system -e ".[dev]"
+
+      # ----------------------------------------------------------------
+      # Run tests (compile + verify only; query/step skipped without pet)
+      # ----------------------------------------------------------------
+      - name: Run tests
+        run: |
+          eval $(opam env)
+          pytest -v
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install project
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Check import sorting (ruff)
+        run: |
+          uv pip install --system ruff
+          ruff check src/ tests/

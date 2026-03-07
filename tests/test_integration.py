@@ -1,7 +1,7 @@
 """End-to-end integration tests.
 
 TestCompileVerifyWorkflow: compile then verify (require coqc)
-TestQueryStepWorkflow: query then step (require pet, placeholders)
+TestQueryStepWorkflow: query then step (require pet)
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ class TestCompileVerifyWorkflow:
 
 
 # =========================================================================
-# Query -> Step workflow (Phase 1-2, placeholders)
+# Query -> Step workflow (require pet)
 # =========================================================================
 
 @pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")

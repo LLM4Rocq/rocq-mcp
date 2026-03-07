@@ -1,5 +1,9 @@
 # rocq-mcp
 
+[![CI](https://img.shields.io/github/actions/workflow/status/llm4rocq/rocq-mcp-v2/ci.yml?branch=main&style=for-the-badge)](https://github.com/llm4rocq/rocq-mcp-v2/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?style=for-the-badge)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=for-the-badge)](https://github.com/llm4rocq/rocq-mcp-v2/blob/main/LICENSE)
+
 An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
 
 ## Prerequisites
@@ -117,4 +121,4 @@ tests/
 
 ## License
 
-TBD
+Apache 2.0 — see [LICENSE](LICENSE) for details.

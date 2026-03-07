@@ -65,7 +65,7 @@ The verification tool (`rocq_verify`) wraps the submitted proof inside a Rocq `M
 
 **Important:** The `problem_statement` parameter is treated as a **trusted anchor**. The server verifies that the proof proves the given statement, but does NOT verify that the statement itself is the correct problem. Callers must ensure `problem_statement` comes from a trusted source (e.g., a file on disk), not from the LLM being evaluated.
 
-Proofs containing `Redirect`, `Extraction`, or `Drop` commands are rejected to prevent filesystem side effects.
+Source code containing dangerous commands is rejected to prevent filesystem side effects: `Redirect`, `Extraction "..."`, `Separate Extraction`, `Extraction Library`, `Drop`, `Cd`, `Load`, and `Declare ML Module`.
 
 ## Running
 

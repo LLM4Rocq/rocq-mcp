@@ -30,8 +30,12 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Forbidden command 'Cd' (changes working directory)",
     ),
     (
-        re.compile(r'\bLoad "'),
+        re.compile(r"\bLoad\b"),
         "Forbidden command 'Load' (loads and executes external .v files)",
+    ),
+    (
+        re.compile(r"\bExtraction\s+Library\b"),
+        "Forbidden command 'Extraction Library' (writes .ml files)",
     ),
     (
         re.compile(r"\bDeclare ML Module\b"),

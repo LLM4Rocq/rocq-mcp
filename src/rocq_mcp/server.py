@@ -129,7 +129,10 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except OSError:
-                proc.kill()
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
             stdout, stderr = proc.communicate()
             return {
                 "returncode": -1,
@@ -137,13 +140,14 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
                 "stderr": stderr or "",
                 "timed_out": True,
             }
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError) as e:
         return {
             "returncode": -1,
             "stdout": "",
             "stderr": (
-                f"{ROCQ_COQC_BINARY} not found on PATH. "
-                "Install Rocq or set ROCQ_COQC_BINARY."
+                f"{ROCQ_COQC_BINARY} not found or not executable: {e}"
+                if isinstance(e, FileNotFoundError)
+                else f"Failed to run {ROCQ_COQC_BINARY}: {e}"
             ),
             "timed_out": False,
         }
@@ -624,6 +628,10 @@ async def run_step(
                 "Install with: pip install 'rocq-mcp[interactive]'"
             ),
         }
+
+    forbidden = _check_forbidden_commands(tactic)
+    if forbidden:
+        return {"success": False, "error": forbidden}
 
     timeout: float = lifespan_state["pet_timeout"]
     sem = _get_pet_semaphore()

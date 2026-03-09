@@ -193,6 +193,13 @@ _STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
     "ClassicalDedekindReals.",  # Dedekind reals axioms
     "FunctionalExtensionality.",  # functional extensionality
     "Eqdep.Eq_rect_eq.",  # eq_rect_eq / UIP
+    "Classical_Prop.",  # classic, proof_irrelevance
+    "ClassicalEpsilon.",  # constructive_indefinite_description, epsilon
+    "ClassicalUniqueChoice.",  # dependent_unique_choice, unique_choice
+    "ClassicalDescription.",  # constructive_definite_description
+    "RelationalChoice.",  # relational_choice
+    "PropExtensionality.",  # propositional_extensionality
+    "Raxioms.",  # R, Rplus, Rmult, etc.
 )
 
 

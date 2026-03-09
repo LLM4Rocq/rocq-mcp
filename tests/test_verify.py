@@ -166,6 +166,16 @@ class TestAxiomClassification:
         """Print Assumptions outputs this with Eqdep.Eq_rect_eq. prefix."""
         assert _is_standard_axiom("Eqdep.Eq_rect_eq.eq_rect_eq") is True
 
+    def test_classical_prop_classic(self):
+        """Classical_Prop.classic (module-qualified, no Stdlib prefix)."""
+        assert _is_standard_axiom("Classical_Prop.classic") is True
+
+    def test_classical_epsilon_module_qualified(self):
+        assert _is_standard_axiom("ClassicalEpsilon.epsilon") is True
+
+    def test_raxioms_module_qualified(self):
+        assert _is_standard_axiom("Raxioms.completeness") is True
+
     # --- SPOOFED axioms: must be REJECTED ---
 
     def test_spoofed_m_classic_rejected(self):

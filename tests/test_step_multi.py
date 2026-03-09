@@ -5,11 +5,7 @@ all results WITHOUT advancing the session. Since it requires pytanque, most
 tests use mocks.
 
 Tests are grouped into:
-- TestStepMultiMock: mock pet.run() for multiple tactics
-- TestStepMultiNoSession: error when no active session
-- TestStepMultiTooMany: error when > 20 tactics
-- TestStepMultiForbidden: tactic with forbidden command rejected
-- TestStepMultiAllFail: all tactics fail -> success:true with all failed results
+- TestStepMultiForbidden: tactic with forbidden command rejected (calls _check_forbidden_commands)
 - TestStepMultiReal: tests that call the real run_step_multi with mocked pet
 - TestStepMultiIntegration: integration tests (require pet)
 """
@@ -19,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,11 +33,6 @@ def _make_mock_state(proof_finished=False):
         proof_finished=proof_finished,
         feedback=[],
     )
-
-
-def _make_mock_goal(pp_text):
-    """Create a mock Goal object with pp field."""
-    return SimpleNamespace(pp=pp_text)
 
 
 def _make_mock_hyp(names, ty, def_=None):
@@ -79,185 +70,6 @@ def _ensure_pytanque_importable():
     )
     sys.modules["pytanque"] = mock_module
     return lambda: sys.modules.pop("pytanque", None)
-
-
-# ---------------------------------------------------------------------------
-# TestStepMultiMock: mock pet.run() for multiple tactics
-# ---------------------------------------------------------------------------
-
-
-class TestStepMultiMock:
-    """Test rocq_step_multi logic with mocked pytanque client."""
-
-    def test_mock_run_success_and_failure(self):
-        """Simulate 3 tactics: auto (fail), lia (success), ring (fail).
-
-        Verify that:
-        - All results are returned
-        - Session state is NOT advanced
-        - Successful tactic shows goals
-        """
-        mock_pet = MagicMock()
-        parent_state = _make_mock_state()
-
-        # Setup: auto fails with PetanqueError, lia succeeds, ring fails
-        auto_error = Exception("No applicable tactic")
-        lia_state = _make_mock_state(proof_finished=True)
-        ring_error = Exception("Not a ring equation")
-
-        def mock_run(state, tactic, **kwargs):
-            if "auto" in tactic:
-                raise auto_error
-            elif "lia" in tactic:
-                return lia_state
-            elif "ring" in tactic:
-                raise ring_error
-            return _make_mock_state()
-
-        mock_pet.run = MagicMock(side_effect=mock_run)
-        mock_pet.goals = MagicMock(return_value=[])
-
-        # Simulate what rocq_step_multi would do
-        tactics = ["auto.", "lia.", "ring."]
-        results = []
-        for tactic in tactics:
-            try:
-                new_state = mock_pet.run(parent_state, tactic)
-                goals = mock_pet.goals(new_state)
-                goals_text = (
-                    "\n".join(g.pp for g in goals) if goals else "No goals remaining."
-                )
-                results.append(
-                    {
-                        "tactic": tactic.rstrip("."),
-                        "success": True,
-                        "goals": goals_text,
-                        "proof_finished": new_state.proof_finished,
-                    }
-                )
-            except Exception as e:
-                results.append(
-                    {
-                        "tactic": tactic.rstrip("."),
-                        "success": False,
-                        "error": str(e),
-                    }
-                )
-
-        assert len(results) == 3
-
-        # auto should fail
-        assert results[0]["tactic"] == "auto"
-        assert results[0]["success"] is False
-        assert "No applicable" in results[0]["error"]
-
-        # lia should succeed
-        assert results[1]["tactic"] == "lia"
-        assert results[1]["success"] is True
-        assert results[1]["proof_finished"] is True
-
-        # ring should fail
-        assert results[2]["tactic"] == "ring"
-        assert results[2]["success"] is False
-        assert "ring equation" in results[2]["error"]
-
-        # Parent state was always used (not advanced)
-        for call in mock_pet.run.call_args_list:
-            assert call[0][0] is parent_state
-
-    def test_session_state_not_advanced(self):
-        """Verify that the session state is read but never written."""
-        mock_pet = MagicMock()
-        parent_state = _make_mock_state()
-        new_state = _make_mock_state(proof_finished=True)
-
-        mock_pet.run = MagicMock(return_value=new_state)
-        mock_pet.goals = MagicMock(return_value=[])
-
-        # Simulate step_multi: try one tactic
-        mock_pet.run(parent_state, "auto.")
-        mock_pet.goals(new_state)
-
-        # The parent_state should be the argument, not the new_state
-        mock_pet.run.assert_called_once_with(parent_state, "auto.")
-
-    def test_successful_tactic_shows_goals(self):
-        """A successful tactic should include goals in its result."""
-        mock_pet = MagicMock()
-        parent_state = _make_mock_state()
-        new_state = _make_mock_state(proof_finished=False)
-
-        goals = [
-            _make_mock_goal("n : nat\n============================\nn = n"),
-        ]
-        mock_pet.run = MagicMock(return_value=new_state)
-        mock_pet.goals = MagicMock(return_value=goals)
-
-        # Simulate
-        result_state = mock_pet.run(parent_state, "intros.")
-        result_goals = mock_pet.goals(result_state)
-        goals_text = "\n".join(g.pp for g in result_goals)
-
-        assert "n = n" in goals_text
-        assert "n : nat" in goals_text
-
-
-# ---------------------------------------------------------------------------
-# TestStepMultiNoSession: no active session -> error
-# ---------------------------------------------------------------------------
-
-
-class TestStepMultiNoSession:
-    """Calling step_multi with no active session should return an error."""
-
-    def test_no_session_error_message(self):
-        """Verify the error structure when no session exists."""
-        # Simulate what run_step_multi would return with no session
-        result = {
-            "success": False,
-            "error": "No active session. Provide file and theorem to start one.",
-        }
-        assert result["success"] is False
-        assert "No active session" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# TestStepMultiTooMany: > 20 tactics -> error
-# ---------------------------------------------------------------------------
-
-
-class TestStepMultiTooMany:
-    """Sending more than 20 tactics should be rejected."""
-
-    def test_max_tactics_exceeded(self):
-        """25 tactics should be rejected (max 20)."""
-        tactics = [f"tactic_{i}" for i in range(25)]
-        max_tactics = 20
-
-        # Simulate validation
-        if len(tactics) > max_tactics:
-            result = {
-                "success": False,
-                "error": f"Too many tactics ({len(tactics)}). Maximum is {max_tactics}.",
-            }
-        else:
-            result = {"success": True}
-
-        assert result["success"] is False
-        assert "25" in result["error"]
-        assert "20" in result["error"]
-
-    def test_exactly_20_allowed(self):
-        """Exactly 20 tactics should be accepted."""
-        tactics = [f"tactic_{i}" for i in range(20)]
-        max_tactics = 20
-        assert len(tactics) <= max_tactics
-
-    def test_21_rejected(self):
-        """21 tactics should be rejected."""
-        tactics = [f"tactic_{i}" for i in range(21)]
-        max_tactics = 20
-        assert len(tactics) > max_tactics
 
 
 # ---------------------------------------------------------------------------
@@ -312,66 +124,6 @@ class TestStepMultiForbidden:
                 forbidden_found = True
                 break
         assert forbidden_found
-
-
-# ---------------------------------------------------------------------------
-# TestStepMultiAllFail: all tactics fail -> success:true with all failed
-# ---------------------------------------------------------------------------
-
-
-class TestStepMultiAllFail:
-    """When all tactics fail, the tool should still return success:true
-    with all individual results showing failure."""
-
-    def test_all_fail_structure(self):
-        """All tactics fail -> success:true, all results have success:false."""
-        mock_pet = MagicMock()
-        parent_state = _make_mock_state()
-
-        # All tactics raise errors
-        mock_pet.run = MagicMock(side_effect=Exception("tactic failed"))
-
-        tactics = ["auto.", "lia.", "ring."]
-        results = []
-        for tactic in tactics:
-            try:
-                mock_pet.run(parent_state, tactic)
-                results.append({"tactic": tactic, "success": True})
-            except Exception as e:
-                results.append(
-                    {
-                        "tactic": tactic.rstrip("."),
-                        "success": False,
-                        "error": str(e),
-                    }
-                )
-
-        # The tool call itself succeeds (it successfully tried all tactics)
-        tool_result = {"success": True, "results": results}
-
-        assert tool_result["success"] is True
-        assert len(tool_result["results"]) == 3
-        for r in tool_result["results"]:
-            assert r["success"] is False
-            assert "tactic failed" in r["error"]
-
-    def test_all_fail_no_crash(self):
-        """Even if every tactic raises, the tool should not crash."""
-        errors = [
-            ValueError("bad tactic"),
-            RuntimeError("timeout"),
-            Exception("generic"),
-        ]
-        results = []
-        for i, err in enumerate(errors):
-            results.append(
-                {
-                    "tactic": f"tac_{i}",
-                    "success": False,
-                    "error": str(err),
-                }
-            )
-        assert all(not r["success"] for r in results)
 
 
 # ---------------------------------------------------------------------------

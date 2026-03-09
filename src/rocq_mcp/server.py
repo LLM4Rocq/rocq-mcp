@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
@@ -28,6 +28,7 @@ from rocq_mcp.verify import (
 # ---------------------------------------------------------------------------
 
 ROCQ_WORKSPACE: str = os.environ.get("ROCQ_WORKSPACE", os.getcwd())
+_ROCQ_WORKSPACE_EXPLICIT: bool = "ROCQ_WORKSPACE" in os.environ
 ROCQ_COQC_TIMEOUT: int = int(os.environ.get("ROCQ_COQC_TIMEOUT", "60"))
 ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
 ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
@@ -77,6 +78,11 @@ _CLEANUP_EXTENSIONS: tuple[str, ...] = (
 def _validate_workspace(workspace: str) -> str | None:
     """Return error message if workspace is invalid, None if OK."""
     ws = Path(workspace).resolve()
+    # Only enforce containment when ROCQ_WORKSPACE was explicitly set
+    if _ROCQ_WORKSPACE_EXPLICIT:
+        root = Path(ROCQ_WORKSPACE).resolve()
+        if ws != root and not str(ws).startswith(str(root) + os.sep):
+            return f"Workspace must be within {root}"
     if not ws.is_dir():
         return f"Workspace directory does not exist: {ws}"
     if not os.access(ws, os.W_OK):
@@ -420,6 +426,10 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
         _ch = source[_ci]
         if _in_str:
             if _ch == '"':
+                # Handle "" escape (doubled double-quote inside strings)
+                if _ci + 1 < len(source) and source[_ci + 1] == '"':
+                    _ci += 2
+                    continue
                 _in_str = False
         elif _depth > 0:
             if _ch == "*" and _ci + 1 < len(source) and source[_ci + 1] == ")":
@@ -469,6 +479,10 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
         c = rest[i]
         if in_string:
             if c == '"':
+                # Handle "" escape (doubled double-quote inside strings)
+                if i + 1 < len(rest) and rest[i + 1] == '"':
+                    i += 2
+                    continue
                 in_string = False
         elif depth > 0:
             if c == "*" and i + 1 < len(rest) and rest[i + 1] == ")":
@@ -838,17 +852,6 @@ async def run_query(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context)."""
-    try:
-        from pytanque import PetanqueError
-    except ImportError:
-        return {
-            "success": False,
-            "error": (
-                "pytanque is not installed. "
-                "Install with: pip install 'rocq-mcp[interactive]'"
-            ),
-        }
-
     forbidden = _check_forbidden_commands(command)
     if forbidden:
         return {"success": False, "error": forbidden}
@@ -856,54 +859,35 @@ async def run_query(
     if forbidden:
         return {"success": False, "error": forbidden}
 
-    timeout: float = lifespan_state["pet_timeout"]
-
     _temp_files: list[str] = []
 
-    def _run_query() -> list[tuple[int, str]]:
-        if not _pet_lock.acquire(timeout=timeout):
-            raise TimeoutError("Could not acquire pet lock")
+    def _do_query(pet: Any) -> dict[str, Any]:
+        ws = str(Path(workspace).resolve())
+        pet.set_workspace(debug=False, dir=ws)
+
+        preamble_text = preamble.strip()
+        dummy_source = (
+            f"{preamble_text}\n" "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            suffix=".v",
+            mode="w",
+            delete=False,
+            dir=str(ws),
+        ) as f:
+            f.write(dummy_source)
+            f.flush()
+            dummy_path = Path(f.name)
+        _temp_files.append(str(dummy_path))
         try:
-            pet = _ensure_pet(lifespan_state)
-            ws = str(Path(workspace).resolve())
-            pet.set_workspace(debug=False, dir=ws)
+            state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
 
-            preamble_text = preamble.strip()
-            dummy_source = (
-                f"{preamble_text}\n"
-                "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
-            )
-            with tempfile.NamedTemporaryFile(
-                suffix=".v",
-                mode="w",
-                delete=False,
-                dir=str(ws),
-            ) as f:
-                f.write(dummy_source)
-                f.flush()
-                dummy_path = Path(f.name)
-            _temp_files.append(str(dummy_path))
-            try:
-                state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
+            cmd = command.strip()
+            if not cmd.endswith("."):
+                cmd += "."
+            state = pet.run(state, cmd)
+            feedback = state.feedback or []
 
-                cmd = command.strip()
-                if not cmd.endswith("."):
-                    cmd += "."
-                state = pet.run(state, cmd)
-                feedback = state.feedback or []
-                return [(lvl, msg) for lvl, msg in feedback]
-            finally:
-                dummy_path.unlink(missing_ok=True)
-        finally:
-            _pet_lock.release()
-
-    sem = _get_pet_semaphore()
-    try:
-        async with sem:
-            feedback = await asyncio.wait_for(
-                asyncio.to_thread(_run_query),
-                timeout=timeout,
-            )
             output = "\n".join(msg for _, msg in feedback)
             if len(output) > _MAX_QUERY_OUTPUT:
                 output = (
@@ -911,21 +895,19 @@ async def run_query(
                     + f"\n... (truncated, {len(output)} total chars)"
                 )
             return {"success": True, "output": output or "(no output)"}
-    except asyncio.TimeoutError:
-        _invalidate_pet(lifespan_state)
-        # Clean up any temp files left by the orphaned thread
+        finally:
+            dummy_path.unlink(missing_ok=True)
+
+    def _on_timeout() -> None:
         for p in _temp_files:
             Path(p).unlink(missing_ok=True)
-        return {"success": False, "error": f"Query timed out after {timeout}s."}
-    except PetanqueError as e:
-        return {"success": False, "error": e.message}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "error": "pet binary not found on PATH. Install coq-lsp.",
-        }
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {e}"}
+
+    return await _run_with_pet(
+        _do_query,
+        lifespan_state,
+        "Query",
+        on_timeout=_on_timeout,
+    )
 
 
 @mcp.tool
@@ -988,69 +970,36 @@ async def run_toc(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_toc (testable without FastMCP Context)."""
-    try:
-        from pytanque import PetanqueError
-    except ImportError:
-        return {
-            "success": False,
-            "error": (
-                "pytanque is not installed. "
-                "Install with: pip install 'rocq-mcp[interactive]'"
-            ),
-        }
-
-    timeout: float = lifespan_state["pet_timeout"]
-
     # Path traversal check (before entering thread)
     file_path = str((Path(workspace).resolve() / file).resolve())
     ws_resolved = str(Path(workspace).resolve())
     if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
         return {"success": False, "error": "File path must be within workspace."}
 
-    def _run_toc() -> list[tuple[str, list[Any]]]:
-        if not _pet_lock.acquire(timeout=timeout):
-            raise TimeoutError("Could not acquire pet lock")
-        try:
-            pet = _ensure_pet(lifespan_state)
-            ws = str(Path(workspace).resolve())
-            pet.set_workspace(debug=False, dir=ws)
-            return pet.toc(file_path)
-        finally:
-            _pet_lock.release()
+    def _do_toc(pet: Any) -> dict[str, Any]:
+        ws = str(Path(workspace).resolve())
+        pet.set_workspace(debug=False, dir=ws)
+        toc_result = pet.toc(file_path)
 
-    sem = _get_pet_semaphore()
-    try:
-        async with sem:
-            toc_result = await asyncio.wait_for(
-                asyncio.to_thread(_run_toc),
-                timeout=timeout,
+        # Format the result as readable text
+        lines: list[str] = [f"File: {file}"]
+        if toc_result:
+            for _section_name, elements in toc_result:
+                lines.extend(_format_toc_elements(elements))
+
+        output = "\n".join(lines)
+        if len(output) > _MAX_QUERY_OUTPUT:
+            output = (
+                output[:_MAX_QUERY_OUTPUT]
+                + f"\n... (truncated, {len(output)} total chars)"
             )
+        return {"success": True, "output": output or f"File: {file}\n  (empty)"}
 
-            # Format the result as readable text
-            lines: list[str] = [f"File: {file}"]
-            if toc_result:
-                for _section_name, elements in toc_result:
-                    lines.extend(_format_toc_elements(elements))
-
-            output = "\n".join(lines)
-            if len(output) > _MAX_QUERY_OUTPUT:
-                output = (
-                    output[:_MAX_QUERY_OUTPUT]
-                    + f"\n... (truncated, {len(output)} total chars)"
-                )
-            return {"success": True, "output": output or f"File: {file}\n  (empty)"}
-    except asyncio.TimeoutError:
-        _invalidate_pet(lifespan_state)
-        return {"success": False, "error": f"TOC request timed out after {timeout}s."}
-    except PetanqueError as e:
-        return {"success": False, "error": e.message}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "error": "pet binary not found on PATH. Install coq-lsp.",
-        }
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {e}"}
+    return await _run_with_pet(
+        _do_toc,
+        lifespan_state,
+        "TOC request",
+    )
 
 
 @mcp.tool
@@ -1096,17 +1045,6 @@ async def run_notations(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_notations (testable without FastMCP Context)."""
-    try:
-        from pytanque import PetanqueError
-    except ImportError:
-        return {
-            "success": False,
-            "error": (
-                "pytanque is not installed. "
-                "Install with: pip install 'rocq-mcp[interactive]'"
-            ),
-        }
-
     forbidden = _check_forbidden_commands(statement)
     if forbidden:
         return {"success": False, "error": forbidden}
@@ -1114,51 +1052,32 @@ async def run_notations(
     if forbidden:
         return {"success": False, "error": forbidden}
 
-    timeout: float = lifespan_state["pet_timeout"]
-
     _temp_files: list[str] = []
 
-    def _run_notations() -> list[Any]:
-        if not _pet_lock.acquire(timeout=timeout):
-            raise TimeoutError("Could not acquire pet lock")
+    def _do_notations(pet: Any) -> dict[str, Any]:
+        ws = str(Path(workspace).resolve())
+        pet.set_workspace(debug=False, dir=ws)
+
+        preamble_text = preamble.strip()
+        dummy_source = (
+            f"{preamble_text}\n" "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            suffix=".v",
+            mode="w",
+            delete=False,
+            dir=str(ws),
+        ) as f:
+            f.write(dummy_source)
+            f.flush()
+            dummy_path = Path(f.name)
+        _temp_files.append(str(dummy_path))
         try:
-            pet = _ensure_pet(lifespan_state)
-            ws = str(Path(workspace).resolve())
-            pet.set_workspace(debug=False, dir=ws)
+            state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
 
-            preamble_text = preamble.strip()
-            dummy_source = (
-                f"{preamble_text}\n"
-                "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
-            )
-            with tempfile.NamedTemporaryFile(
-                suffix=".v",
-                mode="w",
-                delete=False,
-                dir=str(ws),
-            ) as f:
-                f.write(dummy_source)
-                f.flush()
-                dummy_path = Path(f.name)
-            _temp_files.append(str(dummy_path))
-            try:
-                state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
-
-                # Construct the full Lemma declaration for pytanque
-                full_statement = f"Lemma _rocq_mcp_notation_check : {statement}."
-                return pet.list_notations_in_statement(state, full_statement)
-            finally:
-                dummy_path.unlink(missing_ok=True)
-        finally:
-            _pet_lock.release()
-
-    sem = _get_pet_semaphore()
-    try:
-        async with sem:
-            notations = await asyncio.wait_for(
-                asyncio.to_thread(_run_notations),
-                timeout=timeout,
-            )
+            # Construct the full Lemma declaration for pytanque
+            full_statement = f"Lemma _rocq_mcp_notation_check : {statement}."
+            notations = pet.list_notations_in_statement(state, full_statement)
 
             if not notations:
                 return {
@@ -1180,24 +1099,19 @@ async def run_notations(
                     + f"\n... (truncated, {len(output)} total chars)"
                 )
             return {"success": True, "output": output}
-    except asyncio.TimeoutError:
-        _invalidate_pet(lifespan_state)
-        # Clean up any temp files left by the orphaned thread
+        finally:
+            dummy_path.unlink(missing_ok=True)
+
+    def _on_timeout() -> None:
         for p in _temp_files:
             Path(p).unlink(missing_ok=True)
-        return {
-            "success": False,
-            "error": f"Notation query timed out after {timeout}s.",
-        }
-    except PetanqueError as e:
-        return {"success": False, "error": e.message}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "error": "pet binary not found on PATH. Install coq-lsp.",
-        }
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {e}"}
+
+    return await _run_with_pet(
+        _do_notations,
+        lifespan_state,
+        "Notation query",
+        on_timeout=_on_timeout,
+    )
 
 
 @mcp.tool
@@ -1244,17 +1158,18 @@ async def rocq_notations(
 
 def _format_goals(goals_list: list[Any]) -> str:
     """Format goal objects into readable text with hypotheses."""
-    for g in goals_list:
+    parts = []
+    for i, g in enumerate(goals_list):
         hyps = "\n".join(
             f"{', '.join(h.names)}" f"{' := ' + h.def_ if h.def_ else ''}" f" : {h.ty}"
             for h in g.hyps
         )
-        g.pp = f"{hyps}\n|-{g.ty}"
-    goals_text = "\n\n".join(
-        f"Goal {i + 1}:\n{g.pp}" if len(goals_list) > 1 else g.pp
-        for i, g in enumerate(goals_list)
-    )
-    return goals_text
+        pp = f"{hyps}\n|-{g.ty}"
+        if len(goals_list) > 1:
+            parts.append(f"Goal {i + 1}:\n{pp}")
+        else:
+            parts.append(pp)
+    return "\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1285,6 +1200,77 @@ def _get_pet_semaphore() -> asyncio.Semaphore:
     return _pet_semaphore
 
 
+async def _run_with_pet(
+    fn: Callable[[Any], Any],
+    lifespan_state: dict[str, Any],
+    description: str,
+    on_timeout: Callable[[], None] | None = None,
+) -> Any:
+    """Run *fn(pet)* with the pet client, handling lock/semaphore/timeout/errors.
+
+    The helper encapsulates the full boilerplate shared by every pytanque
+    operation that follows the simple "acquire lock, ensure pet, do work"
+    pattern:
+
+    1. PetanqueError import check
+    2. _pet_lock acquisition with timeout
+    3. _ensure_pet (lazy-init the pet subprocess)
+    4. asyncio.Semaphore + asyncio.wait_for (async-level timeout)
+    5. All four standard exception handlers
+
+    *fn* receives the live pet client and must return the desired result.
+    It runs inside a background thread with _pet_lock held; the lock is
+    released automatically when *fn* returns or raises.
+    """
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
+
+    timeout: float = lifespan_state["pet_timeout"]
+
+    def _execute() -> Any:
+        if not _pet_lock.acquire(timeout=timeout):
+            raise TimeoutError("Could not acquire pet lock")
+        try:
+            pet = _ensure_pet(lifespan_state)
+            return fn(pet)
+        finally:
+            _pet_lock.release()
+
+    sem = _get_pet_semaphore()
+    try:
+        async with sem:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_execute),
+                timeout=timeout,
+            )
+            return result
+    except asyncio.TimeoutError:
+        _invalidate_pet(lifespan_state)
+        if on_timeout:
+            on_timeout()
+        return {
+            "success": False,
+            "error": f"{description} timed out after {timeout}s.",
+        }
+    except PetanqueError as e:
+        return {"success": False, "error": e.message}
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "error": "pet binary not found on PATH. Install coq-lsp.",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {e}"}
+
+
 async def run_step(
     tactic: str,
     file: str,
@@ -1309,6 +1295,14 @@ async def run_step(
         return {"success": False, "error": forbidden}
 
     timeout: float = lifespan_state["pet_timeout"]
+
+    # Path traversal check (before entering thread)
+    if file and theorem:
+        file_path = str((Path(workspace).resolve() / file).resolve())
+        ws_resolved = str(Path(workspace).resolve())
+        if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
+            return {"success": False, "error": "File path must be within workspace."}
+
     sem = _get_pet_semaphore()
 
     async with sem:
@@ -1322,14 +1316,9 @@ async def run_step(
                 # Start new session if file+theorem provided
                 if file and theorem:
                     ws = str(Path(workspace).resolve())
-                    file_path = str((Path(workspace).resolve() / file).resolve())
-                    if not file_path.startswith(ws + os.sep) and file_path != ws:
-                        return {
-                            "success": False,
-                            "error": "File path must be within workspace.",
-                        }
+                    resolved_file = str((Path(workspace).resolve() / file).resolve())
                     pet.set_workspace(debug=False, dir=ws)
-                    state = pet.start(file_path, theorem)
+                    state = pet.start(resolved_file, theorem)
                     _session.update(
                         {
                             "state": state,

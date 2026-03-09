@@ -5,7 +5,7 @@ description = "Model Context Protocol (MCP) server for Rocq/Coq proof assistant 
 authors = [{name = "Guillaume Baudart", email = "guillaume.baudart@inria.fr"}]
 readme = "README.md"
 license = {text = "Apache-2.0"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
     "pytanque @ git+https://github.com/LLM4Rocq/pytanque.git",

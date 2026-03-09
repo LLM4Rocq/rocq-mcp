@@ -192,7 +192,8 @@ _STDLIB_PREFIXES: tuple[str, ...] = ("Coq.", "Rocq.", "Stdlib.")
 _STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
     "ClassicalDedekindReals.",  # Dedekind reals axioms
     "FunctionalExtensionality.",  # functional extensionality
-    "Eqdep.Eq_rect_eq.",  # eq_rect_eq / UIP
+    "Eqdep.Eq_rect_eq.",  # eq_rect_eq / UIP (via JMeq)
+    "Eq_rect_eq.",  # eq_rect_eq / UIP (via Eqdep directly)
     "Classical_Prop.",  # classic, proof_irrelevance
     "ClassicalEpsilon.",  # constructive_indefinite_description, epsilon
     "ClassicalUniqueChoice.",  # dependent_unique_choice, unique_choice

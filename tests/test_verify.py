@@ -173,6 +173,10 @@ class TestAxiomClassification:
     def test_classical_epsilon_module_qualified(self):
         assert _is_standard_axiom("ClassicalEpsilon.epsilon") is True
 
+    def test_eq_rect_eq_without_eqdep_prefix(self):
+        """From Stdlib Require Import Eqdep outputs Eq_rect_eq.eq_rect_eq (no Eqdep. prefix)."""
+        assert _is_standard_axiom("Eq_rect_eq.eq_rect_eq") is True
+
     def test_raxioms_module_qualified(self):
         assert _is_standard_axiom("Raxioms.completeness") is True
 

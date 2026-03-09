@@ -9,6 +9,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -408,6 +409,47 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
     matches = list(_THEOREM_KW_RE.finditer(source))
     if not matches:
         return None
+
+    # Build list of comment ranges to filter out matches inside (* ... *)
+    comment_ranges: list[tuple[int, int]] = []
+    _depth = 0
+    _in_str = False
+    _comment_start = 0
+    _ci = 0
+    while _ci < len(source):
+        _ch = source[_ci]
+        if _in_str:
+            if _ch == '"':
+                _in_str = False
+        elif _depth > 0:
+            if _ch == "*" and _ci + 1 < len(source) and source[_ci + 1] == ")":
+                _depth -= 1
+                if _depth == 0:
+                    comment_ranges.append((_comment_start, _ci + 2))
+                _ci += 2
+                continue
+            elif _ch == "(" and _ci + 1 < len(source) and source[_ci + 1] == "*":
+                _depth += 1
+                _ci += 2
+                continue
+        else:
+            if _ch == '"':
+                _in_str = True
+            elif _ch == "(" and _ci + 1 < len(source) and source[_ci + 1] == "*":
+                _comment_start = _ci
+                _depth += 1
+                _ci += 2
+                continue
+        _ci += 1
+
+    def _in_comment(pos: int) -> bool:
+        return any(start <= pos < end for start, end in comment_ranges)
+
+    # Filter out matches that fall inside comments
+    matches = [m for m in matches if not _in_comment(m.start())]
+    if not matches:
+        return None
+
     m = matches[-1]
 
     preamble = source[: m.start()]
@@ -565,6 +607,7 @@ def rocq_auto_solve(
     """
     workspace = workspace or ROCQ_WORKSPACE
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
+    start_time = time.monotonic()
 
     # --- Input validation ---
     err = _validate_workspace(workspace)
@@ -629,6 +672,11 @@ def rocq_auto_solve(
     per_tactic_timeout = max(timeout // 3, 10)
 
     for tactic in _AUTO_SOLVE_TACTICS:
+        # Check if the overall timeout has been exceeded
+        if time.monotonic() - start_time > timeout:
+            # Timeout: we know it's solvable but can't identify which tactic
+            break
+
         single_source = _build_single_tactic_source(
             preamble, full_statement, pt, tactic
         )
@@ -962,6 +1010,15 @@ async def run_toc(
             pet.set_workspace(debug=False, dir=ws)
 
             file_path = str(Path(workspace).resolve() / file)
+            ws_resolved = str(Path(workspace).resolve())
+            if (
+                not str(Path(file_path).resolve()).startswith(ws_resolved + os.sep)
+                and str(Path(file_path).resolve()) != ws_resolved
+            ):
+                return {
+                    "success": False,
+                    "error": "File path must be within workspace.",
+                }
             return pet.toc(file_path)
         finally:
             _pet_lock.release()
@@ -1186,6 +1243,26 @@ async def rocq_notations(
 
 
 # ---------------------------------------------------------------------------
+# Goal formatting helper (shared by run_step and run_step_multi)
+# ---------------------------------------------------------------------------
+
+
+def _format_goals(goals_list: list[Any]) -> str:
+    """Format goal objects into readable text with hypotheses."""
+    for g in goals_list:
+        hyps = "\n".join(
+            f"{', '.join(h.names)}" f"{' := ' + h.def_ if h.def_ else ''}" f" : {h.ty}"
+            for h in g.hyps
+        )
+        g.pp = f"{hyps}\n|-{g.ty}"
+    goals_text = "\n\n".join(
+        f"Goal {i + 1}:\n{g.pp}" if len(goals_list) > 1 else g.pp
+        for i, g in enumerate(goals_list)
+    )
+    return goals_text
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_step (Phase 2)
 # ---------------------------------------------------------------------------
 
@@ -1250,8 +1327,14 @@ async def run_step(
                 # Start new session if file+theorem provided
                 if file and theorem:
                     ws = str(Path(workspace).resolve())
+                    file_path = str((Path(workspace).resolve() / file).resolve())
+                    if not file_path.startswith(ws + os.sep) and file_path != ws:
+                        return {
+                            "success": False,
+                            "error": "File path must be within workspace.",
+                        }
                     pet.set_workspace(debug=False, dir=ws)
-                    state = pet.start(file, theorem)
+                    state = pet.start(file_path, theorem)
                     _session.update(
                         {
                             "state": state,
@@ -1285,21 +1368,13 @@ async def run_step(
                 complete = pet.complete_goals(new_state)
                 goals_list = complete.goals if complete else []
 
-                # Format goals (pp_goal logic from pytanque)
-                for g in goals_list:
-                    hyps = "\n".join(
-                        f"{', '.join(h.names)}"
-                        f"{' := ' + h.def_ if h.def_ else ''}"
-                        f" : {h.ty}"
-                        for h in g.hyps
-                    )
-                    g.pp = f"{hyps}\n|-{g.ty}"
+                # Format goals
+                goals_text = _format_goals(goals_list)
 
                 # Only update session after both run() and
                 # complete_goals() succeed
                 _session["state"] = new_state
                 _session["history"].append(tac)
-                goals_text = "\n\n".join(g.pp or str(g) for g in goals_list)
 
                 result = {
                     "success": True,
@@ -1416,10 +1491,16 @@ async def run_step_multi(
             }
 
     if len(tactics) > _MAX_STEP_MULTI_TACTICS:
-        tactics = tactics[:_MAX_STEP_MULTI_TACTICS]
+        return {
+            "success": False,
+            "error": f"Too many tactics: {len(tactics)} exceeds maximum of {_MAX_STEP_MULTI_TACTICS}.",
+        }
 
     timeout: float = lifespan_state["pet_timeout"]
     sem = _get_pet_semaphore()
+
+    # Shared list so partial results survive a timeout
+    partial_results: list[dict[str, Any]] = []
 
     async with sem:
 
@@ -1439,7 +1520,6 @@ async def run_step_multi(
                         ),
                     }
 
-                results: list[dict[str, Any]] = []
                 for tactic in tactics:
                     tac = tactic.strip()
                     if not tac.endswith("."):
@@ -1453,17 +1533,8 @@ async def run_step_multi(
                         complete = pet.complete_goals(new_state)
                         goals_list = complete.goals if complete else []
 
-                        # Format goals (pp_goal logic from pytanque)
-                        for g in goals_list:
-                            hyps = "\n".join(
-                                f"{', '.join(h.names)}"
-                                f"{' := ' + h.def_ if h.def_ else ''}"
-                                f" : {h.ty}"
-                                for h in g.hyps
-                            )
-                            g.pp = f"{hyps}\n|-{g.ty}"
-
-                        goals_text = "\n\n".join(g.pp or str(g) for g in goals_list)
+                        # Format goals
+                        goals_text = _format_goals(goals_list)
                         entry["success"] = True
                         entry["goals"] = goals_text or "No goals remaining."
                         entry["proof_finished"] = new_state.proof_finished
@@ -1475,10 +1546,10 @@ async def run_step_multi(
                         entry["success"] = False
                         entry["error"] = e.message
 
-                    results.append(entry)
+                    partial_results.append(entry)
 
                 # Do NOT update _session -- this is read-only exploration
-                return {"success": True, "results": results}
+                return {"success": True, "results": list(partial_results)}
             finally:
                 _pet_lock.release()
 
@@ -1490,15 +1561,26 @@ async def run_step_multi(
             return result
         except asyncio.TimeoutError:
             _invalidate_pet(lifespan_state)
-            _session.update({"state": None, "history": []})
-            return {
+            _session.update(
+                {
+                    "state": None,
+                    "history": [],
+                    "file": _session.get("file"),
+                    "theorem": _session.get("theorem"),
+                }
+            )
+            resp: dict[str, Any] = {
                 "success": False,
                 "error": (
                     f"Multi-tactic exploration timed out after {timeout}s. "
-                    "Session lost. Start a new session (provide file + "
-                    "theorem to rocq_step) and replay your tactics."
+                    "Session lost but file/theorem preserved. "
+                    "Start a new session (provide file + theorem to "
+                    "rocq_step) and replay your tactics."
                 ),
             }
+            if partial_results:
+                resp["partial_results"] = list(partial_results)
+            return resp
         except PetanqueError as e:
             return {"success": False, "error": e.message}
         except FileNotFoundError:

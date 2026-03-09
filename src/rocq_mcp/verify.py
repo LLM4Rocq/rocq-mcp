@@ -26,6 +26,10 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Forbidden command 'Separate Extraction' (writes .ml/.mli files)",
     ),
     (
+        re.compile(r"\bRecursive Extraction\b"),
+        "Forbidden command 'Recursive Extraction' (writes .ml files)",
+    ),
+    (
         re.compile(r"\bCd\b"),
         "Forbidden command 'Cd' (changes working directory)",
     ),

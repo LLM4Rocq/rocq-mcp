@@ -10,12 +10,14 @@ Tests are grouped into:
 - TestStepMultiTooMany: error when > 20 tactics
 - TestStepMultiForbidden: tactic with forbidden command rejected
 - TestStepMultiAllFail: all tactics fail -> success:true with all failed results
+- TestStepMultiReal: tests that call the real run_step_multi with mocked pet
 - TestStepMultiIntegration: integration tests (require pet)
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -40,6 +42,43 @@ def _make_mock_state(proof_finished=False):
 def _make_mock_goal(pp_text):
     """Create a mock Goal object with pp field."""
     return SimpleNamespace(pp=pp_text)
+
+
+def _make_mock_hyp(names, ty, def_=None):
+    """Create a mock hypothesis object for _format_goals."""
+    return SimpleNamespace(names=names, ty=ty, def_=def_)
+
+
+def _make_structured_goal(hyps, ty):
+    """Create a goal with hyps and ty attributes for _format_goals."""
+    return SimpleNamespace(hyps=hyps, ty=ty, pp="")
+
+
+def _make_complete_goals(goals=None, shelf=None, given_up=None):
+    """Create a mock GoalsResponse from complete_goals()."""
+    return SimpleNamespace(
+        goals=goals or [],
+        stack=[],
+        shelf=shelf or [],
+        given_up=given_up or [],
+    )
+
+
+def _ensure_pytanque_importable():
+    """Ensure 'pytanque' is importable (mock it if not installed).
+
+    Returns a cleanup function to remove the mock from sys.modules.
+    """
+    if "pytanque" in sys.modules:
+        return lambda: None  # already available, no cleanup needed
+
+    mock_module = SimpleNamespace(
+        PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+        Pytanque=MagicMock,
+        PytanqueMode=SimpleNamespace(STDIO="stdio"),
+    )
+    sys.modules["pytanque"] = mock_module
+    return lambda: sys.modules.pop("pytanque", None)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +372,125 @@ class TestStepMultiAllFail:
                 }
             )
         assert all(not r["success"] for r in results)
+
+
+# ---------------------------------------------------------------------------
+# TestStepMultiReal: tests that call the real run_step_multi
+# ---------------------------------------------------------------------------
+
+
+class TestStepMultiReal:
+    """Tests that call the actual run_step_multi function (with mocked pet)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_session_and_semaphore(self):
+        import rocq_mcp.server as srv
+
+        srv._session.update(
+            {"state": None, "file": None, "theorem": None, "history": []}
+        )
+        srv._pet_semaphore = None  # reset so each asyncio.run() gets a fresh one
+        yield
+        srv._session.update(
+            {"state": None, "file": None, "theorem": None, "history": []}
+        )
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        """Ensure pytanque is importable even if not installed."""
+        cleanup = _ensure_pytanque_importable()
+        yield
+        cleanup()
+
+    def test_too_many_tactics_rejected(self):
+        """run_step_multi rejects >20 tactics with success:False."""
+        from rocq_mcp.server import run_step_multi
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        result = asyncio.run(
+            run_step_multi(tactics=["auto"] * 25, lifespan_state=lifespan_state)
+        )
+        assert result["success"] is False
+        assert "25" in result["error"]
+        assert "20" in result["error"]
+
+    def test_forbidden_command_rejected(self):
+        """run_step_multi rejects tactics with forbidden commands."""
+        from rocq_mcp.server import run_step_multi
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        result = asyncio.run(
+            run_step_multi(
+                tactics=["auto.", 'Load "evil".', "lia."],
+                lifespan_state=lifespan_state,
+            )
+        )
+        assert result["success"] is False
+        assert "Forbidden" in result["error"] or "Load" in result["error"]
+
+    def test_valid_tactics_with_mocked_pet(self):
+        """run_step_multi with valid tactics returns structured results."""
+        from rocq_mcp.server import run_step_multi, _session
+
+        # Set up a mock session state (simulating an active session)
+        parent_state = _make_mock_state(proof_finished=False)
+        _session["state"] = parent_state
+
+        # Build a mock pet that returns structured goals
+        mock_pet = MagicMock()
+        new_state = _make_mock_state(proof_finished=True)
+        mock_pet.run = MagicMock(return_value=new_state)
+        mock_pet.complete_goals = MagicMock(
+            return_value=_make_complete_goals(
+                goals=[
+                    _make_structured_goal(
+                        hyps=[_make_mock_hyp(["n"], "nat")],
+                        ty="n = n",
+                    )
+                ],
+            )
+        )
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+            result = asyncio.run(
+                run_step_multi(
+                    tactics=["auto", "lia", "ring"],
+                    lifespan_state=lifespan_state,
+                )
+            )
+
+        assert result["success"] is True
+        assert "results" in result
+        assert len(result["results"]) == 3
+
+        # Each result should have the expected structure
+        for entry in result["results"]:
+            assert "tactic" in entry
+            assert "success" in entry
+            assert entry["success"] is True
+            assert "goals" in entry
+            assert "proof_finished" in entry
+
+        # Session state should NOT have been advanced
+        assert _session["state"] is parent_state
+
+    def test_no_session_error(self):
+        """run_step_multi with no active session returns error."""
+        from rocq_mcp.server import run_step_multi
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+
+        mock_pet = MagicMock()
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+            result = asyncio.run(
+                run_step_multi(tactics=["auto"], lifespan_state=lifespan_state)
+            )
+
+        assert result["success"] is False
+        assert "no active session" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------

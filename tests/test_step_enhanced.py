@@ -10,13 +10,16 @@ Tests are grouped into:
 - TestStepNoShelf: mock complete_goals with empty shelf -> no shelved_goals key
 - TestStepGivenUpGoals: mock complete_goals with given_up -> verify given_up_goals
 - TestStepBothShelvedAndGivenUp: both shelf and given_up non-empty
-- TestStepIntegration: integration tests (require pet)
+- TestStepEnhancedReal: tests that call the real run_step with mocked pet
+- TestStepEnhancedIntegration: integration tests (require pet)
 """
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -56,6 +59,33 @@ def _make_mock_state(proof_finished=False):
         proof_finished=proof_finished,
         feedback=[],
     )
+
+
+def _make_mock_hyp(names, ty, def_=None):
+    """Create a mock hypothesis object for _format_goals."""
+    return SimpleNamespace(names=names, ty=ty, def_=def_)
+
+
+def _make_structured_goal(hyps, ty):
+    """Create a goal with hyps and ty attributes for _format_goals."""
+    return SimpleNamespace(hyps=hyps, ty=ty, pp="")
+
+
+def _ensure_pytanque_importable():
+    """Ensure 'pytanque' is importable (mock it if not installed).
+
+    Returns a cleanup function to remove the mock from sys.modules.
+    """
+    if "pytanque" in sys.modules:
+        return lambda: None  # already available, no cleanup needed
+
+    mock_module = SimpleNamespace(
+        PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+        Pytanque=MagicMock,
+        PytanqueMode=SimpleNamespace(STDIO="stdio"),
+    )
+    sys.modules["pytanque"] = mock_module
+    return lambda: sys.modules.pop("pytanque", None)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +361,132 @@ class TestStepEnhancedMock:
 
 
 # ---------------------------------------------------------------------------
+# TestStepEnhancedReal: tests that call the real run_step with mocked pet
+# ---------------------------------------------------------------------------
+
+
+class TestStepEnhancedReal:
+    """Tests that call the actual run_step function with a mocked pet client."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_session_and_semaphore(self):
+        import rocq_mcp.server as srv
+
+        srv._session.update(
+            {"state": None, "file": None, "theorem": None, "history": []}
+        )
+        srv._pet_semaphore = None  # reset so each asyncio.run() gets a fresh one
+        yield
+        srv._session.update(
+            {"state": None, "file": None, "theorem": None, "history": []}
+        )
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        """Ensure pytanque is importable even if not installed."""
+        cleanup = _ensure_pytanque_importable()
+        yield
+        cleanup()
+
+    def test_run_step_with_shelved_goals(self, tmp_path):
+        """Real run_step with mocked pet that returns shelved goals."""
+        from rocq_mcp.server import run_step, _session
+
+        # Set up active session so run_step doesn't try to start a new one
+        parent_state = _make_mock_state(proof_finished=False)
+        _session.update(
+            {
+                "state": parent_state,
+                "file": "test.v",
+                "theorem": "t",
+                "history": ["intros."],
+            }
+        )
+
+        # Build a mock pet that returns complete_goals with shelved goals
+        mock_pet = MagicMock()
+        new_state = _make_mock_state(proof_finished=False)
+        mock_pet.run = MagicMock(return_value=new_state)
+        mock_pet.complete_goals = MagicMock(
+            return_value=_make_complete_goals(
+                goals=[
+                    _make_structured_goal(
+                        hyps=[_make_mock_hyp(["n"], "nat")],
+                        ty="n + 0 = n",
+                    )
+                ],
+                shelf=[
+                    _make_mock_goal("shelved goal 1"),
+                    _make_mock_goal("shelved goal 2"),
+                ],
+            )
+        )
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+            result = asyncio.run(
+                run_step(
+                    tactic="simpl",
+                    file="",
+                    theorem="",
+                    workspace=str(tmp_path),
+                    lifespan_state=lifespan_state,
+                )
+            )
+
+        assert result["success"] is True
+        assert "shelved_goals" in result
+        assert result["shelved_goals"] == 2
+        assert "n + 0 = n" in result["goals"]
+        assert result["step"] == 2  # history had 1, now 2
+
+    def test_run_step_no_shelf_omits_key(self, tmp_path):
+        """Real run_step with mocked pet that returns empty shelf omits shelved_goals."""
+        from rocq_mcp.server import run_step, _session
+
+        parent_state = _make_mock_state(proof_finished=False)
+        _session.update(
+            {
+                "state": parent_state,
+                "file": "test.v",
+                "theorem": "t",
+                "history": [],
+            }
+        )
+
+        mock_pet = MagicMock()
+        new_state = _make_mock_state(proof_finished=True)
+        mock_pet.run = MagicMock(return_value=new_state)
+        mock_pet.complete_goals = MagicMock(
+            return_value=_make_complete_goals(
+                goals=[],
+                shelf=[],
+                given_up=[],
+            )
+        )
+
+        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+            result = asyncio.run(
+                run_step(
+                    tactic="reflexivity",
+                    file="",
+                    theorem="",
+                    workspace=str(tmp_path),
+                    lifespan_state=lifespan_state,
+                )
+            )
+
+        assert result["success"] is True
+        assert result["proof_finished"] is True
+        assert "shelved_goals" not in result
+        assert "given_up_goals" not in result
+
+
+# ---------------------------------------------------------------------------
 # TestStepEnhancedIntegration: integration tests (require pet)
 # ---------------------------------------------------------------------------
 
@@ -371,14 +527,8 @@ class TestStepEnhancedIntegration:
                 lifespan_state=state,
             )
             assert r["success"] is True
-            # For a simple proof, there should be no shelved or given_up goals
-            # (these keys should be absent from the result)
-            # Note: this test validates the current behavior. Once the
-            # enhancement is implemented, the assertion remains valid because
-            # shelf should be empty for this simple proof.
-            if "shelved_goals" in r:
-                assert (
-                    r["shelved_goals"] == 0
-                )  # should not be there, but if present it's 0
+            # For a simple proof, shelved_goals should NOT be present.
+            # The key is only added when the shelf is non-empty.
+            assert "shelved_goals" not in r
         finally:
             _invalidate_pet(state)

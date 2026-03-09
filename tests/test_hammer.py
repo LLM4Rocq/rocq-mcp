@@ -160,6 +160,77 @@ class TestAutoSolveParsing:
         assert result is not None
         assert result[2] == "helper_123"
 
+    def test_parametric_theorem_nat(self):
+        """Theorem with explicit parameter: Theorem foo (n : nat) : n = n."""
+        source = "Theorem foo (n : nat) : n = n.\nAdmitted.\n"
+        result = _parse_last_theorem(source)
+        assert result is not None
+        preamble, keyword, name, stmt = result
+        assert keyword == "Theorem"
+        assert name == "foo"
+        assert "(n : nat)" in stmt
+        assert stmt.endswith(".")
+
+    def test_parametric_theorem_implicit(self):
+        """Theorem with implicit parameter: Theorem foo {A : Type} : ..."""
+        source = "Theorem foo {A : Type} (x : A) : x = x.\n" "Admitted.\n"
+        result = _parse_last_theorem(source)
+        assert result is not None
+        preamble, keyword, name, stmt = result
+        assert keyword == "Theorem"
+        assert name == "foo"
+        assert "{A : Type}" in stmt
+        assert "(x : A)" in stmt
+        assert stmt.endswith(".")
+
+    def test_parametric_lemma_multiple_params(self):
+        """Lemma with multiple parameters of different kinds."""
+        source = (
+            "Lemma bar (n m : nat) {P : Prop} (H : P) : n + m = m + n.\n" "Admitted.\n"
+        )
+        result = _parse_last_theorem(source)
+        assert result is not None
+        _, keyword, name, stmt = result
+        assert keyword == "Lemma"
+        assert name == "bar"
+        assert "(n m : nat)" in stmt
+        assert "{P : Prop}" in stmt
+
+    def test_commented_out_theorem_ignored(self):
+        """A theorem inside (* ... *) should be ignored; the real one is picked."""
+        source = "(* Theorem fake : False. *)\n" "Theorem real : True.\n" "Admitted.\n"
+        result = _parse_last_theorem(source)
+        assert result is not None
+        _, keyword, name, stmt = result
+        assert keyword == "Theorem"
+        assert name == "real"
+        assert "True" in stmt
+        # The fake theorem must NOT be picked
+        assert name != "fake"
+
+    def test_commented_out_theorem_only(self):
+        """If the only theorem keyword is inside a comment, return None."""
+        source = "(* Theorem fake : False. *)\nDefinition x := 42.\n"
+        result = _parse_last_theorem(source)
+        assert result is None
+
+    def test_commented_theorem_before_real_in_preamble(self):
+        """Commented theorem in preamble, real theorem after it."""
+        source = (
+            "From Stdlib Require Import Arith.\n"
+            "(* Theorem old_attempt : forall n, n = n. *)\n"
+            "Lemma actual : 1 = 1.\n"
+            "Admitted.\n"
+        )
+        result = _parse_last_theorem(source)
+        assert result is not None
+        preamble, keyword, name, _ = result
+        assert keyword == "Lemma"
+        assert name == "actual"
+        # The preamble should contain the comment but the parser should
+        # not have treated the commented keyword as a theorem.
+        assert "(* Theorem old_attempt" in preamble
+
 
 # ---------------------------------------------------------------------------
 # _build_auto_solve_source
@@ -665,15 +736,18 @@ class TestAutoSolveTimeout:
     """Timeout handling for rocq_auto_solve."""
 
     def test_timeout_short(self, workspace):
-        """A problem with a very short timeout should either solve or report timeout."""
+        """A trivial problem with a short timeout should still solve successfully."""
         result = rocq_auto_solve(
             problem="Theorem t : True.\nAdmitted.\n",
             workspace=str(workspace),
             timeout=3,
         )
-        # With 3s this simple problem should still solve,
-        # but at minimum no crash should occur.
-        assert "solved" in result
+        # This trivial problem should solve even with a 3s timeout.
+        assert result["solved"] is True
+        assert "tactic" in result
+        assert "proof" in result
+        assert result["proof"].startswith("Proof.")
+        assert result["proof"].endswith("Qed.")
 
     def test_diverging_preamble_timeout(self, workspace):
         """A problem whose preamble definitions are slow should not hang forever."""

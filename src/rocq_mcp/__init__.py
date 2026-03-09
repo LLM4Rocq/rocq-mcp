@@ -1,7 +1,7 @@
 """
 Rocq MCP Server
 
-A Model Context Protocol (MCP) server providing tools to interact with 
+A Model Context Protocol (MCP) server providing tools to interact with
 the Rocq/Coq proof assistant via the Petanque protocol.
 """
 

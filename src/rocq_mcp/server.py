@@ -22,7 +22,7 @@ from mcp.server.models import InitializationOptions
 import mcp.server.stdio
 import mcp.types as types
 
-from pytanque import Pytanque, PetanqueError
+from pytanque import Pytanque, PetanqueError, PytanqueMode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -62,10 +62,10 @@ def cleanup_petanque_process():
 def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
     """Start the petanque server process (TCP mode only)."""
     global petanque_server_process
-    
+
     if petanque_server_process is not None:
         return  # Already running
-    
+
     try:
         # Start pet-server process
         logger.info(f"Starting pet-server on {host}:{port}")
@@ -73,33 +73,37 @@ def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
             ["pet-server", "--address", host, "--port", str(port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
         )
-        
+
         # Give the server a moment to start
         time.sleep(2)
-        
+
         # Check if process is still running
         if petanque_server_process.poll() is not None:
             stdout, stderr = petanque_server_process.communicate()
             raise RuntimeError(f"pet-server failed to start: {stderr}")
-        
-        logger.info(f"pet-server started successfully (PID: {petanque_server_process.pid})")
-        
+
+        logger.info(
+            f"pet-server started successfully (PID: {petanque_server_process.pid})"
+        )
+
         # Register cleanup handlers
         atexit.register(cleanup_petanque_process)
-        
+
         # Handle signals for graceful shutdown
         def signal_handler(signum, frame):
             logger.info(f"Received signal {signum}, shutting down...")
             cleanup_petanque_process()
             sys.exit(0)
-        
+
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
-        
+
     except FileNotFoundError:
-        raise RuntimeError("pet-server command not found. Please ensure it's installed and in PATH.")
+        raise RuntimeError(
+            "pet-server command not found. Please ensure it's installed and in PATH."
+        )
     except Exception as e:
         cleanup_petanque_process()
         raise RuntimeError(f"Failed to start pet-server: {e}")
@@ -113,16 +117,16 @@ def get_client() -> Pytanque:
             # TCP mode
             # Start petanque server if not already running
             start_petanque_server(tcp_host, tcp_port)
-            
+
             # Wait a bit more for the server to be fully ready
             time.sleep(1)
-            
+
             petanque_client = Pytanque(tcp_host, tcp_port)
             petanque_client.connect()
             logger.info(f"Connected to Petanque server at {tcp_host}:{tcp_port}")
         else:
             # Stdio mode (default)
-            petanque_client = Pytanque(stdio=True)
+            petanque_client = Pytanque(mode=PytanqueMode.STDIO)
             petanque_client.connect()
             logger.info("Connected to Petanque using stdio mode")
     return petanque_client
@@ -492,7 +496,9 @@ async def handle_call_tool(
             current_state = current_states[session_id]
             # Execute search command and capture feedback
             # If query contains spaces or special characters, wrap in quotes
-            if ' ' in query or any(c in query for c in ['_', '+', '-', '*', '(', ')', '[', ']']):
+            if " " in query or any(
+                c in query for c in ["_", "+", "-", "*", "(", ")", "[", "]"]
+            ):
                 search_command = f'Search "{query}".'
             else:
                 search_command = f"Search {query}."
@@ -504,7 +510,7 @@ async def handle_call_tool(
                 result_lines = []
                 for level, msg in new_state.feedback:
                     result_lines.append(msg)
-                
+
                 # Limit output to avoid overwhelming responses
                 max_results = 50
                 if len(result_lines) > max_results:
@@ -536,13 +542,18 @@ async def handle_call_tool(
 async def main():
     """Main entry point for the server."""
     global use_tcp_mode, tcp_host, tcp_port
-    
+
     parser = argparse.ArgumentParser(description="Rocq MCP Server")
     parser.add_argument(
-        "--host", default="127.0.0.1", help="Petanque server host for TCP mode (default: 127.0.0.1)"
+        "--host",
+        default="127.0.0.1",
+        help="Petanque server host for TCP mode (default: 127.0.0.1)",
     )
     parser.add_argument(
-        "--port", type=int, default=8833, help="Petanque server port for TCP mode (default: 8833)"
+        "--port",
+        type=int,
+        default=8833,
+        help="Petanque server port for TCP mode (default: 8833)",
     )
     parser.add_argument(
         "--tcp", action="store_true", help="Use TCP mode instead of default stdio mode"

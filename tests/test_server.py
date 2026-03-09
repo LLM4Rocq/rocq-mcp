@@ -134,11 +134,12 @@ Qed.
         # Reset global client state and ensure stdio mode
         import importlib
         import rocq_mcp.server
+
         importlib.reload(rocq_mcp.server)
-        
+
         # Set stdio mode explicitly
         rocq_mcp.server.use_tcp_mode = False
-        
+
         yield
 
     @pytest.mark.asyncio
@@ -194,38 +195,40 @@ Qed.
 
 class TestCommunicationModes:
     """Test different communication modes (stdio vs TCP)."""
-    
+
     def test_stdio_mode_client_creation(self):
         """Test creating a client in stdio mode."""
         try:
             # Import fresh to reset global state
             import importlib
             import rocq_mcp.server
+
             importlib.reload(rocq_mcp.server)
-            
+
             # Set stdio mode explicitly
             rocq_mcp.server.use_tcp_mode = False
-            
+
             client = rocq_mcp.server.get_client()
             assert client.mode == "stdio", f"Expected stdio mode, got {client.mode}"
             client.close()
-            
+
         except Exception as e:
             pytest.skip(f"Stdio mode test skipped - 'pet' command not available: {e}")
-    
+
     def test_tcp_mode_client_creation(self):
         """Test creating a client in TCP mode."""
         try:
             # Import fresh to reset global state
             import importlib
             import rocq_mcp.server
+
             importlib.reload(rocq_mcp.server)
-            
+
             # Set TCP mode explicitly
             rocq_mcp.server.use_tcp_mode = True
             rocq_mcp.server.tcp_host = "127.0.0.1"
             rocq_mcp.server.tcp_port = 8833
-            
+
             # This will fail if no pet-server is running, but that's expected
             client = rocq_mcp.server.get_client()
             assert client.mode == "socket", f"Expected socket mode, got {client.mode}"
@@ -241,11 +244,12 @@ class TestCommunicationModes:
             # Import fresh to reset global state
             import importlib
             import rocq_mcp.server
+
             importlib.reload(rocq_mcp.server)
-            
+
             # Set stdio mode explicitly
             rocq_mcp.server.use_tcp_mode = False
-            
+
             # Create a simple test file
             content = """
 Theorem simple_test : forall n : nat, 0 + n = n.
@@ -257,35 +261,35 @@ Qed.
             with tempfile.NamedTemporaryFile(mode="w", suffix=".v", delete=False) as f:
                 f.write(content)
                 test_file = f.name
-            
+
             try:
                 # Test getting table of contents
                 result = await handle_call_tool(
                     "rocq_get_file_toc", {"file_path": test_file}
                 )
-                
+
                 assert len(result) == 1
                 assert "Table of contents" in result[0].text
                 print(f"TOC test passed: {result[0].text[:100]}...")
-                
+
                 # Test starting a proof
                 result = await handle_call_tool(
                     "rocq_start_proof",
                     {
                         "file_path": test_file,
-                        "theorem_name": "simple_test", 
+                        "theorem_name": "simple_test",
                         "session_id": "stdio_test_session",
                     },
                 )
-                
+
                 assert len(result) == 1
                 assert "Started proof session" in result[0].text
                 print(f"Proof start test passed: {result[0].text[:100]}...")
-                
+
             finally:
                 # Clean up test file
                 os.unlink(test_file)
-                
+
         except Exception as e:
             pytest.skip(f"Stdio integration test skipped - 'pet' command issues: {e}")
 

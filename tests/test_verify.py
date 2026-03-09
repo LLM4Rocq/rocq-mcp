@@ -140,6 +140,32 @@ class TestAxiomClassification:
     def test_proof_irrelevance(self):
         assert _is_standard_axiom("proof_irrelevance") is True
 
+    # --- Dedekind reals: module-qualified (no stdlib prefix) ---
+
+    def test_dedekind_sig_forall_dec(self):
+        """Print Assumptions outputs this without Stdlib. prefix."""
+        assert _is_standard_axiom("ClassicalDedekindReals.sig_forall_dec") is True
+
+    def test_dedekind_sig_not_dec(self):
+        """sig_not_dec is used by completeness."""
+        assert _is_standard_axiom("ClassicalDedekindReals.sig_not_dec") is True
+
+    def test_dedekind_sig_not_dec_unqualified(self):
+        assert _is_standard_axiom("sig_not_dec") is True
+
+    def test_functional_extensionality_module_qualified(self):
+        """Print Assumptions outputs this without Stdlib. prefix."""
+        assert (
+            _is_standard_axiom(
+                "FunctionalExtensionality.functional_extensionality_dep"
+            )
+            is True
+        )
+
+    def test_eqdep_eq_rect_eq_module_qualified(self):
+        """Print Assumptions outputs this with Eqdep.Eq_rect_eq. prefix."""
+        assert _is_standard_axiom("Eqdep.Eq_rect_eq.eq_rect_eq") is True
+
     # --- SPOOFED axioms: must be REJECTED ---
 
     def test_spoofed_m_classic_rejected(self):

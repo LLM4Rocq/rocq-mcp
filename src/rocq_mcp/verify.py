@@ -128,9 +128,11 @@ def _clean_problem_statement(problem_statement: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Whitelist of known safe axioms by short name (last dot-separated component).
-# Print Assumptions outputs either qualified ("Coq.Logic.Classical_Prop.classic")
-# or unqualified ("classic") names. We match on short name AND verify the
-# qualified prefix comes from a known standard library module.
+# Print Assumptions outputs axiom names in various forms:
+#   - Unqualified: "classic"
+#   - Fully qualified: "Coq.Logic.Classical_Prop.classic"
+#   - Module-qualified (no stdlib prefix): "ClassicalDedekindReals.sig_forall_dec"
+# We match on short name AND verify the qualified prefix is safe.
 
 _KNOWN_SAFE_AXIOMS: set[str] = {
     # --- Classical logic ---
@@ -176,12 +178,22 @@ _KNOWN_SAFE_AXIOMS: set[str] = {
     "archimed",
     "completeness",
     "total_order_T",
-    # --- Decidability (used by classical reals) ---
+    # --- Dedekind reals (ClassicalDedekindReals) ---
     "sig_forall_dec",
+    "sig_not_dec",  # forall P : Prop, {~ ~ P} + {~ P}
 }
 
 # Standard library module prefixes. Axioms qualified with these are safe.
 _STDLIB_PREFIXES: tuple[str, ...] = ("Coq.", "Rocq.", "Stdlib.")
+
+# Known stdlib module names that Print Assumptions outputs WITHOUT the full
+# Stdlib./Coq. prefix. E.g., "ClassicalDedekindReals.sig_forall_dec" instead
+# of "Stdlib.Reals.ClassicalDedekindReals.sig_forall_dec".
+_STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
+    "ClassicalDedekindReals.",  # Dedekind reals axioms
+    "FunctionalExtensionality.",  # functional extensionality
+    "Eqdep.Eq_rect_eq.",  # eq_rect_eq / UIP
+)
 
 
 def _axiom_short_name(qualified_name: str) -> str:
@@ -200,6 +212,12 @@ def _is_standard_axiom(name: str) -> bool:
     This prevents spoofing: a user-defined 'M.classic : False' has prefix 'M.'
     which is NOT a stdlib prefix, so it is rejected even though short name
     'classic' is in the whitelist.
+
+    Print Assumptions outputs axiom names in various forms:
+      - "classic" (unqualified)
+      - "Coq.Logic.Classical_Prop.classic" (fully qualified with stdlib prefix)
+      - "ClassicalDedekindReals.sig_forall_dec" (module-qualified, no stdlib prefix)
+    All three forms are handled.
     """
     short = _axiom_short_name(name)
     if short not in _KNOWN_SAFE_AXIOMS:
@@ -207,8 +225,10 @@ def _is_standard_axiom(name: str) -> bool:
     if "." not in name:
         # Unqualified: trust the whitelist
         return True
-    # Qualified: must come from stdlib
-    return any(name.startswith(prefix) for prefix in _STDLIB_PREFIXES)
+    # Qualified: must come from stdlib (full prefix or known module name)
+    if any(name.startswith(prefix) for prefix in _STDLIB_PREFIXES):
+        return True
+    return any(name.startswith(prefix) for prefix in _STDLIB_MODULE_PREFIXES)
 
 
 # ---------------------------------------------------------------------------

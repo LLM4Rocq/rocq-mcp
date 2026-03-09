@@ -9,6 +9,7 @@ Tests are grouped into:
 - TestTocMock: mock pytanque toc() response, verify tool output
 - TestTocNoPet: graceful error when pytanque is not installed
 - TestTocEmptyFile: file with no definitions -> empty outline
+- TestTocPathTraversal: path traversal validation
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-from rocq_mcp.server import _format_toc_elements
+from rocq_mcp.server import _format_toc_elements, run_toc
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock TocElement-like objects
@@ -325,3 +326,38 @@ class TestTocEmptyFile:
         mock_result = _make_toc_response([])
         _, elems = mock_result[0]
         assert len(elems) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestTocPathTraversal
+# ---------------------------------------------------------------------------
+
+
+class TestTocPathTraversal:
+    """Test that path traversal is rejected."""
+
+    def test_absolute_path_rejected(self, tmp_path):
+        """An absolute file path outside workspace is rejected."""
+        lifespan_state = {"pet_timeout": 10}
+        result = asyncio.run(
+            run_toc(
+                file="/etc/passwd",
+                workspace=str(tmp_path),
+                lifespan_state=lifespan_state,
+            )
+        )
+        assert result["success"] is False
+        assert "workspace" in result["error"].lower()
+
+    def test_dotdot_traversal_rejected(self, tmp_path):
+        """A ../ traversal outside workspace is rejected."""
+        lifespan_state = {"pet_timeout": 10}
+        result = asyncio.run(
+            run_toc(
+                file="../../etc/passwd",
+                workspace=str(tmp_path),
+                lifespan_state=lifespan_state,
+            )
+        )
+        assert result["success"] is False
+        assert "workspace" in result["error"].lower()

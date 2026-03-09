@@ -1001,6 +1001,12 @@ async def run_toc(
 
     timeout: float = lifespan_state["pet_timeout"]
 
+    # Path traversal check (before entering thread)
+    file_path = str((Path(workspace).resolve() / file).resolve())
+    ws_resolved = str(Path(workspace).resolve())
+    if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
+        return {"success": False, "error": "File path must be within workspace."}
+
     def _run_toc() -> list[tuple[str, list[Any]]]:
         if not _pet_lock.acquire(timeout=timeout):
             raise TimeoutError("Could not acquire pet lock")
@@ -1008,17 +1014,6 @@ async def run_toc(
             pet = _ensure_pet(lifespan_state)
             ws = str(Path(workspace).resolve())
             pet.set_workspace(debug=False, dir=ws)
-
-            file_path = str(Path(workspace).resolve() / file)
-            ws_resolved = str(Path(workspace).resolve())
-            if (
-                not str(Path(file_path).resolve()).startswith(ws_resolved + os.sep)
-                and str(Path(file_path).resolve()) != ws_resolved
-            ):
-                return {
-                    "success": False,
-                    "error": "File path must be within workspace.",
-                }
             return pet.toc(file_path)
         finally:
             _pet_lock.release()
@@ -1398,13 +1393,20 @@ async def run_step(
             return result
         except asyncio.TimeoutError:
             _invalidate_pet(lifespan_state)
-            _session.update({"state": None, "history": []})
+            _session.update(
+                {
+                    "state": None,
+                    "history": [],
+                    "file": _session.get("file"),
+                    "theorem": _session.get("theorem"),
+                }
+            )
             return {
                 "success": False,
                 "error": (
-                    f"Tactic timed out after {timeout}s. Session lost. "
-                    "Start a new session (provide file + theorem) and "
-                    "replay your tactics."
+                    f"Tactic timed out after {timeout}s. Session lost but "
+                    "file/theorem preserved. Start a new session (provide "
+                    "file + theorem) and replay your tactics."
                 ),
             }
         except PetanqueError as e:
@@ -1482,6 +1484,12 @@ async def run_step_multi(
         }
 
     # Validate each tactic up front
+    if len(tactics) > _MAX_STEP_MULTI_TACTICS:
+        return {
+            "success": False,
+            "error": f"Too many tactics: {len(tactics)} exceeds maximum of {_MAX_STEP_MULTI_TACTICS}.",
+        }
+
     for tac in tactics:
         forbidden = _check_forbidden_commands(tac)
         if forbidden:
@@ -1489,12 +1497,6 @@ async def run_step_multi(
                 "success": False,
                 "error": f"Forbidden in tactic {tac!r}: {forbidden}",
             }
-
-    if len(tactics) > _MAX_STEP_MULTI_TACTICS:
-        return {
-            "success": False,
-            "error": f"Too many tactics: {len(tactics)} exceeds maximum of {_MAX_STEP_MULTI_TACTICS}.",
-        }
 
     timeout: float = lifespan_state["pet_timeout"]
     sem = _get_pet_semaphore()

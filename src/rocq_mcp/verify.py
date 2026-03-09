@@ -274,11 +274,13 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
 
     Handles multi-line type signatures by joining continuation lines.
 
-    Format:
+    Format variants (all produced by Print Assumptions):
         Axioms:
-        Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P
+        classic : forall P : Prop, P \\/ ~ P
         Coq.Reals.Raxioms.completeness
           : forall E : R -> Prop, ...
+        ClassicalDedekindReals.sig_forall_dec :
+          forall P : nat -> Prop, ...
 
     Or:
         Closed under the global context
@@ -303,7 +305,14 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
                 assumptions.append((current_name, " ".join(current_type_parts)))
             name_part, _, type_part = stripped.partition(" : ")
             current_name = name_part.strip()
-            current_type_parts = [type_part.strip()]
+            current_type_parts = [type_part.strip()] if type_part.strip() else []
+        elif stripped.endswith(" :") and not line.startswith((" ", "\t")):
+            # Name with colon at end of line, type on next line(s)
+            # e.g., "ClassicalDedekindReals.sig_forall_dec :"
+            if current_name is not None:
+                assumptions.append((current_name, " ".join(current_type_parts)))
+            current_name = stripped[:-2].strip()
+            current_type_parts = []
         elif stripped.startswith(": ") and current_name is not None:
             # Continuation: type starts on next line after name
             current_type_parts.append(stripped[2:].strip())

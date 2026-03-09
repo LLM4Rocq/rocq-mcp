@@ -254,6 +254,37 @@ class TestParseAssumptions:
         assert result[0][0] == "Coq.Reals.Raxioms.completeness"
         assert "forall" in result[0][1]
 
+    def test_name_colon_on_same_line_type_on_next(self):
+        """Dedekind axioms use 'name :\\n  type' format."""
+        stdout = (
+            "Axioms:\n"
+            "ClassicalDedekindReals.sig_forall_dec :\n"
+            "  forall P : nat -> Prop,\n"
+            "  (forall n : nat, {P n} + {~ P n}) ->\n"
+            "  {n : nat | ~ P n} + {forall n : nat, P n}\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        assert len(result) == 1
+        assert result[0][0] == "ClassicalDedekindReals.sig_forall_dec"
+        assert "forall" in result[0][1]
+
+    def test_dedekind_reals_classified_standard(self):
+        """Full Dedekind reals axiom set must be classified as standard."""
+        stdout = (
+            "Axioms:\n"
+            "ClassicalDedekindReals.sig_not_dec : forall P : Prop, {~ ~ P} + {~ P}\n"
+            "ClassicalDedekindReals.sig_forall_dec :\n"
+            "  forall P : nat -> Prop,\n"
+            "  (forall n : nat, {P n} + {~ P n}) ->\n"
+            "  {n : nat | ~ P n} + {forall n : nat, P n}\n"
+            "FunctionalExtensionality.functional_extensionality_dep :\n"
+            "  forall (A : Type) (B : A -> Type) (f g : forall x : A, B x),\n"
+            "  (forall x : A, f x = g x) -> f = g\n"
+        )
+        verdict, details = parse_and_classify_assumptions(stdout)
+        assert verdict == "standard_only"
+        assert len(details["standard"]) == 3
+
     def test_empty_stdout(self):
         assert _parse_assumptions_raw("") == []
 

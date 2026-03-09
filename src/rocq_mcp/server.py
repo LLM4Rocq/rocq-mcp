@@ -342,6 +342,335 @@ def rocq_verify(
 
 
 # ---------------------------------------------------------------------------
+# Tool: rocq_auto_solve
+# ---------------------------------------------------------------------------
+
+# Theorem-like keywords that introduce a named proof obligation in Rocq.
+_THEOREM_KEYWORDS: tuple[str, ...] = (
+    "Theorem",
+    "Lemma",
+    "Proposition",
+    "Corollary",
+    "Example",
+    "Fact",
+    "Remark",
+)
+
+_THEOREM_KW_RE = re.compile(
+    r"^(" + "|".join(_THEOREM_KEYWORDS) + r")\s+",
+    re.MULTILINE,
+)
+
+# Tactics tried in order from cheapest to most expensive.
+_AUTO_SOLVE_TACTICS: list[str] = [
+    "trivial",
+    "reflexivity",
+    "assumption",
+    "exact I",
+    "auto",
+    "eauto",
+    "tauto",
+    "intuition",
+    "lia",
+    "lra",
+    "nia",
+    "nra",
+    "ring",
+    "field",
+    "decide equality",
+    "firstorder",
+]
+
+# Extra imports needed to make decision procedures available.
+_AUTO_SOLVE_IMPORTS = "From Stdlib Require Import Lia Lra Ring Field.\n"
+
+
+def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
+    """Parse *source* and return info about the LAST theorem declaration.
+
+    Returns ``(preamble, keyword, name, full_statement)`` where:
+    - *preamble* is everything before the theorem keyword
+    - *keyword* is the Rocq keyword (``Theorem``, ``Lemma``, ...)
+    - *name* is the theorem identifier
+    - *full_statement* is the complete declaration from keyword to the
+      terminating ``.`` (inclusive), e.g.
+      ``Theorem foo : forall n, n = n.``
+
+    The function handles:
+    - Multi-line statements (``Theorem foo :\\n  forall n, ...``)
+    - ``Proof. ... Admitted.`` / ``Proof. Admitted.`` / bare ``Admitted.``
+      after the statement -- these are stripped from the returned values so
+      the caller can substitute its own proof.
+
+    Returns ``None`` if no theorem-like declaration is found.
+    """
+    # Find all theorem-keyword positions.  We want the LAST one.
+    matches = list(_THEOREM_KW_RE.finditer(source))
+    if not matches:
+        return None
+    m = matches[-1]
+
+    preamble = source[: m.start()]
+    rest = source[m.start() :]
+
+    # The statement ends at the first ``.`` that is NOT inside a comment
+    # and is followed by whitespace / end-of-string.  For simplicity we
+    # match the first ``.`` that terminates a Rocq sentence.  We need to
+    # skip dots inside ``(* ... *)`` comments and quoted strings, but in
+    # practice theorem statements don't contain those.  A robust approach:
+    # walk character-by-character tracking comment depth.
+    depth = 0  # comment nesting depth
+    in_string = False
+    dot_pos: int | None = None
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if in_string:
+            if c == '"':
+                in_string = False
+        elif depth > 0:
+            if c == "*" and i + 1 < len(rest) and rest[i + 1] == ")":
+                depth -= 1
+                i += 2
+                continue
+            elif c == "(" and i + 1 < len(rest) and rest[i + 1] == "*":
+                depth += 1
+                i += 2
+                continue
+        else:
+            if c == '"':
+                in_string = True
+            elif c == "(" and i + 1 < len(rest) and rest[i + 1] == "*":
+                depth += 1
+                i += 2
+                continue
+            elif c == ".":
+                # A ``.`` terminates a sentence when followed by whitespace
+                # or end-of-string.
+                if i + 1 >= len(rest) or rest[i + 1] in (" ", "\t", "\n", "\r"):
+                    dot_pos = i
+                    break
+        i += 1
+
+    if dot_pos is None:
+        return None
+
+    full_statement = rest[: dot_pos + 1]
+
+    # Extract keyword and name from the statement.
+    header_match = re.match(
+        r"(" + "|".join(_THEOREM_KEYWORDS) + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
+        full_statement,
+    )
+    if not header_match:
+        return None
+    keyword = header_match.group(1)
+    name = header_match.group(2)
+
+    return preamble, keyword, name, full_statement
+
+
+def _build_auto_solve_source(
+    preamble: str,
+    full_statement: str,
+    preamble_tactics: str,
+    tactics: list[str],
+) -> str:
+    """Build a .v source that tries all *tactics* via ``first [...]``."""
+    parts: list[str] = []
+
+    # Original preamble (imports, definitions, opens, notations).
+    parts.append(preamble.rstrip())
+
+    # Always add decision procedure imports (duplicate imports are harmless).
+    parts.append("")
+    parts.append(_AUTO_SOLVE_IMPORTS.rstrip())
+
+    # The theorem statement.
+    parts.append("")
+    parts.append(full_statement)
+    parts.append("Proof.")
+
+    # Always intros first (safe no-op if nothing to introduce),
+    # then user-provided preamble tactics if any.
+    if preamble_tactics:
+        parts.append(f"  intros. {preamble_tactics}")
+    else:
+        parts.append("  intros.")
+
+    # The ``first`` combinator with all tactics.
+    # Each tactic is wrapped in ``solve [...]`` so that ``first``
+    # only commits when the tactic fully closes the goal.
+    alternatives = " | ".join(f"solve [{t}]" for t in tactics)
+    parts.append(f"  first [ {alternatives} ].")
+    parts.append("Qed.")
+
+    return "\n".join(parts) + "\n"
+
+
+def _build_single_tactic_source(
+    preamble: str,
+    full_statement: str,
+    preamble_tactics: str,
+    tactic: str,
+) -> str:
+    """Build a .v source that tries a single *tactic*."""
+    parts: list[str] = []
+
+    parts.append(preamble.rstrip())
+
+    parts.append("")
+    parts.append(_AUTO_SOLVE_IMPORTS.rstrip())
+
+    parts.append("")
+    parts.append(full_statement)
+    parts.append("Proof.")
+
+    if preamble_tactics:
+        parts.append(f"  intros. {preamble_tactics}")
+    else:
+        parts.append("  intros.")
+
+    parts.append(f"  {tactic}.")
+    parts.append("Qed.")
+
+    return "\n".join(parts) + "\n"
+
+
+@mcp.tool
+def rocq_auto_solve(
+    problem: str,
+    preamble_tactics: str = "",
+    workspace: str = "",
+    timeout: int = 0,
+) -> dict[str, Any]:
+    """Try to prove a theorem using standard automation tactics.
+
+    Attempts tactics in order: trivial, reflexivity, assumption, exact I,
+    auto, eauto, tauto, intuition, lia, lra, nia, nra, ring, field,
+    decide, firstorder.
+
+    Optionally run preamble tactics first (e.g., "intros." or "intros. simpl.").
+
+    Does NOT require pytanque — uses coqc directly.
+
+    Args:
+        problem: Complete .v file content with the theorem to prove
+                 (the theorem should end with Admitted. or Abort. or
+                  have Proof. Admitted.).
+        preamble_tactics: Optional tactics to run before automation
+                         (e.g., "intros." or "intros. simpl.").
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+        timeout: Timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
+
+    # --- Input validation ---
+    err = _validate_workspace(workspace)
+    if err:
+        return {"solved": False, "error": err}
+
+    if len(problem) > ROCQ_MAX_SOURCE_SIZE:
+        return {
+            "solved": False,
+            "error": f"Problem exceeds maximum size ({ROCQ_MAX_SOURCE_SIZE} bytes).",
+        }
+
+    forbidden = _check_forbidden_commands(problem)
+    if forbidden:
+        return {"solved": False, "error": forbidden}
+
+    if preamble_tactics:
+        forbidden = _check_forbidden_commands(preamble_tactics)
+        if forbidden:
+            return {"solved": False, "error": forbidden}
+
+    # --- Parse the problem file ---
+    parsed = _parse_last_theorem(problem)
+    if parsed is None:
+        return {
+            "solved": False,
+            "error": (
+                "Could not find a Theorem/Lemma/Proposition/Corollary/"
+                "Example/Fact/Remark declaration in the problem."
+            ),
+        }
+    preamble, keyword, name, full_statement = parsed
+
+    # Normalise preamble_tactics: ensure it ends with "." if non-empty.
+    pt = preamble_tactics.strip()
+    if pt and not pt.endswith("."):
+        pt += "."
+
+    # --- Phase 1: Try all tactics via ``first [...]`` ---
+    combined_source = _build_auto_solve_source(
+        preamble, full_statement, pt, _AUTO_SOLVE_TACTICS
+    )
+
+    result = _run_coqc(combined_source, workspace, timeout)
+
+    if result["timed_out"]:
+        return {
+            "solved": False,
+            "error": f"Timed out after {timeout}s trying automation tactics.",
+        }
+
+    if result["returncode"] != 0:
+        return {
+            "solved": False,
+            "error": "None of the standard automation tactics succeeded.",
+            "details": result["stderr"][:2000],
+        }
+
+    # --- Phase 2: Identify which specific tactic worked ---
+    # Use a shorter timeout per individual tactic since we already know
+    # the combined run succeeded within *timeout*.
+    per_tactic_timeout = max(timeout // 3, 10)
+
+    for tactic in _AUTO_SOLVE_TACTICS:
+        single_source = _build_single_tactic_source(
+            preamble, full_statement, pt, tactic
+        )
+        single_result = _run_coqc(single_source, workspace, per_tactic_timeout)
+
+        if single_result["returncode"] == 0:
+            # Build the human-readable proof text.
+            proof_lines = ["Proof."]
+            if pt:
+                proof_lines.append(f"  intros. {pt}")
+            else:
+                proof_lines.append("  intros.")
+            proof_lines.append(f"  {tactic}.")
+            proof_lines.append("Qed.")
+            proof_text = "\n".join(proof_lines)
+
+            return {
+                "solved": True,
+                "tactic": tactic,
+                "proof": proof_text,
+            }
+
+    # Edge case: the ``first [...]`` succeeded but no single tactic did
+    # (shouldn't happen in theory, but handle gracefully).
+    proof_lines = ["Proof."]
+    if pt:
+        proof_lines.append(f"  intros. {pt}")
+    else:
+        proof_lines.append("  intros.")
+    alternatives = " | ".join(f"solve [{t}]" for t in _AUTO_SOLVE_TACTICS)
+    proof_lines.append(f"  first [ {alternatives} ].")
+    proof_lines.append("Qed.")
+    proof_text = "\n".join(proof_lines)
+
+    return {
+        "solved": True,
+        "tactic": "first [...]",
+        "proof": proof_text,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Pet subprocess management (Phase 1+)
 # ---------------------------------------------------------------------------
 
@@ -583,6 +912,280 @@ async def rocq_query(
 
 
 # ---------------------------------------------------------------------------
+# Tool: rocq_toc (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def _format_toc_elements(elements: list[Any], indent: int = 1) -> list[str]:
+    """Recursively format TocElement tree into indented text lines."""
+    lines: list[str] = []
+    prefix = "  " * indent
+    for elem in elements:
+        name = elem.name.v if elem.name else None
+        if name is None:
+            # Skip unnamed elements but still recurse into children
+            if elem.children:
+                lines.extend(_format_toc_elements(elem.children, indent))
+            continue
+        line_no = elem.range.start.line if elem.range else "?"
+        lines.append(f"{prefix}{elem.detail} {name} (line {line_no})")
+        if elem.children:
+            lines.extend(_format_toc_elements(elem.children, indent + 1))
+    return lines
+
+
+async def run_toc(
+    file: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_toc (testable without FastMCP Context)."""
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
+
+    timeout: float = lifespan_state["pet_timeout"]
+
+    def _run_toc() -> list[tuple[str, list[Any]]]:
+        if not _pet_lock.acquire(timeout=timeout):
+            raise TimeoutError("Could not acquire pet lock")
+        try:
+            pet = _ensure_pet(lifespan_state)
+            ws = str(Path(workspace).resolve())
+            pet.set_workspace(debug=False, dir=ws)
+
+            file_path = str(Path(workspace).resolve() / file)
+            return pet.toc(file_path)
+        finally:
+            _pet_lock.release()
+
+    sem = _get_pet_semaphore()
+    try:
+        async with sem:
+            toc_result = await asyncio.wait_for(
+                asyncio.to_thread(_run_toc),
+                timeout=timeout,
+            )
+
+            # Format the result as readable text
+            lines: list[str] = [f"File: {file}"]
+            if toc_result:
+                for _section_name, elements in toc_result:
+                    lines.extend(_format_toc_elements(elements))
+
+            output = "\n".join(lines)
+            if len(output) > _MAX_QUERY_OUTPUT:
+                output = (
+                    output[:_MAX_QUERY_OUTPUT]
+                    + f"\n... (truncated, {len(output)} total chars)"
+                )
+            return {"success": True, "output": output or f"File: {file}\n  (empty)"}
+    except asyncio.TimeoutError:
+        _invalidate_pet(lifespan_state)
+        return {"success": False, "error": f"TOC request timed out after {timeout}s."}
+    except PetanqueError as e:
+        return {"success": False, "error": e.message}
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "error": "pet binary not found on PATH. Install coq-lsp.",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {e}"}
+
+
+@mcp.tool
+async def rocq_toc(
+    file: str,
+    workspace: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Get the structure of a Rocq file: all definitions, lemmas, theorems, and sections.
+
+    Returns a hierarchical outline showing what is defined in the file.
+    Useful for understanding a file before working with it, or finding
+    the name of a theorem to prove.
+
+    Does NOT require an active rocq_step session.
+
+    Args:
+        file: Path to the .v file (relative to workspace).
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    return await run_toc(
+        file=file,
+        workspace=workspace,
+        lifespan_state=ctx.lifespan_context,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_notations (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+async def run_notations(
+    statement: str,
+    preamble: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_notations (testable without FastMCP Context)."""
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
+
+    forbidden = _check_forbidden_commands(statement)
+    if forbidden:
+        return {"success": False, "error": forbidden}
+    forbidden = _check_forbidden_commands(preamble)
+    if forbidden:
+        return {"success": False, "error": forbidden}
+
+    timeout: float = lifespan_state["pet_timeout"]
+
+    _temp_files: list[str] = []
+
+    def _run_notations() -> list[Any]:
+        if not _pet_lock.acquire(timeout=timeout):
+            raise TimeoutError("Could not acquire pet lock")
+        try:
+            pet = _ensure_pet(lifespan_state)
+            ws = str(Path(workspace).resolve())
+            pet.set_workspace(debug=False, dir=ws)
+
+            preamble_text = preamble.strip()
+            dummy_source = (
+                f"{preamble_text}\n"
+                "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
+            )
+            with tempfile.NamedTemporaryFile(
+                suffix=".v",
+                mode="w",
+                delete=False,
+                dir=str(ws),
+            ) as f:
+                f.write(dummy_source)
+                f.flush()
+                dummy_path = Path(f.name)
+            _temp_files.append(str(dummy_path))
+            try:
+                state = pet.start(str(dummy_path), "_rocq_mcp_dummy")
+
+                # Construct the full Lemma declaration for pytanque
+                full_statement = f"Lemma _rocq_mcp_notation_check : {statement}."
+                return pet.list_notations_in_statement(state, full_statement)
+            finally:
+                dummy_path.unlink(missing_ok=True)
+        finally:
+            _pet_lock.release()
+
+    sem = _get_pet_semaphore()
+    try:
+        async with sem:
+            notations = await asyncio.wait_for(
+                asyncio.to_thread(_run_notations),
+                timeout=timeout,
+            )
+
+            if not notations:
+                return {
+                    "success": True,
+                    "output": "No notations found in statement.",
+                }
+
+            lines = ["Notations found in statement:"]
+            for ni in notations:
+                scope_str = f"  (scope: {ni.scope})" if ni.scope else ""
+                # Use path or secpath for module provenance
+                module = ni.path or ni.secpath or "unknown"
+                lines.append(f'  "{ni.notation}"  ->  {module}{scope_str}')
+
+            output = "\n".join(lines)
+            if len(output) > _MAX_QUERY_OUTPUT:
+                output = (
+                    output[:_MAX_QUERY_OUTPUT]
+                    + f"\n... (truncated, {len(output)} total chars)"
+                )
+            return {"success": True, "output": output}
+    except asyncio.TimeoutError:
+        _invalidate_pet(lifespan_state)
+        # Clean up any temp files left by the orphaned thread
+        for p in _temp_files:
+            Path(p).unlink(missing_ok=True)
+        return {
+            "success": False,
+            "error": f"Notation query timed out after {timeout}s.",
+        }
+    except PetanqueError as e:
+        return {"success": False, "error": e.message}
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "error": "pet binary not found on PATH. Install coq-lsp.",
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {e}"}
+
+
+@mcp.tool
+async def rocq_notations(
+    statement: str,
+    preamble: str = "",
+    workspace: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """List all notations in a Rocq statement and how they resolve.
+
+    Helps debug notation ambiguity (e.g., which scope does "+" resolve to?
+    Is "=" Leibniz equality or Qeq?).
+
+    Pass the statement part of a Lemma/Theorem declaration (after the colon).
+    For example, for "Lemma foo : forall n, n + 0 = n", pass
+    statement="forall n, n + 0 = n".
+
+    NOTE: Only works on statements (propositions/types), not arbitrary terms.
+
+    Args:
+        statement: The proposition/type to analyze.
+        preamble: Import lines for context (e.g., "Require Import QArith.").
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    return await run_notations(
+        statement=statement,
+        preamble=preamble,
+        workspace=workspace,
+        lifespan_state=ctx.lifespan_context,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_step (Phase 2)
 # ---------------------------------------------------------------------------
 
@@ -675,22 +1278,40 @@ async def run_step(
 
                 new_state = pet.run(current_state, tac)
 
-                # Get goals before updating session state so that
-                # if goals() raises, the session is not advanced.
-                goals = pet.goals(new_state)
-                goals_list = goals or []
+                # Get complete goals before updating session state so
+                # that if complete_goals() raises, the session is not
+                # advanced.  Using complete_goals() instead of goals()
+                # surfaces shelf and given_up info.
+                complete = pet.complete_goals(new_state)
+                goals_list = complete.goals if complete else []
 
-                # Only update session after both run() and goals() succeed
+                # Format goals (pp_goal logic from pytanque)
+                for g in goals_list:
+                    hyps = "\n".join(
+                        f"{', '.join(h.names)}"
+                        f"{' := ' + h.def_ if h.def_ else ''}"
+                        f" : {h.ty}"
+                        for h in g.hyps
+                    )
+                    g.pp = f"{hyps}\n|-{g.ty}"
+
+                # Only update session after both run() and
+                # complete_goals() succeed
                 _session["state"] = new_state
                 _session["history"].append(tac)
                 goals_text = "\n\n".join(g.pp or str(g) for g in goals_list)
 
-                return {
+                result = {
                     "success": True,
                     "goals": goals_text or "No goals remaining.",
                     "proof_finished": new_state.proof_finished,
                     "step": len(_session["history"]),
                 }
+                if complete and complete.shelf:
+                    result["shelved_goals"] = len(complete.shelf)
+                if complete and complete.given_up:
+                    result["given_up_goals"] = len(complete.given_up)
+                return result
             finally:
                 _pet_lock.release()
 
@@ -758,6 +1379,155 @@ async def rocq_step(
         file=file,
         theorem=theorem,
         workspace=workspace or ROCQ_WORKSPACE,
+        lifespan_state=ctx.lifespan_context,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_step_multi (Phase 2)
+# ---------------------------------------------------------------------------
+
+_MAX_STEP_MULTI_TACTICS = 20
+
+
+async def run_step_multi(
+    tactics: list[str],
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_step_multi (testable without FastMCP Context)."""
+    try:
+        from pytanque import PetanqueError
+    except ImportError:
+        return {
+            "success": False,
+            "error": (
+                "pytanque is not installed. "
+                "Install with: pip install 'rocq-mcp[interactive]'"
+            ),
+        }
+
+    # Validate each tactic up front
+    for tac in tactics:
+        forbidden = _check_forbidden_commands(tac)
+        if forbidden:
+            return {
+                "success": False,
+                "error": f"Forbidden in tactic {tac!r}: {forbidden}",
+            }
+
+    if len(tactics) > _MAX_STEP_MULTI_TACTICS:
+        tactics = tactics[:_MAX_STEP_MULTI_TACTICS]
+
+    timeout: float = lifespan_state["pet_timeout"]
+    sem = _get_pet_semaphore()
+
+    async with sem:
+
+        def _execute() -> dict[str, Any]:
+            if not _pet_lock.acquire(timeout=timeout):
+                raise TimeoutError("Could not acquire pet lock")
+            try:
+                pet = _ensure_pet(lifespan_state)
+
+                parent_state = _session.get("state")
+                if parent_state is None:
+                    return {
+                        "success": False,
+                        "error": (
+                            "No active session. "
+                            "Use rocq_step with file and theorem to start one."
+                        ),
+                    }
+
+                results: list[dict[str, Any]] = []
+                for tactic in tactics:
+                    tac = tactic.strip()
+                    if not tac.endswith("."):
+                        tac += "."
+
+                    entry: dict[str, Any] = {"tactic": tac}
+                    try:
+                        new_state = pet.run(parent_state, tac)
+
+                        # Get complete goals for the trial state
+                        complete = pet.complete_goals(new_state)
+                        goals_list = complete.goals if complete else []
+
+                        # Format goals (pp_goal logic from pytanque)
+                        for g in goals_list:
+                            hyps = "\n".join(
+                                f"{', '.join(h.names)}"
+                                f"{' := ' + h.def_ if h.def_ else ''}"
+                                f" : {h.ty}"
+                                for h in g.hyps
+                            )
+                            g.pp = f"{hyps}\n|-{g.ty}"
+
+                        goals_text = "\n\n".join(g.pp or str(g) for g in goals_list)
+                        entry["success"] = True
+                        entry["goals"] = goals_text or "No goals remaining."
+                        entry["proof_finished"] = new_state.proof_finished
+                        if complete and complete.shelf:
+                            entry["shelved_goals"] = len(complete.shelf)
+                        if complete and complete.given_up:
+                            entry["given_up_goals"] = len(complete.given_up)
+                    except PetanqueError as e:
+                        entry["success"] = False
+                        entry["error"] = e.message
+
+                    results.append(entry)
+
+                # Do NOT update _session -- this is read-only exploration
+                return {"success": True, "results": results}
+            finally:
+                _pet_lock.release()
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_execute),
+                timeout=timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            _invalidate_pet(lifespan_state)
+            _session.update({"state": None, "history": []})
+            return {
+                "success": False,
+                "error": (
+                    f"Multi-tactic exploration timed out after {timeout}s. "
+                    "Session lost. Start a new session (provide file + "
+                    "theorem to rocq_step) and replay your tactics."
+                ),
+            }
+        except PetanqueError as e:
+            return {"success": False, "error": e.message}
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "error": "pet binary not found on PATH.",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error: {e}"}
+
+
+@mcp.tool
+async def rocq_step_multi(
+    tactics: list[str],
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Try multiple tactics against the current proof state and return all results.
+
+    Does NOT advance the session — use rocq_step with the winning tactic to commit.
+    Requires an active rocq_step session.
+
+    Useful for quickly testing which automation tactic works:
+      tactics=["auto", "lia", "lra", "ring", "omega", "tauto"]
+
+    Args:
+        tactics: List of tactics to try (max 20).
+    """
+    return await run_step_multi(
+        tactics=tactics,
         lifespan_state=ctx.lifespan_context,
     )
 

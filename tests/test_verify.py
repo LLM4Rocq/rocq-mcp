@@ -5,6 +5,11 @@ Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestAxiomClassification
     - TestParseAssumptions
     - TestBuildVerificationSource
+    - TestGateFunctions
+    - TestClassifyTocDetail
+    - TestVerificationHint
+    - TestStripSharedDefs
+    - TestBuildSharedDefsVerificationSource
     - TestVerifyInputSanitization
 
 Part B: Integration tests for rocq_verify (require coqc)
@@ -12,6 +17,7 @@ Part B: Integration tests for rocq_verify (require coqc)
     - TestVerifyRejection
     - TestVerifyInputValidation
     - TestVerifyCleanup
+    - TestSharedDefsIntegration
 """
 
 from __future__ import annotations
@@ -26,13 +32,16 @@ from rocq_mcp.verify import (
     _is_standard_axiom,
     _axiom_short_name,
     _parse_assumptions_raw,
+    _SHARED_DEF_DETAILS,
     _strip_shared_defs,
     build_shared_defs_verification_source,
+    classify_toc_detail,
     DefCategory,
     DefinitionInfo,
     parse_and_classify_assumptions,
     ProblemStructure,
     build_verification_source,
+    verification_hint,
 )
 
 # =========================================================================
@@ -428,6 +437,121 @@ class TestBuildVerificationSource:
 
 
 # ---------------------------------------------------------------------------
+# Gate functions (_has_definition_keywords)
+# ---------------------------------------------------------------------------
+
+
+class TestGateFunctions:
+    """Test the gate functions that decide Phase 2 fallback eligibility."""
+
+    def test_has_definition_keywords_inductive(self):
+        from rocq_mcp.server import _has_definition_keywords
+
+        assert _has_definition_keywords("Inductive color := Red.")
+
+    def test_has_definition_keywords_coinductive(self):
+        from rocq_mcp.server import _has_definition_keywords
+
+        assert _has_definition_keywords("CoInductive stream := Cons : nat -> stream -> stream.")
+
+    def test_has_definition_keywords_record(self):
+        from rocq_mcp.server import _has_definition_keywords
+
+        assert _has_definition_keywords("Record point := { x : nat; y : nat }.")
+
+    def test_has_definition_keywords_fixpoint(self):
+        from rocq_mcp.server import _has_definition_keywords
+
+        assert _has_definition_keywords("Fixpoint f (n : nat) := n.")
+
+    def test_has_definition_keywords_no_match(self):
+        from rocq_mcp.server import _has_definition_keywords
+
+        assert not _has_definition_keywords("Theorem foo : True.\nAdmitted.")
+
+
+# ---------------------------------------------------------------------------
+# classify_toc_detail
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyTocDetail:
+    """Test classification of coq-lsp toc detail strings."""
+
+    def test_inductive(self):
+        assert classify_toc_detail("Inductive") == DefCategory.SHARED_DEF
+
+    def test_theorem(self):
+        assert classify_toc_detail("Theorem") == DefCategory.THEOREM
+
+    def test_notation(self):
+        assert classify_toc_detail("Notation") == DefCategory.NOTATION
+
+    def test_section(self):
+        assert classify_toc_detail("Section") == DefCategory.OTHER
+
+    def test_all_shared_defs(self):
+        for detail in _SHARED_DEF_DETAILS:
+            assert classify_toc_detail(detail) == DefCategory.SHARED_DEF, (
+                f"{detail} not classified as SHARED_DEF"
+            )
+
+    def test_lemma(self):
+        assert classify_toc_detail("Lemma") == DefCategory.THEOREM
+
+    def test_infix(self):
+        assert classify_toc_detail("Infix") == DefCategory.NOTATION
+
+    def test_unknown(self):
+        assert classify_toc_detail("SomethingUnknown") == DefCategory.OTHER
+
+
+# ---------------------------------------------------------------------------
+# verification_hint
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationHint:
+    """Test human-readable hints from verification failures."""
+
+    def test_unification_with_m_prefix_hint(self):
+        """Unification error mentioning M. -> Module M boundary hint."""
+        hint = verification_hint("Unable to unify M.foo with foo")
+        assert "Module M" in hint
+
+    def test_cannot_apply_with_m_prefix_hint(self):
+        """Cannot apply error mentioning M. -> Module M boundary hint."""
+        hint = verification_hint("Cannot apply M.foo")
+        assert "Module M" in hint
+
+    def test_unification_without_m_prefix_hint(self):
+        """Unification error without M. -> generic type mismatch hint."""
+        hint = verification_hint('Unable to unify "nat" with "bool"')
+        assert "type mismatch" in hint.lower() or "Type mismatch" in hint
+
+    def test_cannot_apply_without_m_prefix_hint(self):
+        """Cannot apply error without M. -> generic type mismatch hint."""
+        hint = verification_hint("Cannot apply foo_lemma")
+        assert "type mismatch" in hint.lower() or "Type mismatch" in hint
+
+    def test_not_found_hint(self):
+        hint = verification_hint("M.foo not found in the current environment")
+        assert "name" in hint.lower() or "match" in hint.lower()
+
+    def test_syntax_error_hint(self):
+        hint = verification_hint("Syntax error: unexpected token")
+        assert "syntax" in hint.lower()
+
+    def test_timeout_hint(self):
+        hint = verification_hint("Timeout in tactic evaluation")
+        assert "timeout" in hint.lower() or "timed out" in hint.lower()
+
+    def test_default_hint(self):
+        hint = verification_hint("Some unknown error occurred")
+        assert len(hint) > 0  # Should return something
+
+
+# ---------------------------------------------------------------------------
 # _strip_shared_defs and build_shared_defs_verification_source
 # ---------------------------------------------------------------------------
 
@@ -535,6 +659,71 @@ class TestStripSharedDefs:
         result = _strip_shared_defs(proof, {"myval"})
         assert "Definition myval" not in result
         assert "Nat.add" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_name_with_prime(self):
+        """Names with primes (e.g., x') may not be stripped due to \\b word boundary.
+
+        The prime character is not a word character, so \\b after x' doesn't
+        match when followed by whitespace.  This documents current behavior:
+        _strip_shared_defs does NOT strip definitions with primed names.
+        """
+        proof = (
+            "Definition x' := 0.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"x'"})
+        # Due to \b limitation, primed names are NOT stripped (known limitation)
+        assert "Definition x'" in result
+        assert "Theorem foo" in result
+
+    def test_strip_name_with_digits(self):
+        """Names with digits (e.g., state2) should be stripped correctly."""
+        proof = (
+            "Definition state2 := 0.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state2"})
+        assert "Definition state2" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_def_with_inner_period_space(self):
+        """Dot inside qualified name (Nat.add) should not terminate the sentence."""
+        proof = (
+            "Definition f := Nat.add 1 2.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"f"})
+        assert "Definition f" not in result
+        assert "Nat.add" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_coinductive(self):
+        """CoInductive definitions should be stripped correctly."""
+        proof = (
+            "CoInductive stream := Cons : nat -> stream -> stream.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"stream"})
+        assert "CoInductive stream" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_all_occurrences(self):
+        """If a definition name appears twice, both should be stripped (count=0)."""
+        proof = (
+            "Definition state := list nat.\n"
+            "Definition state := list nat.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state"})
+        # _strip_shared_defs uses count=0 to strip ALL occurrences,
+        # preventing adversaries from hiding decoys in comments
+        assert result.count("Definition state") == 0
         assert "Theorem foo" in result
 
 
@@ -649,6 +838,37 @@ class TestBuildSharedDefsVerificationSource:
         idx_module = source.index("Module M.")
         idx_end = source.index("End M.")
         assert idx_module < idx_helper < idx_end
+
+    def test_end_m_in_proof_rejected_shared_defs(self):
+        """End M. in proof must be rejected even in shared-defs template."""
+        structure = self._make_structure(
+            defs=[("state", "Definition", "Definition state := list nat.")],
+            theorem_source="Theorem foo : True.",
+            full_source=(
+                "Definition state := list nat.\n"
+                "Theorem foo : True.\nAdmitted."
+            ),
+        )
+        proof = (
+            "Definition state := list nat.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+            "End M.\n"
+            "Axiom cheat : False.\n"
+            "Module M.\n"
+        )
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_shared_defs_verification_source(proof, "foo", structure)
+
+    def test_forbidden_in_full_source_rejected(self):
+        """Forbidden commands in the full_source (problem statement) must be rejected."""
+        structure = self._make_structure(
+            full_source='Redirect "/tmp/evil" Print nat.\nTheorem foo : True.\nAdmitted.',
+        )
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_shared_defs_verification_source(
+                "Theorem foo : True.\nProof. exact I. Qed.", "foo", structure
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +1011,60 @@ class TestVerifyInputSanitization:
                 problem_statement="Theorem t : True.\nAdmitted.",
             )
 
+    def test_end_m_in_proof_rejected(self):
+        """Proof containing 'End M.' to escape module sandbox must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.\nEnd M.\nAxiom cheat : False.\nModule M.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_end_m_with_extra_whitespace_rejected(self):
+        """'End  M .' with extra whitespace must also be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.\nEnd  M .",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_end_my_module_not_rejected(self):
+        """'End MyModule.' must NOT be rejected -- only 'End M.' is forbidden."""
+        source = build_verification_source(
+            proof="Module Inner.\nEnd Inner.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.",
+        )
+        assert "Module M." in source
+
+    def test_reset_in_proof_rejected(self):
+        """Proof containing Reset must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Reset Initial.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_back_in_proof_rejected(self):
+        """Proof containing Back must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Back 2.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_undo_in_proof_rejected(self):
+        """Proof containing Undo must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. Undo. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
     def test_forbidden_in_problem_statement(self):
         """Forbidden commands in problem_statement must also be rejected."""
         with pytest.raises(ValueError, match="[Ff]orbidden"):
@@ -798,6 +1072,24 @@ class TestVerifyInputSanitization:
                 proof="Theorem t : True. Proof. exact I. Qed.",
                 problem_name="t",
                 problem_statement='Redirect "/tmp/evil" Print nat.\nTheorem t : True.\nAdmitted.',
+            )
+
+    def test_forbidden_inside_comment_not_rejected(self):
+        """Forbidden keywords inside comments must NOT trigger rejection."""
+        source = build_verification_source(
+            proof="(* End M. Redirect Drop *)\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.",
+        )
+        assert "Module M." in source
+
+    def test_forbidden_outside_comment_still_rejected(self):
+        """Forbidden commands after a comment must still be caught."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="(* harmless *) End M.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
             )
 
 
@@ -1084,3 +1376,78 @@ class TestVerifyCleanup:
         )
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
+
+
+# ---------------------------------------------------------------------------
+# Shared-defs integration tests (Phase 2 template + coqc)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestSharedDefsIntegration:
+    """Test the shared-defs verification template against real coqc.
+
+    These tests exercise the Phase 2 template builder + coqc compilation
+    directly, without requiring pytanque (no ctx needed).
+    """
+
+    async def test_shared_defs_template_compiles_with_inductive(self):
+        """The shared-defs template should compile when Inductive types are involved."""
+        structure = ProblemStructure(
+            preamble_source="",
+            definitions=[
+                DefinitionInfo(
+                    name="color",
+                    detail="Inductive",
+                    category=DefCategory.SHARED_DEF,
+                    source_text="Inductive color := Red | Green | Blue.",
+                    start_line=0,
+                    end_line=0,
+                )
+            ],
+            theorem_source="Theorem foo : forall c : color, c = c.",
+            theorem_name="foo",
+            has_shared_defs=True,
+            full_source=(
+                "Inductive color := Red | Green | Blue.\n"
+                "Theorem foo : forall c : color, c = c.\n"
+                "Admitted."
+            ),
+        )
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem foo : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        source = build_shared_defs_verification_source(proof, "foo", structure)
+        # Actually compile it with coqc
+        from rocq_mcp.server import _run_coqc
+
+        result = _run_coqc(source, "/tmp", 60)
+        assert result["returncode"] == 0, f"coqc failed: {result['stderr']}"
+        assert (
+            "Closed under the global context" in result["stdout"]
+            or "Axioms" not in result["stdout"]
+        )
+
+    async def test_module_m_fails_with_inductive(self, workspace):
+        """Standard Module M should fail when proof has Inductive types."""
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem foo : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed."
+        )
+        problem = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem foo : forall c : color, c = c.\n"
+            "Admitted."
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="foo",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        # Without pytanque ctx, Phase 2 cannot run, so this falls back to
+        # Phase 1 which should fail due to type unification across Module M.
+        assert result["verified"] is False

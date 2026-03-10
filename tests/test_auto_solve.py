@@ -30,11 +30,105 @@ from rocq_mcp.server import (
     _build_auto_solve_source,
     _build_single_tactic_source,
     _AUTO_SOLVE_TACTICS,
+    _rocq_comment_ranges,
+    _find_sentence_end,
 )
 
 # =========================================================================
 # PART A: Unit tests (no coqc needed)
 # =========================================================================
+
+
+# ---------------------------------------------------------------------------
+# _rocq_comment_ranges
+# ---------------------------------------------------------------------------
+
+
+class TestRocqCommentRanges:
+    """Direct unit tests for the Rocq comment scanner."""
+
+    def test_no_comments(self):
+        assert _rocq_comment_ranges("Theorem t : True.") == []
+
+    def test_single_comment(self):
+        assert _rocq_comment_ranges("(* hello *)") == [(0, 11)]
+
+    def test_nested_comments(self):
+        assert _rocq_comment_ranges("(* (* inner *) *)") == [(0, 17)]
+
+    def test_triple_nested(self):
+        assert _rocq_comment_ranges("(* a (* b (* c *) d *) e *)") == [(0, 27)]
+
+    def test_multiple_comments(self):
+        ranges = _rocq_comment_ranges("x (* a *) y (* b *) z")
+        assert ranges == [(2, 9), (12, 19)]
+
+    def test_comment_inside_string_ignored(self):
+        assert _rocq_comment_ranges('"(* not a comment *)"') == []
+
+    def test_string_inside_comment(self):
+        # The string delimiter inside a comment doesn't start a string
+        ranges = _rocq_comment_ranges('(* "hello" *)')
+        assert ranges == [(0, 13)]
+
+    def test_escaped_double_quote_in_string(self):
+        # "" is an escaped quote, not end of string
+        assert _rocq_comment_ranges('"a""b" (* c *)') == [(7, 14)]
+
+    def test_empty_comment(self):
+        assert _rocq_comment_ranges("(**) rest") == [(0, 4)]
+
+    def test_unclosed_comment(self):
+        # Unclosed comment is NOT reported (no closing range)
+        assert _rocq_comment_ranges("(* unclosed") == []
+
+    def test_dot_inside_comment(self):
+        ranges = _rocq_comment_ranges("(* foo. bar *)")
+        assert ranges == [(0, 14)]
+
+
+# ---------------------------------------------------------------------------
+# _find_sentence_end
+# ---------------------------------------------------------------------------
+
+
+class TestFindSentenceEnd:
+    """Direct unit tests for the Rocq sentence terminator finder."""
+
+    def test_simple_dot(self):
+        assert _find_sentence_end("Theorem t : True.") == 16
+
+    def test_dot_followed_by_space(self):
+        assert _find_sentence_end("exact I. Qed.") == 7
+
+    def test_dot_followed_by_newline(self):
+        assert _find_sentence_end("exact I.\n") == 7
+
+    def test_no_terminating_dot(self):
+        assert _find_sentence_end("Nat.add x y") is None
+
+    def test_qualified_name_not_sentence(self):
+        # Dot in Nat.add is not sentence-terminating
+        assert _find_sentence_end("Check Nat.add.") == 13
+
+    def test_dot_inside_comment(self):
+        assert _find_sentence_end("(* foo. *) bar.") == 14
+
+    def test_dot_inside_string(self):
+        assert _find_sentence_end('"hello." world.') == 14
+
+    def test_dot_inside_nested_comment(self):
+        assert _find_sentence_end("(* (* inner. *) *) x.") == 20
+
+    def test_dot_at_end_of_text(self):
+        assert _find_sentence_end("exact I.") == 7
+
+    def test_empty_text(self):
+        assert _find_sentence_end("") is None
+
+    def test_number_with_dot(self):
+        # 1.5 has dot NOT followed by whitespace — not a sentence end
+        assert _find_sentence_end("Definition x := 1.5.") == 19
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +377,7 @@ class TestBuildAutoSolveSource:
         )
         assert "From Stdlib Require Import Lia Lra Ring Field." in source
 
-    def test_all_hammer_tactics_present(self):
+    def test_all_auto_solve_tactics_present(self):
         """Verify the source includes all standard auto_solve tactics."""
         source = _build_auto_solve_source(
             preamble="",

@@ -18,6 +18,8 @@ from fastmcp.server.lifespan import lifespan
 
 from rocq_mcp.verify import (
     _check_forbidden_commands,
+    _SHARED_DEF_DETAILS,
+    _THEOREM_DETAILS,
     build_verification_source,
     build_shared_defs_verification_source,
     classify_toc_detail,
@@ -39,6 +41,7 @@ ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
 ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
 ROCQ_COQC_BINARY: str = os.environ.get("ROCQ_COQC_BINARY", "coqc")
 ROCQ_MAX_SOURCE_SIZE: int = int(os.environ.get("ROCQ_MAX_SOURCE_SIZE", "1000000"))
+_MAX_ERROR_LENGTH: int = 4000
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -222,7 +225,7 @@ def rocq_compile(
     else:
         return {
             "success": False,
-            "error": result["stderr"][:4000],
+            "error": result["stderr"][:_MAX_ERROR_LENGTH],
         }
 
 
@@ -249,15 +252,15 @@ def _extract_source_range(
     return "\n".join(parts)
 
 
-def _is_unification_failure(stderr: str) -> bool:
-    """Check if coqc error indicates a type unification failure across Module M."""
-    return "Unable to unify" in stderr or "Cannot apply" in stderr
-
+# Definition keywords for Phase 2 gate check.  Based on _SHARED_DEF_DETAILS
+# from verify.py, plus "Let" which is a valid definition keyword in problem
+# statements even though it is not a shared-def detail for toc classification.
+_DEF_KEYWORDS: set[str] = _SHARED_DEF_DETAILS | {"Let"}
 
 _DEF_KEYWORD_RE = re.compile(
-    r"\b(Inductive|CoInductive|Variant|Record|Structure|Class"
-    r"|Definition|Fixpoint|CoFixpoint|Function|Let"
-    r"|Canonical|Coercion|Instance)\b"
+    r"\b("
+    + "|".join(re.escape(k) for k in sorted(_DEF_KEYWORDS, key=len, reverse=True))
+    + r")\b"
 )
 
 
@@ -274,6 +277,55 @@ def _flatten_toc_elements(elements: list[Any]) -> list[Any]:
         if elem.children:
             result.extend(_flatten_toc_elements(elem.children))
     return result
+
+
+def _deduplicate_toc_elements(all_elements: list[Any]) -> list[Any]:
+    """Deduplicate and sort flattened toc elements.
+
+    Deduplicates in two passes:
+    1. By (name, start_line) — toc returns duplicate entries for
+       constructors/fields of the same inductive/record.
+    2. By full range tuple — mutual inductives share the same range.
+
+    Returns elements sorted by source position.
+    """
+    # Pass 1: deduplicate by (name, start_line)
+    seen: set[tuple[str | None, int]] = set()
+    unique_elements: list[Any] = []
+    for elem in all_elements:
+        name = elem.name.v if elem.name else None
+        start_line = elem.range.start.line if elem.range else -1
+        key = (name, start_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_elements.append(elem)
+
+    # Pass 2: deduplicate by range (mutual inductives share same range)
+    seen_ranges: set[tuple[int, int, int, int]] = set()
+    deduped_elements: list[Any] = []
+    for elem in unique_elements:
+        if elem.range:
+            rng = (
+                elem.range.start.line,
+                elem.range.start.character,
+                elem.range.end.line,
+                elem.range.end.character,
+            )
+            if rng in seen_ranges:
+                continue
+            seen_ranges.add(rng)
+        deduped_elements.append(elem)
+
+    # Sort by source position
+    deduped_elements.sort(
+        key=lambda e: (
+            e.range.start.line if e.range else 0,
+            e.range.start.character if e.range else 0,
+        )
+    )
+
+    return deduped_elements
 
 
 async def _extract_problem_structure(
@@ -324,42 +376,7 @@ async def _extract_problem_structure(
         for _section_name, elements in toc_result:
             all_elements.extend(_flatten_toc_elements(elements))
 
-        # Deduplicate by (name, start_line) — toc returns duplicate entries
-        # for constructors/fields of the same inductive/record
-        seen: set[tuple[str | None, int]] = set()
-        unique_elements: list[Any] = []
-        for elem in all_elements:
-            name = elem.name.v if elem.name else None
-            start_line = elem.range.start.line if elem.range else -1
-            key = (name, start_line)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_elements.append(elem)
-
-        # Further deduplicate by range (mutual inductives share same range)
-        seen_ranges: set[tuple[int, int, int, int]] = set()
-        deduped_elements: list[Any] = []
-        for elem in unique_elements:
-            if elem.range:
-                rng = (
-                    elem.range.start.line,
-                    elem.range.start.character,
-                    elem.range.end.line,
-                    elem.range.end.character,
-                )
-                if rng in seen_ranges:
-                    continue
-                seen_ranges.add(rng)
-            deduped_elements.append(elem)
-
-        # Sort by source position
-        deduped_elements.sort(
-            key=lambda e: (
-                e.range.start.line if e.range else 0,
-                e.range.start.character if e.range else 0,
-            )
-        )
+        deduped_elements = _deduplicate_toc_elements(all_elements)
 
         # Parse into DefinitionInfo objects
         definitions: list[DefinitionInfo] = []
@@ -385,9 +402,6 @@ async def _extract_problem_structure(
             except (IndexError, ValueError):
                 continue
 
-            if first_def_line is None:
-                first_def_line = start_line
-
             if category == DefCategory.THEOREM:
                 # toc range for theorem includes only the statement, not
                 # Proof...Qed.  We need just the statement for the template.
@@ -396,8 +410,9 @@ async def _extract_problem_structure(
             elif category in (
                 DefCategory.SHARED_DEF,
                 DefCategory.NOTATION,
-                DefCategory.OTHER,
             ):
+                if first_def_line is None:
+                    first_def_line = start_line
                 definitions.append(
                     DefinitionInfo(
                         name=name,
@@ -441,6 +456,60 @@ async def _extract_problem_structure(
     if isinstance(result, dict):
         return None
     return result
+
+
+# ---------------------------------------------------------------------------
+# Verdict-to-dict helper (shared by Phase 1 and Phase 2 of rocq_verify)
+# ---------------------------------------------------------------------------
+
+
+def _build_assumptions_result(
+    verdict: str,
+    details: dict,
+    method: str,
+) -> dict[str, Any]:
+    """Map a parse_and_classify_assumptions verdict to a rocq_verify result dict.
+
+    Args:
+        verdict: One of "closed", "standard_only", "suspicious".
+        details: The details dict from parse_and_classify_assumptions.
+        method: Verification method label (e.g. "module_m" or "shared_defs").
+    """
+    note_suffix = ""
+    if method == "shared_defs":
+        note_suffix = (
+            "Verified using shared-definitions template "
+            "(definitions placed outside Module M for type compatibility). "
+        )
+
+    if verdict == "closed":
+        return {
+            "verified": True,
+            "verification_method": method,
+            "assumptions": "Closed under the global context",
+            **({"note": note_suffix.rstrip()} if note_suffix else {}),
+        }
+    elif verdict == "standard_only":
+        note = note_suffix + "Proof uses standard axioms (e.g., classical logic, Reals)."
+        return {
+            "verified": True,
+            "verification_method": method,
+            "assumptions": details["standard"],
+            "note": note,
+        }
+    else:  # "suspicious"
+        return {
+            "verified": False,
+            "error": (
+                "Proof depends on unproved assumptions: "
+                f"{', '.join(details['suspicious_names'])}"
+            ),
+            "assumptions": details["suspicious"],
+            "hint": (
+                "The proof uses Admitted, admit, or declares custom axioms. "
+                "Provide a complete proof without these."
+            ),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -536,65 +605,30 @@ async def rocq_verify(
     if result["returncode"] == 0:
         # Phase 1 succeeded — parse Print Assumptions
         verdict, details = parse_and_classify_assumptions(result["stdout"])
-
-        if verdict == "closed":
-            return {
-                "verified": True,
-                "verification_method": "module_m",
-                "assumptions": "Closed under the global context",
-            }
-        elif verdict == "standard_only":
-            return {
-                "verified": True,
-                "verification_method": "module_m",
-                "assumptions": details["standard"],
-                "note": "Proof uses standard axioms (e.g., classical logic, Reals).",
-            }
-        else:  # "suspicious"
-            return {
-                "verified": False,
-                "error": (
-                    "Proof depends on unproved assumptions: "
-                    f"{', '.join(details['suspicious_names'])}"
-                ),
-                "assumptions": details["suspicious"],
-                "hint": (
-                    "The proof uses Admitted, admit, or declares custom axioms. "
-                    "Provide a complete proof without these."
-                ),
-            }
+        return _build_assumptions_result(verdict, details, "module_m")
 
     # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
     phase1_stderr = result["stderr"]
-    phase1_error = phase1_stderr[:4000]
+    phase1_error = phase1_stderr[:_MAX_ERROR_LENGTH]
     phase1_hint = verification_hint(phase1_stderr)
+    phase1_failure: dict[str, Any] = {
+        "verified": False,
+        "error": phase1_error,
+        "hint": phase1_hint,
+    }
 
-    # Phase 2 conditions:
-    # 1. Phase 1 failed with a unification error (Module M boundary issue)
-    # 2. Problem statement contains definition keywords (Inductive, Record, etc.)
-    if not _is_unification_failure(phase1_stderr):
-        return {
-            "verified": False,
-            "error": phase1_error,
-            "hint": phase1_hint,
-        }
-
+    # Phase 2 condition: problem statement contains definition keywords
+    # (Inductive, Record, etc.) that may cause type incompatibility across
+    # the Module M boundary.  Phase 2 is safe to attempt speculatively:
+    # it either succeeds (correct) or fails (we return the Phase 1 error).
     if not _has_definition_keywords(problem_statement):
-        return {
-            "verified": False,
-            "error": phase1_error,
-            "hint": phase1_hint,
-        }
+        return phase1_failure
 
     # --- Phase 2: Shared-defs template via pytanque toc ---
     lifespan_state = ctx.lifespan_context if ctx else None
     if lifespan_state is None:
         # No lifespan context (e.g., testing) — cannot use pytanque
-        return {
-            "verified": False,
-            "error": phase1_error,
-            "hint": phase1_hint,
-        }
+        return phase1_failure
 
     structure = await _extract_problem_structure(
         problem_statement, problem_name, workspace, lifespan_state
@@ -602,11 +636,7 @@ async def rocq_verify(
 
     if structure is None or not structure.has_shared_defs:
         # Could not extract structure or no shared defs found — return Phase 1 error
-        return {
-            "verified": False,
-            "error": phase1_error,
-            "hint": phase1_hint,
-        }
+        return phase1_failure
 
     try:
         shared_source = build_shared_defs_verification_source(
@@ -625,68 +655,22 @@ async def rocq_verify(
 
     if result2["returncode"] != 0:
         # Phase 2 also failed — return the Phase 1 error (more informative)
-        return {
-            "verified": False,
-            "error": phase1_error,
-            "hint": phase1_hint,
-        }
+        return phase1_failure
 
     # Phase 2 succeeded — parse Print Assumptions
     verdict2, details2 = parse_and_classify_assumptions(result2["stdout"])
-
-    if verdict2 == "closed":
-        return {
-            "verified": True,
-            "verification_method": "shared_defs",
-            "assumptions": "Closed under the global context",
-            "note": (
-                "Verified using shared-definitions template "
-                "(definitions placed outside Module M for type compatibility)."
-            ),
-        }
-    elif verdict2 == "standard_only":
-        return {
-            "verified": True,
-            "verification_method": "shared_defs",
-            "assumptions": details2["standard"],
-            "note": (
-                "Verified using shared-definitions template "
-                "(definitions placed outside Module M for type compatibility). "
-                "Proof uses standard axioms (e.g., classical logic, Reals)."
-            ),
-        }
-    else:  # "suspicious"
-        return {
-            "verified": False,
-            "error": (
-                "Proof depends on unproved assumptions: "
-                f"{', '.join(details2['suspicious_names'])}"
-            ),
-            "assumptions": details2["suspicious"],
-            "hint": (
-                "The proof uses Admitted, admit, or declares custom axioms. "
-                "Provide a complete proof without these."
-            ),
-        }
+    return _build_assumptions_result(verdict2, details2, "shared_defs")
 
 
 # ---------------------------------------------------------------------------
 # Tool: rocq_auto_solve
 # ---------------------------------------------------------------------------
 
-# Theorem-like keywords that introduce a named proof obligation in Rocq.
-_THEOREM_KEYWORDS: tuple[str, ...] = (
-    "Theorem",
-    "Lemma",
-    "Proposition",
-    "Corollary",
-    "Example",
-    "Fact",
-    "Remark",
-)
+# Theorem-like keywords — derived from verify._THEOREM_DETAILS (single source of truth).
+_THEOREM_KEYWORDS: tuple[str, ...] = tuple(sorted(_THEOREM_DETAILS))
 
 _THEOREM_KW_RE = re.compile(
-    r"^(" + "|".join(_THEOREM_KEYWORDS) + r")\s+",
+    r"^(" + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS) + r")\s+",
     re.MULTILINE,
 )
 
@@ -714,6 +698,100 @@ _AUTO_SOLVE_TACTICS: list[str] = [
 _AUTO_SOLVE_IMPORTS = "From Stdlib Require Import Lia Lra Ring Field.\n"
 
 
+def _rocq_scan(text: str):
+    """Yield ``(index, char, in_comment, in_string)`` for each character.
+
+    Single-pass scanner that tracks ``(* ... *)`` comment nesting (arbitrary
+    depth) and ``"..."`` string literals (with ``""`` escape).  Consumers can
+    use the flags to decide what to do with each character position.
+
+    Two-character tokens (``(*``, ``*)``, ``""``) are yielded as one event at
+    the position of their first character; the second character is skipped.
+    """
+    depth = 0
+    in_str = False
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if in_str:
+            if ch == '"':
+                if i + 1 < length and text[i + 1] == '"':
+                    yield i, ch, False, True
+                    i += 2
+                    continue
+                in_str = False
+            yield i, ch, False, True
+        elif depth > 0:
+            if ch == "*" and i + 1 < length and text[i + 1] == ")":
+                depth -= 1
+                yield i, ch, depth > 0, False  # closing *)
+                i += 2
+                continue
+            if ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                yield i, ch, True, False
+                i += 2
+                continue
+            yield i, ch, True, False
+        else:
+            if ch == '"':
+                in_str = True
+                yield i, ch, False, True
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                yield i, ch, True, False
+                i += 2
+                continue
+            else:
+                yield i, ch, False, False
+        i += 1
+
+
+def _rocq_comment_ranges(text: str) -> list[tuple[int, int]]:
+    """Return ``(start, end)`` ranges for ``(* ... *)`` comments in *text*.
+
+    Handles nested comments and skips ``(*``/``*)`` inside string literals
+    (delimited by ``"``).  The returned ranges cover only comments, not
+    strings; strings are tracked solely to avoid false positives.
+    """
+    ranges: list[tuple[int, int]] = []
+    comment_start: int | None = None
+    prev_in_comment = False
+    for idx, _ch, in_comment, _in_str in _rocq_scan(text):
+        if in_comment and not prev_in_comment:
+            comment_start = idx
+        elif not in_comment and prev_in_comment and comment_start is not None:
+            # idx is the position right after the closing *)
+            # The scan yields the '*' of '*)' with in_comment still True
+            # (depth was > 0 before decrement) -- actually depth > 0 is checked
+            # AFTER decrement.  The closing '*' yields in_comment = (depth > 0).
+            # So when depth goes 1→0, the '*' yields in_comment=False.
+            # That means we enter the 'not in_comment' branch here at the '*'.
+            # The range should end at idx + 2 (covering both * and )).
+            ranges.append((comment_start, idx + 2))
+            comment_start = None
+        prev_in_comment = in_comment
+    return ranges
+
+
+def _find_sentence_end(text: str) -> int | None:
+    """Find the first Rocq sentence-terminating dot in *text*.
+
+    A sentence-terminating dot is a ``.`` that is:
+    - NOT inside a ``(* ... *)`` comment (arbitrarily nested), and
+    - NOT inside a ``"..."`` string literal, and
+    - followed by whitespace or end-of-string.
+
+    Returns the index of the dot, or ``None`` if no terminating dot is found.
+    """
+    for idx, ch, in_comment, in_str in _rocq_scan(text):
+        if ch == "." and not in_comment and not in_str:
+            if idx + 1 >= len(text) or text[idx + 1] in (" ", "\t", "\n", "\r"):
+                return idx
+    return None
+
+
 def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
     """Parse *source* and return info about the LAST theorem declaration.
 
@@ -739,40 +817,7 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
         return None
 
     # Build list of comment ranges to filter out matches inside (* ... *)
-    comment_ranges: list[tuple[int, int]] = []
-    _depth = 0
-    _in_str = False
-    _comment_start = 0
-    _ci = 0
-    while _ci < len(source):
-        _ch = source[_ci]
-        if _in_str:
-            if _ch == '"':
-                # Handle "" escape (doubled double-quote inside strings)
-                if _ci + 1 < len(source) and source[_ci + 1] == '"':
-                    _ci += 2
-                    continue
-                _in_str = False
-        elif _depth > 0:
-            if _ch == "*" and _ci + 1 < len(source) and source[_ci + 1] == ")":
-                _depth -= 1
-                if _depth == 0:
-                    comment_ranges.append((_comment_start, _ci + 2))
-                _ci += 2
-                continue
-            elif _ch == "(" and _ci + 1 < len(source) and source[_ci + 1] == "*":
-                _depth += 1
-                _ci += 2
-                continue
-        else:
-            if _ch == '"':
-                _in_str = True
-            elif _ch == "(" and _ci + 1 < len(source) and source[_ci + 1] == "*":
-                _comment_start = _ci
-                _depth += 1
-                _ci += 2
-                continue
-        _ci += 1
+    comment_ranges = _rocq_comment_ranges(source)
 
     def _in_comment(pos: int) -> bool:
         return any(start <= pos < end for start, end in comment_ranges)
@@ -788,47 +833,8 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
     rest = source[m.start() :]
 
     # The statement ends at the first ``.`` that is NOT inside a comment
-    # and is followed by whitespace / end-of-string.  For simplicity we
-    # match the first ``.`` that terminates a Rocq sentence.  We need to
-    # skip dots inside ``(* ... *)`` comments and quoted strings, but in
-    # practice theorem statements don't contain those.  A robust approach:
-    # walk character-by-character tracking comment depth.
-    depth = 0  # comment nesting depth
-    in_string = False
-    dot_pos: int | None = None
-    i = 0
-    while i < len(rest):
-        c = rest[i]
-        if in_string:
-            if c == '"':
-                # Handle "" escape (doubled double-quote inside strings)
-                if i + 1 < len(rest) and rest[i + 1] == '"':
-                    i += 2
-                    continue
-                in_string = False
-        elif depth > 0:
-            if c == "*" and i + 1 < len(rest) and rest[i + 1] == ")":
-                depth -= 1
-                i += 2
-                continue
-            elif c == "(" and i + 1 < len(rest) and rest[i + 1] == "*":
-                depth += 1
-                i += 2
-                continue
-        else:
-            if c == '"':
-                in_string = True
-            elif c == "(" and i + 1 < len(rest) and rest[i + 1] == "*":
-                depth += 1
-                i += 2
-                continue
-            elif c == ".":
-                # A ``.`` terminates a sentence when followed by whitespace
-                # or end-of-string.
-                if i + 1 >= len(rest) or rest[i + 1] in (" ", "\t", "\n", "\r"):
-                    dot_pos = i
-                    break
-        i += 1
+    # and is followed by whitespace / end-of-string.
+    dot_pos = _find_sentence_end(rest)
 
     if dot_pos is None:
         return None
@@ -837,7 +843,7 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
 
     # Extract keyword and name from the statement.
     header_match = re.match(
-        r"(" + "|".join(_THEOREM_KEYWORDS) + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
+        r"(" + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS) + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
         full_statement,
     )
     if not header_match:

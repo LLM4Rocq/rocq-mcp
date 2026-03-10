@@ -1,6 +1,7 @@
 """End-to-end integration tests.
 
 TestCompileVerifyWorkflow: compile then verify (require coqc)
+TestSharedDefsVerifyWorkflow: Phase 2 shared-defs verify (require coqc + pet)
 TestQueryStepWorkflow: query then step (require pet)
 """
 
@@ -48,14 +49,15 @@ class TestCompileVerifyWorkflow:
         compile_result = rocq_compile(source=cheating_proof, workspace=str(workspace))
         # The cheat may or may not compile (depends on exact Rocq version)
         # The critical assertion is that verify rejects it.
-        if compile_result["success"]:
-            verify_result = await rocq_verify(
-                proof=cheating_proof,
-                problem_name="add_0_r",
-                problem_statement=simple_problem_statement,
-                workspace=str(workspace),
-            )
-            assert verify_result["verified"] is False
+        if not compile_result["success"]:
+            pytest.skip("cheating proof did not compile on this Rocq version")
+        verify_result = await rocq_verify(
+            proof=cheating_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert verify_result["verified"] is False
 
     async def test_classical_axiom_accepted(
         self, workspace, classical_proof, classical_problem
@@ -88,15 +90,16 @@ class TestCompileVerifyWorkflow:
         compile_result = rocq_compile(
             source=axiom_spoofing_proof, workspace=str(workspace)
         )
-        if compile_result["success"]:
-            problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
-            verify_result = await rocq_verify(
-                proof=axiom_spoofing_proof,
-                problem_name="anything",
-                problem_statement=problem,
-                workspace=str(workspace),
-            )
-            assert verify_result["verified"] is False
+        if not compile_result["success"]:
+            pytest.skip("axiom spoofing proof did not compile on this Rocq version")
+        problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
+        verify_result = await rocq_verify(
+            proof=axiom_spoofing_proof,
+            problem_name="anything",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert verify_result["verified"] is False
 
     async def test_admitted_proof_rejected_end_to_end(
         self, workspace, admitted_proof, simple_problem_statement
@@ -105,14 +108,15 @@ class TestCompileVerifyWorkflow:
         from rocq_mcp.server import rocq_compile, rocq_verify
 
         compile_result = rocq_compile(source=admitted_proof, workspace=str(workspace))
-        if compile_result["success"]:
-            verify_result = await rocq_verify(
-                proof=admitted_proof,
-                problem_name="add_0_r",
-                problem_statement=simple_problem_statement,
-                workspace=str(workspace),
-            )
-            assert verify_result["verified"] is False
+        if not compile_result["success"]:
+            pytest.skip("admitted proof did not compile on this Rocq version")
+        verify_result = await rocq_verify(
+            proof=admitted_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert verify_result["verified"] is False
 
     async def test_no_artifacts_after_workflow(
         self, workspace, simple_proof, simple_problem_statement
@@ -156,6 +160,136 @@ class TestCompileVerifyWorkflow:
             workspace=str(workspace),
         )
         assert verify_result["verified"] is True
+
+
+# =========================================================================
+# Shared-defs (Phase 2) verify workflow (require coqc + pet)
+# =========================================================================
+
+
+class _MockContext:
+    """Minimal mock for FastMCP Context to inject lifespan_state."""
+
+    def __init__(self, lifespan_state):
+        self.lifespan_context = lifespan_state
+
+
+@pytest.mark.skipif(
+    not (COQC_AVAILABLE and PET_AVAILABLE),
+    reason="coqc and pet required for Phase 2 verification",
+)
+class TestSharedDefsVerifyWorkflow:
+    """End-to-end: Phase 2 shared-defs verification via pytanque toc."""
+
+    @pytest.fixture
+    def lifespan_state(self):
+        from rocq_mcp.server import _invalidate_pet
+
+        state = {"pet_client": None, "pet_timeout": 30.0}
+        yield state
+        _invalidate_pet(state)
+
+    async def test_phase2_verify_with_inductive(self, lifespan_state, workspace):
+        """Inductive type in problem triggers Phase 2 and succeeds."""
+        from rocq_mcp.server import rocq_verify
+
+        problem = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_refl : forall c : color, c = c.\n"
+            "Admitted.\n"
+        )
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_refl : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+
+        ctx = _MockContext(lifespan_state)
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="color_refl",
+            problem_statement=problem,
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+
+        assert result["verified"] is True
+        assert result["verification_method"] == "shared_defs"
+
+    async def test_phase1_verify_no_fallback(self, lifespan_state, workspace):
+        """Simple theorem without Inductive types should verify via Phase 1."""
+        from rocq_mcp.server import rocq_verify
+
+        problem = "Theorem t : True.\nAdmitted.\n"
+        proof = "Theorem t : True.\nProof. exact I. Qed.\n"
+
+        ctx = _MockContext(lifespan_state)
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+        assert result["verified"] is True
+        assert result["verification_method"] == "module_m"
+
+    async def test_phase2_with_definition_and_inductive(
+        self, lifespan_state, workspace
+    ):
+        """Definition + Inductive in problem triggers Phase 2 and succeeds."""
+        from rocq_mcp.server import rocq_verify
+
+        problem = (
+            "Definition mynat := nat.\n"
+            "Inductive mylist : Type := Nil | Cons : mynat -> mylist -> mylist.\n"
+            "Theorem mylist_refl : forall l : mylist, l = l.\n"
+            "Admitted.\n"
+        )
+        proof = (
+            "Definition mynat := nat.\n"
+            "Inductive mylist : Type := Nil | Cons : mynat -> mylist -> mylist.\n"
+            "Theorem mylist_refl : forall l : mylist, l = l.\n"
+            "Proof. destruct l; reflexivity. Qed.\n"
+        )
+
+        ctx = _MockContext(lifespan_state)
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="mylist_refl",
+            problem_statement=problem,
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+
+        assert result["verified"] is True
+        assert result["verification_method"] == "shared_defs"
+
+    async def test_phase2_rejects_admitted(self, lifespan_state, workspace):
+        """Cheating proof with Admitted inside Phase 2 is rejected."""
+        from rocq_mcp.server import rocq_verify
+
+        problem = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_count : Red <> Blue.\n"
+            "Admitted.\n"
+        )
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_count : Red <> Blue.\n"
+            "Proof. Admitted.\n"
+        )
+
+        ctx = _MockContext(lifespan_state)
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="color_count",
+            problem_statement=problem,
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+
+        assert result["verified"] is False
 
 
 # =========================================================================

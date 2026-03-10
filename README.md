@@ -127,7 +127,7 @@ src/rocq_mcp/
 tests/
   test_compile.py       Tests for rocq_compile
   test_verify.py        Tests for rocq_verify
-  test_hammer.py        Tests for rocq_auto_solve (unit + integration)
+  test_auto_solve.py    Tests for rocq_auto_solve (unit + integration)
   test_query.py         Tests for rocq_query (requires pet)
   test_step.py          Tests for rocq_step (requires pet)
   test_step_enhanced.py Tests for rocq_step complete_goals enhancement

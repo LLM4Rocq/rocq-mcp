@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Definition categories and problem structure
@@ -58,7 +57,6 @@ _SHARED_DEF_DETAILS: set[str] = {
     "Fixpoint",
     "CoFixpoint",
     "Function",
-    "Let",
     "Canonical",
     "Coercion",
     "Instance",
@@ -124,7 +122,10 @@ def _strip_shared_defs(proof: str, shared_names: set[str]) -> str:
             rf"(?ms)^[ \t]*(?:{_DEF_KEYWORDS_RE_STR})\s+{re.escape(name)}\b"
             rf".*?\.(?=\s|$)[ \t]*\n?"
         )
-        result = re.sub(pattern, "", result, count=1)
+        # Strip ALL occurrences (count=0), not just the first. Using count=1
+        # would allow an adversary to hide a decoy definition (e.g. in a
+        # comment-like context) to protect their real redefinition from stripping.
+        result = re.sub(pattern, "", result, count=0)
     return result
 
 
@@ -185,17 +186,78 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"#\[bypass_check\b"),
         "Forbidden attribute '#[bypass_check]' (bypasses kernel safety checks)",
     ),
+    (
+        re.compile(r"\bEnd\s+M\b\s*\."),
+        "Forbidden command 'End M.' (attempt to escape Module M sandbox)",
+    ),
+    (
+        re.compile(r"\bReset\b"),
+        "Forbidden command 'Reset' (resets global environment)",
+    ),
+    (
+        re.compile(r"\bBack\b"),
+        "Forbidden command 'Back' (undoes vernacular commands)",
+    ),
+    (
+        re.compile(r"\bUndo\b"),
+        "Forbidden command 'Undo' (undoes proof steps)",
+    ),
 ]
+
+
+def _strip_rocq_comments(text: str) -> str:
+    """Remove ``(* ... *)`` comments from *text*, handling nesting and strings."""
+    result: list[str] = []
+    depth = 0
+    in_string = False
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if in_string:
+            if ch == '"':
+                if i + 1 < length and text[i + 1] == '"':
+                    result.append('""')
+                    i += 2
+                    continue
+                in_string = False
+            result.append(ch)
+        elif depth > 0:
+            if ch == "*" and i + 1 < length and text[i + 1] == ")":
+                depth -= 1
+                i += 2
+                continue
+            if ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                i += 2
+                continue
+        else:
+            if ch == '"':
+                in_string = True
+                result.append(ch)
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                i += 2
+                continue
+            else:
+                result.append(ch)
+        i += 1
+    return "".join(result)
 
 
 def _check_forbidden_commands(source: str) -> str | None:
     """Check for dangerous Rocq commands in the source text.
 
+    Comments are stripped before scanning so that forbidden keywords
+    inside ``(* ... *)`` do not trigger false positives, and attackers
+    cannot hide commands inside comment-like constructs.
+
     Returns an error message string if a forbidden command is found,
     or None if the source is clean.
     """
+    stripped = _strip_rocq_comments(source)
     for pattern, message in _FORBIDDEN_PATTERNS:
-        if re.search(pattern, source):
+        if re.search(pattern, stripped):
             return message
     return None
 
@@ -241,8 +303,8 @@ def build_verification_source(
         f"End M.\n\n"
         f"{clean_statement}\n"
         f"Proof.\n"
-        f"apply M.{problem_name} || eapply M.{problem_name}.\n"
-        f"all: first [ assumption | reflexivity | auto | simpl; auto ].\n"
+        f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.\n"
+        f"all: first [ assumption | reflexivity | congruence | auto | easy | simpl; auto ].\n"
         f"Qed.\n\n"
         f"Print Assumptions {problem_name}.\n"
     )
@@ -289,8 +351,8 @@ def build_shared_defs_verification_source(
         End M.
         <theorem re-statement>
         Proof.
-        apply M.<name> || eapply M.<name>.
-        all: first [ assumption | reflexivity | auto | simpl; auto ].
+        exact M.<name> || apply M.<name> || eapply M.<name>.
+        all: first [ assumption | reflexivity | congruence | auto | easy | simpl; auto ].
         Qed.
         Print Assumptions <name>.
     """
@@ -341,8 +403,8 @@ def build_shared_defs_verification_source(
     # 4. Theorem re-statement and apply
     parts.append(clean_theorem)
     parts.append("Proof.")
-    parts.append(f"apply M.{problem_name} || eapply M.{problem_name}.")
-    parts.append("all: first [ assumption | reflexivity | auto | simpl; auto ].")
+    parts.append(f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.")
+    parts.append("all: first [ assumption | reflexivity | congruence | auto | easy | simpl; auto ].")
     parts.append("Qed.")
     parts.append("")
 
@@ -584,11 +646,16 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
 
 def verification_hint(stderr: str) -> str:
     """Generate a human-readable hint from a verification failure."""
-    if "Unable to unify" in stderr or "Cannot apply" in stderr:
+    if ("Unable to unify" in stderr or "Cannot apply" in stderr) and "M." in stderr:
         return (
             "The proof may define custom types/functions that don't unify "
             "across the Module M. boundary. This is a known limitation. "
             "If rocq_compile succeeded, the proof is likely correct."
+        )
+    if "Unable to unify" in stderr or "Cannot apply" in stderr:
+        return (
+            "Type mismatch: the proof's result type does not match "
+            "the expected theorem type."
         )
     if "not found" in stderr and "M." in stderr:
         return (

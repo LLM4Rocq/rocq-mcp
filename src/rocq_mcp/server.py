@@ -570,25 +570,65 @@ async def main():
         use_tcp_mode = False
         logger.info("Using stdio mode (default)")
 
-    # Run the MCP server
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="rocq-mcp",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    # Run the MCP server with proper error handling for pipe closure
+    try:
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="rocq-mcp",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    except BrokenPipeError:
+        logger.info("Pipe closed by client, shutting down gracefully...")
+    except ConnectionResetError:
+        logger.info("Connection reset by client, shutting down gracefully...")
+    except Exception as e:
+        if "Broken pipe" in str(e) or "EOF" in str(e):
+            logger.info("Client disconnected, shutting down gracefully...")
+        else:
+            logger.error(f"Server error: {e}", exc_info=True)
+    finally:
+        # Clean up petanque process if running
+        cleanup_petanque_process()
+        logger.info("rocq-mcp server exiting")
 
 
 def cli():
     """CLI entry point for Poetry script."""
-    asyncio.run(main())
+    # Handle SIGHUP (parent process died) for graceful shutdown
+    def sighup_handler(signum, frame):
+        logger.info("Received SIGHUP (parent died), shutting down...")
+        cleanup_petanque_process()
+        sys.exit(0)
+
+    # Handle SIGPIPE (broken pipe) for graceful shutdown
+    def sigpipe_handler(signum, frame):
+        logger.info("Received SIGPIPE, shutting down...")
+        cleanup_petanque_process()
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGHUP, sighup_handler)
+        signal.signal(signal.SIGPIPE, sigpipe_handler)
+    except (ValueError, OSError):
+        # Signal handling may fail in some environments
+        pass
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Interrupted, shutting down...")
+    except BrokenPipeError:
+        logger.info("Pipe closed, shutting down...")
+    finally:
+        cleanup_petanque_process()
 
 
 if __name__ == "__main__":

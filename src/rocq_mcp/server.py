@@ -702,8 +702,10 @@ def _rocq_scan(text: str):
     """Yield ``(index, char, in_comment, in_string)`` for each character.
 
     Single-pass scanner that tracks ``(* ... *)`` comment nesting (arbitrary
-    depth) and ``"..."`` string literals (with ``""`` escape).  Consumers can
-    use the flags to decide what to do with each character position.
+    depth) and ``"..."`` string literals (with ``""`` escape).  Rocq's lexer
+    tracks string literals inside comments (so ``*)`` inside a quoted string
+    within a comment does NOT close the comment), and this scanner matches
+    that behavior.
 
     Two-character tokens (``(*``, ``*)``, ``""``) are yielded as one event at
     the position of their first character; the second character is skipped.
@@ -717,23 +719,27 @@ def _rocq_scan(text: str):
         if in_str:
             if ch == '"':
                 if i + 1 < length and text[i + 1] == '"':
-                    yield i, ch, False, True
+                    yield i, ch, depth > 0, True
                     i += 2
                     continue
                 in_str = False
-            yield i, ch, False, True
+            yield i, ch, depth > 0, True
         elif depth > 0:
-            if ch == "*" and i + 1 < length and text[i + 1] == ")":
+            if ch == '"':
+                in_str = True
+                yield i, ch, True, True
+            elif ch == "*" and i + 1 < length and text[i + 1] == ")":
                 depth -= 1
                 yield i, ch, depth > 0, False  # closing *)
                 i += 2
                 continue
-            if ch == "(" and i + 1 < length and text[i + 1] == "*":
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
                 depth += 1
                 yield i, ch, True, False
                 i += 2
                 continue
-            yield i, ch, True, False
+            else:
+                yield i, ch, True, False
         else:
             if ch == '"':
                 in_str = True

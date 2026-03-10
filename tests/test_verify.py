@@ -1092,6 +1092,68 @@ class TestVerifyInputSanitization:
                 problem_statement="Theorem t : True.\nAdmitted.",
             )
 
+    def test_string_inside_comment_desync_rejected(self):
+        """CRITICAL: string inside comment must not desynchronize scanner.
+
+        Rocq tracks strings inside comments, so (* " (* " *) leaves the
+        comment open in Rocq but a naive scanner would close it.  After
+        the fix, End M. is visible to the forbidden check.
+        """
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='(* " (* " *) End M.\nAxiom cheat : False.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_string_with_close_comment_inside_comment(self):
+        """*) inside a quoted string within a comment must NOT close it."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='(* " *) " *) End M.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_add_loadpath_rejected(self):
+        """Add LoadPath must be rejected (loads .vo from arbitrary dirs)."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Add LoadPath "/tmp/evil".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_add_rec_loadpath_rejected(self):
+        """Add Rec LoadPath must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Add Rec LoadPath "/tmp/evil".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_add_ml_path_rejected(self):
+        """Add ML Path must be rejected."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Add ML Path "/tmp/evil".\nTheorem t : True. Proof. exact I. Qed.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_comment_replaced_with_space(self):
+        """Comments should be replaced with space, not removed.
+
+        This prevents Load(* *)bar from becoming Loadbar (bypassing \\b).
+        """
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        stripped = _strip_rocq_comments("Load(* *)bar")
+        # Comment replaced with space(s), not removed — words stay separate
+        assert "Loadbar" not in stripped
+        assert "Load" in stripped and "bar" in stripped
+
 
 # =========================================================================
 # PART B: Integration tests (require coqc)

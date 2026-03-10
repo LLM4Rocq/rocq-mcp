@@ -202,11 +202,24 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\bUndo\b"),
         "Forbidden command 'Undo' (undoes proof steps)",
     ),
+    (
+        re.compile(r"\bAdd\s+(Rec\s+)?LoadPath\b"),
+        "Forbidden command 'Add LoadPath' (loads .vo from arbitrary directories)",
+    ),
+    (
+        re.compile(r"\bAdd\s+ML\s+Path\b"),
+        "Forbidden command 'Add ML Path' (extends OCaml plugin search path)",
+    ),
 ]
 
 
 def _strip_rocq_comments(text: str) -> str:
-    """Remove ``(* ... *)`` comments from *text*, handling nesting and strings."""
+    """Remove ``(* ... *)`` comments from *text*, handling nesting and strings.
+
+    Rocq's lexer tracks string literals inside comments (so ``*)`` inside a
+    quoted string within a comment does NOT close the comment).  This function
+    matches that behavior to avoid desynchronization.
+    """
     result: list[str] = []
     depth = 0
     in_string = False
@@ -217,17 +230,23 @@ def _strip_rocq_comments(text: str) -> str:
         if in_string:
             if ch == '"':
                 if i + 1 < length and text[i + 1] == '"':
-                    result.append('""')
+                    if depth == 0:
+                        result.append('""')
                     i += 2
                     continue
                 in_string = False
-            result.append(ch)
+            if depth == 0:
+                result.append(ch)
         elif depth > 0:
-            if ch == "*" and i + 1 < length and text[i + 1] == ")":
+            if ch == '"':
+                in_string = True
+            elif ch == "*" and i + 1 < length and text[i + 1] == ")":
                 depth -= 1
+                if depth == 0:
+                    result.append(" ")  # replace comment with space
                 i += 2
                 continue
-            if ch == "(" and i + 1 < length and text[i + 1] == "*":
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
                 depth += 1
                 i += 2
                 continue
@@ -237,6 +256,7 @@ def _strip_rocq_comments(text: str) -> str:
                 result.append(ch)
             elif ch == "(" and i + 1 < length and text[i + 1] == "*":
                 depth += 1
+                result.append(" ")  # replace comment with space
                 i += 2
                 continue
             else:
@@ -301,6 +321,10 @@ def build_verification_source(
         f"Module M.\n"
         f"{proof}\n"
         f"End M.\n\n"
+        # Reset printing flags that Module M may have changed, to ensure
+        # Print Assumptions output matches our parser's expected format.
+        f"Unset Printing All.\n"
+        f"Unset Printing Universes.\n\n"
         f"{clean_statement}\n"
         f"Proof.\n"
         f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.\n"
@@ -398,6 +422,12 @@ def build_shared_defs_verification_source(
     parts.append("Module M.")
     parts.append(stripped_proof)
     parts.append("End M.")
+    parts.append("")
+
+    # Reset printing flags that Module M may have changed, to ensure
+    # Print Assumptions output matches our parser's expected format.
+    parts.append("Unset Printing All.")
+    parts.append("Unset Printing Universes.")
     parts.append("")
 
     # 4. Theorem re-statement and apply

@@ -19,7 +19,12 @@ from fastmcp.server.lifespan import lifespan
 from rocq_mcp.verify import (
     _check_forbidden_commands,
     build_verification_source,
+    build_shared_defs_verification_source,
+    classify_toc_detail,
+    DefCategory,
+    DefinitionInfo,
     parse_and_classify_assumptions,
+    ProblemStructure,
     verification_hint,
 )
 
@@ -222,17 +227,235 @@ def rocq_compile(
 
 
 # ---------------------------------------------------------------------------
+# Shared-defs verification helpers (Phase 2 fallback)
+# ---------------------------------------------------------------------------
+
+
+def _extract_source_range(
+    lines: list[str],
+    start_line: int,
+    start_char: int,
+    end_line: int,
+    end_char: int,
+) -> str:
+    """Extract source text from lines using 0-based line/character positions."""
+    if start_line == end_line:
+        return lines[start_line][start_char:end_char]
+    parts: list[str] = []
+    parts.append(lines[start_line][start_char:])
+    for i in range(start_line + 1, end_line):
+        parts.append(lines[i])
+    parts.append(lines[end_line][:end_char])
+    return "\n".join(parts)
+
+
+def _is_unification_failure(stderr: str) -> bool:
+    """Check if coqc error indicates a type unification failure across Module M."""
+    return "Unable to unify" in stderr or "Cannot apply" in stderr
+
+
+_DEF_KEYWORD_RE = re.compile(
+    r"\b(Inductive|CoInductive|Variant|Record|Structure|Class"
+    r"|Definition|Fixpoint|CoFixpoint|Function|Let"
+    r"|Canonical|Coercion|Instance)\b"
+)
+
+
+def _has_definition_keywords(text: str) -> bool:
+    """Quick regex check for Inductive/Record/Definition/Fixpoint etc. in text."""
+    return bool(_DEF_KEYWORD_RE.search(text))
+
+
+def _flatten_toc_elements(elements: list[Any]) -> list[Any]:
+    """Flatten a tree of TocElements into a list, preserving order."""
+    result: list[Any] = []
+    for elem in elements:
+        result.append(elem)
+        if elem.children:
+            result.extend(_flatten_toc_elements(elem.children))
+    return result
+
+
+async def _extract_problem_structure(
+    problem_statement: str,
+    problem_name: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> ProblemStructure | None:
+    """Extract the structure of a problem statement using pytanque toc.
+
+    Writes the problem_statement to a temp file, runs toc, then parses the
+    toc entries into a ProblemStructure with preamble, shared definitions,
+    and the theorem source text.
+
+    Returns None if pet is not available or toc fails.
+    """
+    lines = problem_statement.split("\n")
+    _temp_files: list[str] = []
+
+    def _do_toc(pet: Any) -> ProblemStructure | None:
+        ws = str(Path(workspace).resolve())
+        pet.set_workspace(debug=False, dir=ws)
+
+        # Write problem statement to temp file
+        with tempfile.NamedTemporaryFile(
+            suffix=".v",
+            mode="w",
+            delete=False,
+            dir=ws,
+        ) as f:
+            f.write(problem_statement)
+            f.flush()
+            tmp_path = f.name
+        _temp_files.append(tmp_path)
+
+        try:
+            toc_result = pet.toc(tmp_path)
+        except Exception:
+            return None
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        if not toc_result:
+            return None
+
+        # Flatten all toc elements from all sections
+        all_elements: list[Any] = []
+        for _section_name, elements in toc_result:
+            all_elements.extend(_flatten_toc_elements(elements))
+
+        # Deduplicate by (name, start_line) — toc returns duplicate entries
+        # for constructors/fields of the same inductive/record
+        seen: set[tuple[str | None, int]] = set()
+        unique_elements: list[Any] = []
+        for elem in all_elements:
+            name = elem.name.v if elem.name else None
+            start_line = elem.range.start.line if elem.range else -1
+            key = (name, start_line)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_elements.append(elem)
+
+        # Further deduplicate by range (mutual inductives share same range)
+        seen_ranges: set[tuple[int, int, int, int]] = set()
+        deduped_elements: list[Any] = []
+        for elem in unique_elements:
+            if elem.range:
+                rng = (
+                    elem.range.start.line,
+                    elem.range.start.character,
+                    elem.range.end.line,
+                    elem.range.end.character,
+                )
+                if rng in seen_ranges:
+                    continue
+                seen_ranges.add(rng)
+            deduped_elements.append(elem)
+
+        # Sort by source position
+        deduped_elements.sort(
+            key=lambda e: (
+                e.range.start.line if e.range else 0,
+                e.range.start.character if e.range else 0,
+            )
+        )
+
+        # Parse into DefinitionInfo objects
+        definitions: list[DefinitionInfo] = []
+        theorem_source: str = ""
+        theorem_name: str | None = None
+        first_def_line: int | None = None
+
+        for elem in deduped_elements:
+            name = elem.name.v if elem.name else None
+            detail = elem.detail
+            category = classify_toc_detail(detail)
+
+            start_line = elem.range.start.line if elem.range else 0
+            start_char = elem.range.start.character if elem.range else 0
+            end_line = elem.range.end.line if elem.range else 0
+            end_char = elem.range.end.character if elem.range else 0
+
+            # Extract source text for this element
+            try:
+                source_text = _extract_source_range(
+                    lines, start_line, start_char, end_line, end_char
+                )
+            except (IndexError, ValueError):
+                continue
+
+            if first_def_line is None:
+                first_def_line = start_line
+
+            if category == DefCategory.THEOREM:
+                # toc range for theorem includes only the statement, not
+                # Proof...Qed.  We need just the statement for the template.
+                theorem_source = source_text
+                theorem_name = name
+            elif category in (
+                DefCategory.SHARED_DEF,
+                DefCategory.NOTATION,
+                DefCategory.OTHER,
+            ):
+                definitions.append(
+                    DefinitionInfo(
+                        name=name,
+                        detail=detail,
+                        category=category,
+                        source_text=source_text,
+                        start_line=start_line,
+                        end_line=end_line,
+                    )
+                )
+
+        # Extract preamble: everything before the first reported definition
+        if first_def_line is not None and first_def_line > 0:
+            preamble_source = "\n".join(lines[:first_def_line])
+        else:
+            preamble_source = ""
+
+        has_shared = any(d.category == DefCategory.SHARED_DEF for d in definitions)
+
+        return ProblemStructure(
+            preamble_source=preamble_source,
+            definitions=definitions,
+            theorem_source=theorem_source,
+            theorem_name=theorem_name,
+            has_shared_defs=has_shared,
+            full_source=problem_statement,
+        )
+
+    def _on_timeout() -> None:
+        for p in _temp_files:
+            Path(p).unlink(missing_ok=True)
+
+    result = await _run_with_pet(
+        _do_toc,
+        lifespan_state,
+        "Problem structure extraction",
+        on_timeout=_on_timeout,
+    )
+
+    # _run_with_pet may return an error dict instead of a ProblemStructure
+    if isinstance(result, dict):
+        return None
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_verify
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool
-def rocq_verify(
+async def rocq_verify(
     proof: str,
     problem_name: str,
     problem_statement: str,
     workspace: str = "",
     timeout: int = 0,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Verify that a proof actually proves the original statement.
 
@@ -251,11 +474,10 @@ def rocq_verify(
 
     Always run this after rocq_compile succeeds.
 
-    Known limitation: proofs that define local types/functions (e.g.,
-    Fixpoint sum_f_R0, Definition C) may fail verification even if correct,
-    because module-qualified names (M.C) don't unify with outer-scope names.
-    If verification fails with "Unable to unify", the proof may still be
-    correct -- use rocq_compile result as fallback.
+    When the standard Module M. template fails due to type unification errors
+    (common when the problem defines local types/functions), automatically
+    falls back to a shared-definitions template that places type definitions
+    outside Module M for compatibility.
 
     Args:
         proof: The complete proof file content (including imports).
@@ -293,7 +515,7 @@ def rocq_verify(
             "error": f"Problem statement exceeds maximum size ({ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
-    # Build the verification source
+    # --- Phase 1: Standard Module M. template ---
     try:
         verification_source = build_verification_source(
             proof,
@@ -303,7 +525,6 @@ def rocq_verify(
     except ValueError as e:
         return {"verified": False, "error": str(e)}
 
-    # Run coqc on the verification source
     result = _run_coqc(verification_source, workspace, timeout)
 
     if result["timed_out"]:
@@ -312,35 +533,136 @@ def rocq_verify(
             "error": f"Verification timed out after {timeout}s.",
         }
 
-    if result["returncode"] != 0:
+    if result["returncode"] == 0:
+        # Phase 1 succeeded — parse Print Assumptions
+        verdict, details = parse_and_classify_assumptions(result["stdout"])
+
+        if verdict == "closed":
+            return {
+                "verified": True,
+                "verification_method": "module_m",
+                "assumptions": "Closed under the global context",
+            }
+        elif verdict == "standard_only":
+            return {
+                "verified": True,
+                "verification_method": "module_m",
+                "assumptions": details["standard"],
+                "note": "Proof uses standard axioms (e.g., classical logic, Reals).",
+            }
+        else:  # "suspicious"
+            return {
+                "verified": False,
+                "error": (
+                    "Proof depends on unproved assumptions: "
+                    f"{', '.join(details['suspicious_names'])}"
+                ),
+                "assumptions": details["suspicious"],
+                "hint": (
+                    "The proof uses Admitted, admit, or declares custom axioms. "
+                    "Provide a complete proof without these."
+                ),
+            }
+
+    # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
+    phase1_stderr = result["stderr"]
+    phase1_error = phase1_stderr[:4000]
+    phase1_hint = verification_hint(phase1_stderr)
+
+    # Phase 2 conditions:
+    # 1. Phase 1 failed with a unification error (Module M boundary issue)
+    # 2. Problem statement contains definition keywords (Inductive, Record, etc.)
+    if not _is_unification_failure(phase1_stderr):
         return {
             "verified": False,
-            "error": result["stderr"][:4000],
-            "hint": verification_hint(result["stderr"]),
+            "error": phase1_error,
+            "hint": phase1_hint,
         }
 
-    # Parse and classify Print Assumptions output
-    verdict, details = parse_and_classify_assumptions(result["stdout"])
+    if not _has_definition_keywords(problem_statement):
+        return {
+            "verified": False,
+            "error": phase1_error,
+            "hint": phase1_hint,
+        }
 
-    if verdict == "closed":
+    # --- Phase 2: Shared-defs template via pytanque toc ---
+    lifespan_state = ctx.lifespan_context if ctx else None
+    if lifespan_state is None:
+        # No lifespan context (e.g., testing) — cannot use pytanque
+        return {
+            "verified": False,
+            "error": phase1_error,
+            "hint": phase1_hint,
+        }
+
+    structure = await _extract_problem_structure(
+        problem_statement, problem_name, workspace, lifespan_state
+    )
+
+    if structure is None or not structure.has_shared_defs:
+        # Could not extract structure or no shared defs found — return Phase 1 error
+        return {
+            "verified": False,
+            "error": phase1_error,
+            "hint": phase1_hint,
+        }
+
+    try:
+        shared_source = build_shared_defs_verification_source(
+            proof, problem_name, structure
+        )
+    except ValueError as e:
+        return {"verified": False, "error": str(e)}
+
+    result2 = _run_coqc(shared_source, workspace, timeout)
+
+    if result2["timed_out"]:
+        return {
+            "verified": False,
+            "error": f"Verification (shared-defs) timed out after {timeout}s.",
+        }
+
+    if result2["returncode"] != 0:
+        # Phase 2 also failed — return the Phase 1 error (more informative)
+        return {
+            "verified": False,
+            "error": phase1_error,
+            "hint": phase1_hint,
+        }
+
+    # Phase 2 succeeded — parse Print Assumptions
+    verdict2, details2 = parse_and_classify_assumptions(result2["stdout"])
+
+    if verdict2 == "closed":
         return {
             "verified": True,
+            "verification_method": "shared_defs",
             "assumptions": "Closed under the global context",
+            "note": (
+                "Verified using shared-definitions template "
+                "(definitions placed outside Module M for type compatibility)."
+            ),
         }
-    elif verdict == "standard_only":
+    elif verdict2 == "standard_only":
         return {
             "verified": True,
-            "assumptions": details["standard"],
-            "note": "Proof uses standard axioms (e.g., classical logic, Reals).",
+            "verification_method": "shared_defs",
+            "assumptions": details2["standard"],
+            "note": (
+                "Verified using shared-definitions template "
+                "(definitions placed outside Module M for type compatibility). "
+                "Proof uses standard axioms (e.g., classical logic, Reals)."
+            ),
         }
     else:  # "suspicious"
         return {
             "verified": False,
             "error": (
                 "Proof depends on unproved assumptions: "
-                f"{', '.join(details['suspicious_names'])}"
+                f"{', '.join(details2['suspicious_names'])}"
             ),
-            "assumptions": details["suspicious"],
+            "assumptions": details2["suspicious"],
             "hint": (
                 "The proof uses Admitted, admit, or declares custom axioms. "
                 "Provide a complete proof without these."

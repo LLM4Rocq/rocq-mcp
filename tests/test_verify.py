@@ -26,7 +26,12 @@ from rocq_mcp.verify import (
     _is_standard_axiom,
     _axiom_short_name,
     _parse_assumptions_raw,
+    _strip_shared_defs,
+    build_shared_defs_verification_source,
+    DefCategory,
+    DefinitionInfo,
     parse_and_classify_assumptions,
+    ProblemStructure,
     build_verification_source,
 )
 
@@ -156,9 +161,7 @@ class TestAxiomClassification:
     def test_functional_extensionality_module_qualified(self):
         """Print Assumptions outputs this without Stdlib. prefix."""
         assert (
-            _is_standard_axiom(
-                "FunctionalExtensionality.functional_extensionality_dep"
-            )
+            _is_standard_axiom("FunctionalExtensionality.functional_extensionality_dep")
             is True
         )
 
@@ -425,6 +428,230 @@ class TestBuildVerificationSource:
 
 
 # ---------------------------------------------------------------------------
+# _strip_shared_defs and build_shared_defs_verification_source
+# ---------------------------------------------------------------------------
+
+
+class TestStripSharedDefs:
+    """Test stripping shared definitions from proof text."""
+
+    def test_strip_single_definition(self):
+        proof = (
+            "From Stdlib Require Import List.\n"
+            "Definition state := list nat.\n"
+            "Theorem foo : state = state.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state"})
+        assert "Definition state" not in result
+        assert "From Stdlib Require Import List." in result
+        assert "Theorem foo" in result
+
+    def test_strip_inductive(self):
+        proof = (
+            "Inductive color :=\n"
+            "  | Red\n"
+            "  | Green\n"
+            "  | Blue.\n"
+            "Theorem foo : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"color"})
+        assert "Inductive color" not in result
+        assert "Red" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_multiple(self):
+        proof = (
+            "Definition state := list nat.\n"
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state", "color"})
+        assert "Definition state" not in result
+        assert "Inductive color" not in result
+        assert "Theorem foo" in result
+
+    def test_no_strip_non_matching(self):
+        proof = (
+            "Definition helper := 42.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state"})
+        assert "Definition helper" in result
+        assert "Theorem foo" in result
+
+    def test_empty_shared_names(self):
+        proof = "Theorem foo : True.\nProof. exact I. Qed.\n"
+        result = _strip_shared_defs(proof, set())
+        assert result == proof
+
+    def test_preserves_helper_definitions(self):
+        """Helper defs not in shared_names should be preserved."""
+        proof = (
+            "Definition shared := 0.\n"
+            "Definition helper := shared + 1.\n"
+            "Theorem foo : helper = 1.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"shared"})
+        assert "Definition shared" not in result
+        assert "Definition helper" in result
+        assert "Theorem foo" in result
+
+    def test_strip_fixpoint(self):
+        proof = (
+            "Fixpoint f (n : nat) : nat :=\n"
+            "  match n with\n"
+            "  | O => O\n"
+            "  | S n' => S (f n')\n"
+            "  end.\n"
+            "Theorem foo : f 0 = 0.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"f"})
+        assert "Fixpoint f" not in result
+        assert "Theorem foo" in result
+
+    def test_strip_record(self):
+        proof = (
+            "Record point := { x : nat; y : nat }.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"point"})
+        assert "Record point" not in result
+        assert "Theorem foo" in result
+
+    def test_dot_in_qualified_name_not_confused(self):
+        """Dots in Nat.add etc. should not end the sentence early."""
+        proof = (
+            "Definition myval := Nat.add 1 2.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"myval"})
+        assert "Definition myval" not in result
+        assert "Nat.add" not in result
+        assert "Theorem foo" in result
+
+
+class TestBuildSharedDefsVerificationSource:
+    """Test the shared-defs verification template builder."""
+
+    def _make_structure(
+        self,
+        preamble: str = "",
+        defs: list[tuple[str, str, str]] | None = None,
+        theorem_source: str = "Theorem foo : True.",
+        full_source: str = "",
+    ) -> ProblemStructure:
+        definitions = []
+        if defs:
+            for name, detail, source in defs:
+                definitions.append(
+                    DefinitionInfo(
+                        name=name,
+                        detail=detail,
+                        category=DefCategory.SHARED_DEF,
+                        source_text=source,
+                        start_line=0,
+                        end_line=0,
+                    )
+                )
+        return ProblemStructure(
+            preamble_source=preamble,
+            definitions=definitions,
+            theorem_source=theorem_source,
+            theorem_name="foo",
+            has_shared_defs=bool(definitions),
+            full_source=full_source or theorem_source,
+        )
+
+    def test_defs_outside_stripped_inside(self):
+        """Shared defs appear outside Module M, stripped from proof inside."""
+        structure = self._make_structure(
+            preamble="From Stdlib Require Import List.",
+            defs=[("state", "Definition", "Definition state := list nat.")],
+            theorem_source="Theorem foo : state = state.",
+            full_source=(
+                "From Stdlib Require Import List.\n"
+                "Definition state := list nat.\n"
+                "Theorem foo : state = state.\nAdmitted."
+            ),
+        )
+        proof = (
+            "From Stdlib Require Import List.\n"
+            "Definition state := list nat.\n"
+            "Theorem foo : state = state.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        source = build_shared_defs_verification_source(proof, "foo", structure)
+
+        # Shared def should appear ONCE (outside Module M), not inside
+        assert source.count("Definition state") == 1
+        # The one occurrence should be before Module M
+        idx_def = source.index("Definition state")
+        idx_module = source.index("Module M.")
+        assert idx_def < idx_module
+        # Proof should be inside Module M
+        assert "Module M." in source
+        assert "End M." in source
+        assert "Theorem foo : state = state." in source
+        assert "apply M.foo" in source
+
+    def test_inductive_stripped_from_proof(self):
+        """Inductive types should be stripped from the proof inside Module M."""
+        structure = self._make_structure(
+            defs=[("color", "Inductive", "Inductive color := Red | Green | Blue.")],
+            theorem_source="Theorem foo : forall c : color, c = c.",
+            full_source=(
+                "Inductive color := Red | Green | Blue.\n"
+                "Theorem foo : forall c : color, c = c.\nAdmitted."
+            ),
+        )
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem foo : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        source = build_shared_defs_verification_source(proof, "foo", structure)
+
+        # Inductive should appear once (outside Module M)
+        assert source.count("Inductive color") == 1
+        idx_ind = source.index("Inductive color")
+        idx_module = source.index("Module M.")
+        assert idx_ind < idx_module
+
+    def test_helpers_preserved_inside_module(self):
+        """Definitions not in shared defs should remain inside Module M."""
+        structure = self._make_structure(
+            defs=[("state", "Definition", "Definition state := list nat.")],
+            theorem_source="Theorem foo : True.",
+            full_source=(
+                "Definition state := list nat.\n"
+                "Theorem foo : True.\nAdmitted."
+            ),
+        )
+        proof = (
+            "Definition state := list nat.\n"
+            "Definition helper := 42.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        source = build_shared_defs_verification_source(proof, "foo", structure)
+
+        # helper should be inside Module M
+        assert "Definition helper" in source
+        idx_helper = source.index("Definition helper")
+        idx_module = source.index("Module M.")
+        idx_end = source.index("End M.")
+        assert idx_module < idx_helper < idx_end
+
+
+# ---------------------------------------------------------------------------
 # Input sanitization (injection attacks)
 # ---------------------------------------------------------------------------
 
@@ -532,6 +759,38 @@ class TestVerifyInputSanitization:
                 problem_statement="Theorem t : True.\nAdmitted.",
             )
 
+    def test_unset_guard_checking_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Unset Guard Checking.\nFixpoint loop (n : nat) : False := loop n.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_unset_positivity_checking_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Unset Positivity Checking.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_unset_universe_checking_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="Unset Universe Checking.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_bypass_check_attribute_rejected(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof="#[bypass_check(guard)]\nFixpoint loop (n : nat) : False := loop n.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
     def test_forbidden_in_problem_statement(self):
         """Forbidden commands in problem_statement must also be rejected."""
         with pytest.raises(ValueError, match="[Ff]orbidden"):
@@ -555,8 +814,8 @@ from rocq_mcp.server import rocq_verify  # noqa: E402
 class TestVerifySuccess:
     """Valid proofs that should pass verification."""
 
-    def test_valid_proof(self, workspace, simple_proof, simple_problem_statement):
-        result = rocq_verify(
+    async def test_valid_proof(self, workspace, simple_proof, simple_problem_statement):
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -564,11 +823,11 @@ class TestVerifySuccess:
         )
         assert result["verified"] is True
 
-    def test_classical_proof_accepted(
+    async def test_classical_proof_accepted(
         self, workspace, classical_proof, classical_problem
     ):
         """Proof using classical logic should be accepted with axiom listed."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=classical_proof,
             problem_name="lem_example",
             problem_statement=classical_problem,
@@ -582,14 +841,14 @@ class TestVerifySuccess:
         ):
             assert any("classic" in a for a in result["assumptions"])
 
-    def test_braces_in_proof(self, workspace, braces_proof):
+    async def test_braces_in_proof(self, workspace, braces_proof):
         """Proofs with { } subgoal braces should verify correctly."""
         problem = (
             "Require Import Arith.\n\n"
             "Theorem add_comm_example : forall n m : nat, n + m = m + n.\n"
             "Admitted.\n"
         )
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=braces_proof,
             problem_name="add_comm_example",
             problem_statement=problem,
@@ -597,7 +856,7 @@ class TestVerifySuccess:
         )
         assert result["verified"] is True
 
-    def test_multiline_import_proof(self, workspace, multiline_import_proof):
+    async def test_multiline_import_proof(self, workspace, multiline_import_proof):
         """Proof with multi-line From...Require Import should verify."""
         problem = (
             "From Coq Require Import\n"
@@ -606,7 +865,7 @@ class TestVerifySuccess:
             "Theorem test : forall n : nat, n + 0 = n.\n"
             "Admitted.\n"
         )
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=multiline_import_proof,
             problem_name="test",
             problem_statement=problem,
@@ -619,11 +878,11 @@ class TestVerifySuccess:
 class TestVerifyRejection:
     """Proofs that must be REJECTED by verification."""
 
-    def test_type_redefinition(
+    async def test_type_redefinition(
         self, workspace, cheating_proof, simple_problem_statement
     ):
         """Redefining nat as bool must be caught."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=cheating_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -631,14 +890,14 @@ class TestVerifyRejection:
         )
         assert result["verified"] is False
 
-    def test_axiom_spoofing(self, workspace, axiom_spoofing_proof):
+    async def test_axiom_spoofing(self, workspace, axiom_spoofing_proof):
         """CRITICAL: user-defined 'Axiom classic : False' must be rejected.
 
         Inside Module M., this becomes M.classic which is NOT a standard library
         axiom. The _is_standard_axiom check must reject the M. prefix.
         """
         problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=axiom_spoofing_proof,
             problem_name="anything",
             problem_statement=problem,
@@ -646,11 +905,11 @@ class TestVerifyRejection:
         )
         assert result["verified"] is False
 
-    def test_admitted_inside_module(
+    async def test_admitted_inside_module(
         self, workspace, admitted_proof, simple_problem_statement
     ):
         """Proof using an Admitted helper lemma must be rejected."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=admitted_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -660,11 +919,11 @@ class TestVerifyRejection:
         # Should either have suspicious assumptions or a compilation error
         assert "assumptions" in result or "error" in result
 
-    def test_wrong_theorem_name(
+    async def test_wrong_theorem_name(
         self, workspace, simple_proof, simple_problem_statement
     ):
         """Using a wrong problem_name must fail (M.wrong_name not found)."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="wrong_name",
             problem_statement=simple_problem_statement,
@@ -672,7 +931,7 @@ class TestVerifyRejection:
         )
         assert result["verified"] is False
 
-    def test_end_module_escape(self, workspace):
+    async def test_end_module_escape(self, workspace):
         """Proof containing 'End M.' to try to escape the module sandbox.
 
         The proof tries to close Module M early, then declare an axiom at
@@ -687,7 +946,7 @@ class TestVerifyRejection:
             "Module M.\n"
             "Theorem t2 : False. Proof. exact cheat. Qed.\n"
         )
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=escape_proof,
             problem_name="t",
             problem_statement="Theorem t : True.\nAdmitted.\n",
@@ -695,7 +954,7 @@ class TestVerifyRejection:
         )
         assert result["verified"] is False
 
-    def test_module_m_in_problem_statement(self, workspace):
+    async def test_module_m_in_problem_statement(self, workspace):
         """Problem statement containing 'Module M.' must not break template.
 
         A crafted problem_statement could try to reopen Module M after
@@ -709,7 +968,7 @@ class TestVerifyRejection:
             "Axiom cheat : False.\n"
             "End M.\n"
         )
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=proof,
             problem_name="t",
             problem_statement=malicious_statement,
@@ -724,11 +983,11 @@ class TestVerifyRejection:
 class TestVerifyInputValidation:
     """Input validation checks."""
 
-    def test_dotted_problem_name(
+    async def test_dotted_problem_name(
         self, workspace, simple_proof, simple_problem_statement
     ):
         """Qualified names (containing dots) must be rejected early."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="Nat.add_0_r",
             problem_statement=simple_problem_statement,
@@ -737,9 +996,9 @@ class TestVerifyInputValidation:
         assert result["verified"] is False
         assert "valid rocq identifier" in result["error"].lower()
 
-    def test_bad_workspace(self, simple_proof, simple_problem_statement):
+    async def test_bad_workspace(self, simple_proof, simple_problem_statement):
         """Non-existent workspace should return a clear error."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -748,10 +1007,10 @@ class TestVerifyInputValidation:
         assert result["verified"] is False
         assert "error" in result
 
-    def test_timeout(self, workspace, timeout_proof):
+    async def test_timeout(self, workspace, timeout_proof):
         """Diverging proof inside verification template should timeout."""
         problem = "Theorem loop_thm : True.\nAdmitted.\n"
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=timeout_proof,
             problem_name="loop_thm",
             problem_statement=problem,
@@ -761,9 +1020,9 @@ class TestVerifyInputValidation:
         assert result["verified"] is False
         assert "timed out" in result["error"].lower()
 
-    def test_oversized_proof(self, workspace):
+    async def test_oversized_proof(self, workspace):
         """Proof exceeding max size should be rejected."""
-        result = rocq_verify(
+        result = await rocq_verify(
             proof="x" * 2_000_000,
             problem_name="test",
             problem_statement="Theorem test : True.\nAdmitted.",
@@ -772,10 +1031,10 @@ class TestVerifyInputValidation:
         assert result["verified"] is False
         assert "size" in result["error"].lower()
 
-    def test_newline_in_problem_name(
+    async def test_newline_in_problem_name(
         self, workspace, simple_proof, simple_problem_statement
     ):
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r\nAxiom cheat : False",
             problem_statement=simple_problem_statement,
@@ -783,10 +1042,10 @@ class TestVerifyInputValidation:
         )
         assert result["verified"] is False
 
-    def test_space_in_problem_name(
+    async def test_space_in_problem_name(
         self, workspace, simple_proof, simple_problem_statement
     ):
-        result = rocq_verify(
+        result = await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r Axiom cheat",
             problem_statement=simple_problem_statement,
@@ -799,9 +1058,11 @@ class TestVerifyInputValidation:
 class TestVerifyCleanup:
     """Verification should not leave temp files behind."""
 
-    def test_no_artifacts_left(self, workspace, simple_proof, simple_problem_statement):
+    async def test_no_artifacts_left(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_verify(
+        await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -810,12 +1071,12 @@ class TestVerifyCleanup:
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
-    def test_no_artifacts_on_failure(
+    async def test_no_artifacts_on_failure(
         self, workspace, cheating_proof, simple_problem_statement
     ):
         """Even when verification fails, no temp files should remain."""
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_verify(
+        await rocq_verify(
             proof=cheating_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,

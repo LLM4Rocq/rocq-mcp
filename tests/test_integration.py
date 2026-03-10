@@ -22,7 +22,7 @@ from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE
 class TestCompileVerifyWorkflow:
     """End-to-end: compile succeeds, then verify checks correctness."""
 
-    def test_compile_then_verify_good_proof(
+    async def test_compile_then_verify_good_proof(
         self, workspace, simple_proof, simple_problem_statement
     ):
         """Full happy path: compile succeeds -> verify succeeds."""
@@ -31,7 +31,7 @@ class TestCompileVerifyWorkflow:
         compile_result = rocq_compile(source=simple_proof, workspace=str(workspace))
         assert compile_result["success"] is True
 
-        verify_result = rocq_verify(
+        verify_result = await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -39,7 +39,7 @@ class TestCompileVerifyWorkflow:
         )
         assert verify_result["verified"] is True
 
-    def test_compile_then_verify_cheat(
+    async def test_compile_then_verify_cheat(
         self, workspace, cheating_proof, simple_problem_statement
     ):
         """Compile may succeed but verify catches the type-redefinition cheat."""
@@ -49,7 +49,7 @@ class TestCompileVerifyWorkflow:
         # The cheat may or may not compile (depends on exact Rocq version)
         # The critical assertion is that verify rejects it.
         if compile_result["success"]:
-            verify_result = rocq_verify(
+            verify_result = await rocq_verify(
                 proof=cheating_proof,
                 problem_name="add_0_r",
                 problem_statement=simple_problem_statement,
@@ -57,7 +57,7 @@ class TestCompileVerifyWorkflow:
             )
             assert verify_result["verified"] is False
 
-    def test_classical_axiom_accepted(
+    async def test_classical_axiom_accepted(
         self, workspace, classical_proof, classical_problem
     ):
         """Proof using classical logic passes both compile and verify."""
@@ -66,7 +66,7 @@ class TestCompileVerifyWorkflow:
         compile_result = rocq_compile(source=classical_proof, workspace=str(workspace))
         assert compile_result["success"] is True
 
-        verify_result = rocq_verify(
+        verify_result = await rocq_verify(
             proof=classical_proof,
             problem_name="lem_example",
             problem_statement=classical_problem,
@@ -74,7 +74,9 @@ class TestCompileVerifyWorkflow:
         )
         assert verify_result["verified"] is True
 
-    def test_axiom_spoofing_rejected_end_to_end(self, workspace, axiom_spoofing_proof):
+    async def test_axiom_spoofing_rejected_end_to_end(
+        self, workspace, axiom_spoofing_proof
+    ):
         """CRITICAL: end-to-end test that axiom spoofing is caught.
 
         The proof declares ``Axiom classic : False`` (NOT from stdlib) and
@@ -88,7 +90,7 @@ class TestCompileVerifyWorkflow:
         )
         if compile_result["success"]:
             problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
-            verify_result = rocq_verify(
+            verify_result = await rocq_verify(
                 proof=axiom_spoofing_proof,
                 problem_name="anything",
                 problem_statement=problem,
@@ -96,7 +98,7 @@ class TestCompileVerifyWorkflow:
             )
             assert verify_result["verified"] is False
 
-    def test_admitted_proof_rejected_end_to_end(
+    async def test_admitted_proof_rejected_end_to_end(
         self, workspace, admitted_proof, simple_problem_statement
     ):
         """Proof with an Admitted helper: compile may pass, verify must reject."""
@@ -104,7 +106,7 @@ class TestCompileVerifyWorkflow:
 
         compile_result = rocq_compile(source=admitted_proof, workspace=str(workspace))
         if compile_result["success"]:
-            verify_result = rocq_verify(
+            verify_result = await rocq_verify(
                 proof=admitted_proof,
                 problem_name="add_0_r",
                 problem_statement=simple_problem_statement,
@@ -112,7 +114,7 @@ class TestCompileVerifyWorkflow:
             )
             assert verify_result["verified"] is False
 
-    def test_no_artifacts_after_workflow(
+    async def test_no_artifacts_after_workflow(
         self, workspace, simple_proof, simple_problem_statement
     ):
         """No temp files should remain after a full compile+verify cycle."""
@@ -120,7 +122,7 @@ class TestCompileVerifyWorkflow:
 
         before = set(glob_mod.glob(str(workspace / "*")))
         rocq_compile(source=simple_proof, workspace=str(workspace))
-        rocq_verify(
+        await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
             problem_statement=simple_problem_statement,
@@ -129,7 +131,9 @@ class TestCompileVerifyWorkflow:
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
-    def test_multiline_import_compile_verify(self, workspace, multiline_import_proof):
+    async def test_multiline_import_compile_verify(
+        self, workspace, multiline_import_proof
+    ):
         """Multi-line From...Require Import works end-to-end."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
@@ -145,7 +149,7 @@ class TestCompileVerifyWorkflow:
             "Theorem test : forall n : nat, n + 0 = n.\n"
             "Admitted.\n"
         )
-        verify_result = rocq_verify(
+        verify_result = await rocq_verify(
             proof=multiline_import_proof,
             problem_name="test",
             problem_statement=problem,

@@ -3,6 +3,130 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Definition categories and problem structure
+# ---------------------------------------------------------------------------
+
+
+class DefCategory(Enum):
+    """Classification of Rocq vernacular commands for template placement."""
+
+    PREAMBLE = auto()  # Require, Import, Open Scope
+    SHARED_DEF = auto()  # Inductive, Record, Definition, Fixpoint, etc.
+    THEOREM = auto()  # Theorem, Lemma, Proposition, etc.
+    NOTATION = auto()  # Notation, Infix
+    OTHER = auto()  # Section, Variable, etc.
+
+
+@dataclass
+class DefinitionInfo:
+    """A single extracted definition from the problem statement."""
+
+    name: str | None
+    detail: str  # Rocq keyword from toc: "Inductive", "Definition", etc.
+    category: DefCategory
+    source_text: str
+    start_line: int  # 0-based
+    end_line: int  # 0-based
+
+
+@dataclass
+class ProblemStructure:
+    """Parsed structure of a Rocq problem statement."""
+
+    preamble_source: str  # Imports/Open Scope before definitions
+    definitions: list[DefinitionInfo]  # Shared defs (Inductive, Record, etc.)
+    theorem_source: str  # The theorem statement
+    theorem_name: str | None
+    has_shared_defs: bool  # True if any Inductive/Record/Def present
+    full_source: str  # Original complete source
+
+
+# Detail strings from coq-lsp toc that should be shared outside Module M
+_SHARED_DEF_DETAILS: set[str] = {
+    "Inductive",
+    "CoInductive",
+    "Variant",
+    "Record",
+    "Structure",
+    "Class",
+    "Definition",
+    "Fixpoint",
+    "CoFixpoint",
+    "Function",
+    "Let",
+    "Canonical",
+    "Coercion",
+    "Instance",
+}
+
+_THEOREM_DETAILS: set[str] = {
+    "Theorem",
+    "Lemma",
+    "Proposition",
+    "Corollary",
+    "Example",
+    "Fact",
+    "Remark",
+}
+
+_NOTATION_DETAILS: set[str] = {
+    "Notation",
+    "Infix",
+}
+
+
+def classify_toc_detail(detail: str) -> DefCategory:
+    """Classify a coq-lsp toc detail string into a DefCategory."""
+    if detail in _SHARED_DEF_DETAILS:
+        return DefCategory.SHARED_DEF
+    if detail in _THEOREM_DETAILS:
+        return DefCategory.THEOREM
+    if detail in _NOTATION_DETAILS:
+        return DefCategory.NOTATION
+    return DefCategory.OTHER
+
+
+# Regex alternation of definition keywords (longest first for correct matching)
+_DEF_KEYWORDS_RE_STR = "|".join(
+    re.escape(k) for k in sorted(_SHARED_DEF_DETAILS, key=len, reverse=True)
+)
+
+
+def _strip_shared_defs(proof: str, shared_names: set[str]) -> str:
+    """Remove definition blocks from proof whose names match shared_names.
+
+    For each name in shared_names, finds and removes the Rocq vernacular
+    sentence that defines it (from the keyword to the sentence-terminating
+    period).  This prevents type shadowing when the same definitions are
+    placed outside Module M in the shared-defs template.
+
+    The sentence terminator is a period followed by whitespace or end of
+    string, matching Rocq's lexical convention.  Dots inside qualified
+    names (e.g., ``Nat.add``) are not followed by whitespace and are
+    correctly skipped.
+    """
+    if not shared_names:
+        return proof
+    result = proof
+    for name in sorted(shared_names):  # sorted for determinism
+        if not name:
+            continue
+        # Match: optional leading whitespace + definition keyword + name
+        # + everything up to the sentence-terminating period (. followed
+        # by whitespace or end of string).  MULTILINE so ^ matches line
+        # starts; DOTALL so .* crosses newlines.
+        pattern = (
+            rf"(?ms)^[ \t]*(?:{_DEF_KEYWORDS_RE_STR})\s+{re.escape(name)}\b"
+            rf".*?\.(?=\s|$)[ \t]*\n?"
+        )
+        result = re.sub(pattern, "", result, count=1)
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Forbidden command check
@@ -44,6 +168,22 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\bDeclare ML Module\b"),
         "Forbidden command 'Declare ML Module' (loads arbitrary OCaml plugins)",
+    ),
+    (
+        re.compile(r"\bUnset\s+Guard\s+Checking\b"),
+        "Forbidden command 'Unset Guard Checking' (disables termination checker)",
+    ),
+    (
+        re.compile(r"\bUnset\s+Positivity\s+Checking\b"),
+        "Forbidden command 'Unset Positivity Checking' (disables positivity checker)",
+    ),
+    (
+        re.compile(r"\bUnset\s+Universe\s+Checking\b"),
+        "Forbidden command 'Unset Universe Checking' (disables universe checker)",
+    ),
+    (
+        re.compile(r"#\[bypass_check\b"),
+        "Forbidden attribute '#[bypass_check]' (bypasses kernel safety checks)",
     ),
 ]
 
@@ -121,6 +261,96 @@ def _clean_problem_statement(problem_statement: str) -> str:
     )
     result = re.sub(r"\s*Proof\s*\.\s*$", "", result)
     return result.strip()
+
+
+# ---------------------------------------------------------------------------
+# Shared-definitions verification template
+# ---------------------------------------------------------------------------
+
+
+def build_shared_defs_verification_source(
+    proof: str,
+    problem_name: str,
+    structure: ProblemStructure,
+) -> str:
+    """Build verification source with shared definitions outside Module M.
+
+    When the problem statement contains type definitions (Inductive, Record,
+    Definition, etc.), placing them inside Module M causes type incompatibility
+    across the module boundary.  This template places shared definitions
+    *outside* Module M so the proof's types unify with the theorem's types.
+
+    Template layout::
+
+        <preamble: Require/Import/Open Scope>
+        <shared definitions: Inductive, Record, Definition, etc.>
+        Module M.
+        <proof>
+        End M.
+        <theorem re-statement>
+        Proof.
+        apply M.<name> || eapply M.<name>.
+        all: first [ assumption | reflexivity | auto | simpl; auto ].
+        Qed.
+        Print Assumptions <name>.
+    """
+    forbidden = _check_forbidden_commands(proof)
+    if forbidden:
+        raise ValueError(forbidden)
+
+    forbidden = _check_forbidden_commands(structure.full_source)
+    if forbidden:
+        raise ValueError(forbidden)
+
+    clean_theorem = _clean_problem_statement(structure.theorem_source)
+
+    # Collect shared definition source texts
+    shared_defs_text = "\n".join(defn.source_text for defn in structure.definitions)
+
+    # Collect names of shared definitions to strip from the proof.
+    # Only SHARED_DEF items (Inductive, Record, Definition, etc.) cause
+    # nominal type shadowing; Notations and OTHER are harmless if duplicated.
+    shared_names = {
+        defn.name
+        for defn in structure.definitions
+        if defn.name and defn.category == DefCategory.SHARED_DEF
+    }
+
+    # Strip the duplicate definitions from the proof so they don't
+    # shadow the shared definitions placed outside Module M.
+    stripped_proof = _strip_shared_defs(proof, shared_names)
+
+    parts: list[str] = []
+
+    # 1. Preamble (Require/Import/Open Scope)
+    if structure.preamble_source.strip():
+        parts.append(structure.preamble_source.strip())
+        parts.append("")
+
+    # 2. Shared definitions (Inductive, Record, Definition, etc.)
+    if shared_defs_text.strip():
+        parts.append(shared_defs_text.strip())
+        parts.append("")
+
+    # 3. Module M with the proof (definitions stripped)
+    parts.append("Module M.")
+    parts.append(stripped_proof)
+    parts.append("End M.")
+    parts.append("")
+
+    # 4. Theorem re-statement and apply
+    parts.append(clean_theorem)
+    parts.append("Proof.")
+    parts.append(f"apply M.{problem_name} || eapply M.{problem_name}.")
+    parts.append("all: first [ assumption | reflexivity | auto | simpl; auto ].")
+    parts.append("Qed.")
+    parts.append("")
+
+    # 5. Print Assumptions
+    parts.append(f"Print Assumptions {problem_name}.")
+    parts.append("")
+
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

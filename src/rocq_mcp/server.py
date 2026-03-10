@@ -18,6 +18,7 @@ from fastmcp.server.lifespan import lifespan
 
 from rocq_mcp.verify import (
     _check_forbidden_commands,
+    _rocq_scan,
     _SHARED_DEF_DETAILS,
     _THEOREM_DETAILS,
     build_verification_source,
@@ -696,62 +697,6 @@ _AUTO_SOLVE_TACTICS: list[str] = [
 
 # Extra imports needed to make decision procedures available.
 _AUTO_SOLVE_IMPORTS = "From Stdlib Require Import Lia Lra Ring Field.\n"
-
-
-def _rocq_scan(text: str):
-    """Yield ``(index, char, in_comment, in_string)`` for each character.
-
-    Single-pass scanner that tracks ``(* ... *)`` comment nesting (arbitrary
-    depth) and ``"..."`` string literals (with ``""`` escape).  Rocq's lexer
-    tracks string literals inside comments (so ``*)`` inside a quoted string
-    within a comment does NOT close the comment), and this scanner matches
-    that behavior.
-
-    Two-character tokens (``(*``, ``*)``, ``""``) are yielded as one event at
-    the position of their first character; the second character is skipped.
-    """
-    depth = 0
-    in_str = False
-    i = 0
-    length = len(text)
-    while i < length:
-        ch = text[i]
-        if in_str:
-            if ch == '"':
-                if i + 1 < length and text[i + 1] == '"':
-                    yield i, ch, depth > 0, True
-                    i += 2
-                    continue
-                in_str = False
-            yield i, ch, depth > 0, True
-        elif depth > 0:
-            if ch == '"':
-                in_str = True
-                yield i, ch, True, True
-            elif ch == "*" and i + 1 < length and text[i + 1] == ")":
-                depth -= 1
-                yield i, ch, depth > 0, False  # closing *)
-                i += 2
-                continue
-            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
-                depth += 1
-                yield i, ch, True, False
-                i += 2
-                continue
-            else:
-                yield i, ch, True, False
-        else:
-            if ch == '"':
-                in_str = True
-                yield i, ch, False, True
-            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
-                depth += 1
-                yield i, ch, True, False
-                i += 2
-                continue
-            else:
-                yield i, ch, False, False
-        i += 1
 
 
 def _rocq_comment_ranges(text: str) -> list[tuple[int, int]]:

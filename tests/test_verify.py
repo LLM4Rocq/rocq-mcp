@@ -1095,9 +1095,11 @@ class TestVerifyInputSanitization:
     def test_string_inside_comment_desync_rejected(self):
         """CRITICAL: string inside comment must not desynchronize scanner.
 
-        Rocq tracks strings inside comments, so (* " (* " *) leaves the
-        comment open in Rocq but a naive scanner would close it.  After
-        the fix, End M. is visible to the forbidden check.
+        Rocq tracks strings inside comments, so in (* " (* " *), the
+        inner (* is inside a string and does NOT nest.  The *) closes the
+        comment, making End M. executable code.  A naive scanner (without
+        string tracking in comments) would treat (* as nesting, keeping
+        the comment open and hiding End M. from the forbidden check.
         """
         with pytest.raises(ValueError, match="[Ff]orbidden"):
             build_verification_source(
@@ -1153,6 +1155,71 @@ class TestVerifyInputSanitization:
         # Comment replaced with space(s), not removed — words stay separate
         assert "Loadbar" not in stripped
         assert "Load" in stripped and "bar" in stripped
+
+    def test_strip_desync_exploit_direct(self):
+        """Direct test: desync exploit makes End M. visible after stripping."""
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        assert "End M." in _strip_rocq_comments('(* " (* " *) End M.')
+
+    def test_strip_close_in_string_direct(self):
+        """Direct test: *) in string inside comment does not close comment."""
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        assert "End M." in _strip_rocq_comments('(* " *) " *) End M.')
+
+    def test_strip_escaped_quote_in_string_in_comment(self):
+        """\"\" escape in string inside comment must not end the string."""
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        # (* "a""*)" *) — the "" is escape, *) still inside string
+        stripped = _strip_rocq_comments('(* "a""*)" *) End M.')
+        assert "End M." in stripped
+
+    def test_strip_multiple_strings_in_comment(self):
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        stripped = _strip_rocq_comments('(* "a" and "b" *) visible')
+        assert "visible" in stripped
+        assert "and" not in stripped
+
+    def test_scanners_agree_on_comment_ranges(self):
+        """Cross-validate _rocq_scan (via _rocq_comment_ranges) and _strip_rocq_comments."""
+        from rocq_mcp.verify import _rocq_scan, _strip_rocq_comments
+        from rocq_mcp.server import _rocq_comment_ranges
+
+        cases = [
+            '(* " (* " *) End M.',
+            '(* " *) " *) End M.',
+            '(* "a""*)" *) x.',
+            '"(* not a comment *)" y.',
+            '(* "a" and "b" *) z.',
+            'normal code. (* comment *) more.',
+            '(* (* nested *) *) after.',
+        ]
+        for text in cases:
+            ranges = _rocq_comment_ranges(text)
+            # Build set of positions inside comments from ranges
+            in_comment_positions = set()
+            for start, end in ranges:
+                in_comment_positions.update(range(start, end))
+
+            # Build set from _rocq_scan
+            scan_comment_chars = set()
+            for idx, _ch, in_comment, _in_str in _rocq_scan(text):
+                if in_comment:
+                    scan_comment_chars.add(idx)
+
+            # _strip_rocq_comments should produce only non-comment chars
+            stripped = _strip_rocq_comments(text)
+            # Non-comment, non-space characters in stripped should all be
+            # outside comment ranges
+            for idx, _ch, in_comment, _in_str in _rocq_scan(text):
+                if not in_comment:
+                    assert _ch in stripped or _ch in "()*", (
+                        f"Non-comment char {_ch!r} at {idx} missing from "
+                        f"stripped output for: {text!r}"
+                    )
 
 
 # =========================================================================

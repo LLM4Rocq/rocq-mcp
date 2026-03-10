@@ -86,6 +86,25 @@ class TestRocqCommentRanges:
         ranges = _rocq_comment_ranges("(* foo. bar *)")
         assert ranges == [(0, 14)]
 
+    def test_string_with_fake_comment_open(self):
+        """(* inside string inside comment must NOT increase depth."""
+        # (* " (* " *) is ONE comment — the inner (* is inside a string
+        assert _rocq_comment_ranges('(* " (* " *)') == [(0, 12)]
+
+    def test_string_with_fake_comment_close(self):
+        """*) inside string inside comment must NOT decrease depth."""
+        # (* " *) " *) is ONE comment — the *) is inside a string
+        assert _rocq_comment_ranges('(* " *) " *)') == [(0, 12)]
+
+    def test_escaped_quote_in_string_inside_comment(self):
+        """\"\" inside string inside comment must not end the string."""
+        # (* "a""*)" *) — the "" is escape, *) is still inside string
+        assert _rocq_comment_ranges('(* "a""*)" *)') == [(0, 13)]
+
+    def test_multiple_strings_inside_comment(self):
+        """Multiple strings inside one comment."""
+        assert _rocq_comment_ranges('(* "a" and "b" *)') == [(0, 17)]
+
 
 # ---------------------------------------------------------------------------
 # _find_sentence_end
@@ -129,6 +148,10 @@ class TestFindSentenceEnd:
     def test_number_with_dot(self):
         # 1.5 has dot NOT followed by whitespace — not a sentence end
         assert _find_sentence_end("Definition x := 1.5.") == 19
+
+    def test_dot_inside_string_inside_comment(self):
+        # Dot inside a string inside a comment is not a sentence end
+        assert _find_sentence_end('(* "." *) x.') == 11
 
 
 # ---------------------------------------------------------------------------

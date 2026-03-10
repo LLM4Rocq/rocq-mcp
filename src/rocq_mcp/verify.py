@@ -183,8 +183,8 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Forbidden command 'Unset Universe Checking' (disables universe checker)",
     ),
     (
-        re.compile(r"#\[bypass_check\b"),
-        "Forbidden attribute '#[bypass_check]' (bypasses kernel safety checks)",
+        re.compile(r"\bbypass_check\b"),
+        "Forbidden attribute 'bypass_check' (bypasses kernel safety checks)",
     ),
     (
         re.compile(r"\bEnd\s+M\b\s*\."),
@@ -213,55 +213,78 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _strip_rocq_comments(text: str) -> str:
-    """Remove ``(* ... *)`` comments from *text*, handling nesting and strings.
+def _rocq_scan(text: str):
+    """Yield ``(index, char, in_comment, in_string)`` for each character.
 
-    Rocq's lexer tracks string literals inside comments (so ``*)`` inside a
-    quoted string within a comment does NOT close the comment).  This function
-    matches that behavior to avoid desynchronization.
+    Single-pass scanner that tracks ``(* ... *)`` comment nesting (arbitrary
+    depth) and ``"..."`` string literals (with ``""`` escape).  Rocq's lexer
+    tracks string literals inside comments (so ``*)`` inside a quoted string
+    within a comment does NOT close the comment), and this scanner matches
+    that behavior.
+
+    Two-character tokens (``(*``, ``*)``, ``""``) are yielded as one event at
+    the position of their first character; the second character is skipped.
     """
-    result: list[str] = []
     depth = 0
-    in_string = False
+    in_str = False
     i = 0
     length = len(text)
     while i < length:
         ch = text[i]
-        if in_string:
+        if in_str:
             if ch == '"':
                 if i + 1 < length and text[i + 1] == '"':
-                    if depth == 0:
-                        result.append('""')
+                    yield i, ch, depth > 0, True
                     i += 2
                     continue
-                in_string = False
-            if depth == 0:
-                result.append(ch)
+                in_str = False
+            yield i, ch, depth > 0, True
         elif depth > 0:
             if ch == '"':
-                in_string = True
+                in_str = True
+                yield i, ch, True, True
             elif ch == "*" and i + 1 < length and text[i + 1] == ")":
                 depth -= 1
-                if depth == 0:
-                    result.append(" ")  # replace comment with space
+                yield i, ch, depth > 0, False  # closing *)
                 i += 2
                 continue
             elif ch == "(" and i + 1 < length and text[i + 1] == "*":
                 depth += 1
-                i += 2
-                continue
-        else:
-            if ch == '"':
-                in_string = True
-                result.append(ch)
-            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
-                depth += 1
-                result.append(" ")  # replace comment with space
+                yield i, ch, True, False
                 i += 2
                 continue
             else:
-                result.append(ch)
+                yield i, ch, True, False
+        else:
+            if ch == '"':
+                in_str = True
+                yield i, ch, False, True
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                yield i, ch, True, False
+                i += 2
+                continue
+            else:
+                yield i, ch, False, False
         i += 1
+
+
+def _strip_rocq_comments(text: str) -> str:
+    """Remove ``(* ... *)`` comments from *text*, replacing each with a space.
+
+    Uses :func:`_rocq_scan` to ensure comment/string tracking exactly matches
+    Rocq's lexer (including string literals inside comments).
+    """
+    result: list[str] = []
+    was_in_comment = False
+    for _idx, ch, in_comment, _in_str in _rocq_scan(text):
+        if not in_comment:
+            if was_in_comment:
+                result.append(" ")  # replace closing comment with space
+            result.append(ch)
+        elif not was_in_comment:
+            result.append(" ")  # replace opening comment with space
+        was_in_comment = in_comment
     return "".join(result)
 
 
@@ -324,7 +347,8 @@ def build_verification_source(
         # Reset printing flags that Module M may have changed, to ensure
         # Print Assumptions output matches our parser's expected format.
         f"Unset Printing All.\n"
-        f"Unset Printing Universes.\n\n"
+        f"Unset Printing Universes.\n"
+        f"Set Printing Width 120.\n\n"
         f"{clean_statement}\n"
         f"Proof.\n"
         f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.\n"
@@ -428,6 +452,7 @@ def build_shared_defs_verification_source(
     # Print Assumptions output matches our parser's expected format.
     parts.append("Unset Printing All.")
     parts.append("Unset Printing Universes.")
+    parts.append("Set Printing Width 120.")
     parts.append("")
 
     # 4. Theorem re-statement and apply

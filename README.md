@@ -71,16 +71,44 @@ The server exposes eight MCP tools:
 
 ## Security Model
 
-The verification tool (`rocq_verify`) wraps the submitted proof inside a Rocq `Module M.` sandbox. This prevents:
+The verification tool (`rocq_verify`) uses defense in depth with three layers:
 
-- **Type redefinition cheating** (e.g., redefining `nat` as `bool`)
-- **Axiom spoofing** (user-declared axioms get an `M.` prefix, rejected by the stdlib whitelist)
-- **`Admitted`/`Abort` usage** (caught by `Print Assumptions`)
-- **Module escape attempts** (Rocq prevents reopening `Module M`)
+### Layer 1: Module M sandbox
+
+The submitted proof is wrapped inside `Module M. ... End M.`. The theorem is re-stated outside the module and proved via `exact M.<name>`. This prevents:
+
+- **Type redefinition cheating** -- Inductive/Record types are generative in Rocq, so redefining `nat` as `bool` inside Module M creates an incompatible type that cannot unify with the real `nat` outside.
+- **Axiom spoofing** -- User-declared axioms receive an `M.` prefix in `Print Assumptions` output, which the stdlib whitelist rejects.
+- **`Admitted`/`Abort` usage** -- Caught by `Print Assumptions`.
+- **Module escape** -- `End M.` and `Reset`/`Back`/`Undo` are forbidden commands (see Layer 2).
+
+For problems containing Inductive/Record/Definition types, a **Phase 2 fallback** (shared-defs template) automatically places type definitions outside Module M to avoid nominal typing mismatches, while keeping the proof inside the sandbox. This uses pytanque's `toc` to extract problem structure.
+
+### Layer 2: Forbidden command scanning
+
+Source code is scanned for dangerous commands **after stripping comments**. The comment scanner matches Rocq's lexer exactly, including string literal tracking inside comments (preventing desynchronization attacks like `(* " (* " *) End M.`). Comments are replaced with spaces to preserve word boundaries.
+
+Forbidden commands:
+
+| Category | Commands |
+|----------|----------|
+| Filesystem | `Redirect`, `Extraction "..."`, `Separate Extraction`, `Recursive Extraction`, `Extraction Library`, `Cd`, `Load` |
+| Code loading | `Declare ML Module`, `Add LoadPath`, `Add Rec LoadPath`, `Add ML Path` |
+| Sandbox escape | `End M.`, `Reset`, `Back`, `Undo` |
+| Safety bypass | `bypass_check`, `Unset Guard Checking`, `Unset Positivity Checking`, `Unset Universe Checking` |
+| Escape hatches | `Drop` (OCaml toplevel) |
+
+### Layer 3: Print Assumptions axiom whitelist
+
+After compilation, `Print Assumptions` is checked against a whitelist of standard library axioms (classical logic, functional extensionality, Reals axioms, etc.). Axioms with qualified names must have a recognized stdlib prefix (`Coq.*`, `Rocq.*`, `Stdlib.*`, or known module prefixes like `ClassicalDedekindReals.*`). The `M.` prefix on user-declared axioms ensures they are always rejected.
+
+Printing flags (`Set Printing All`, `Set Printing Universes`, `Set Printing Width`) are reset after `End M.` to prevent corruption of `Print Assumptions` output format.
+
+### Trusted anchor
 
 **Important:** The `problem_statement` parameter is treated as a **trusted anchor**. The server verifies that the proof proves the given statement, but does NOT verify that the statement itself is the correct problem. Callers must ensure `problem_statement` comes from a trusted source (e.g., a file on disk), not from the LLM being evaluated.
 
-Source code containing dangerous commands is rejected to prevent filesystem side effects: `Redirect`, `Extraction "..."`, `Separate Extraction`, `Recursive Extraction`, `Extraction Library`, `Drop`, `Cd`, `Load`, and `Declare ML Module`.
+### Path validation
 
 All tools that accept file paths validate that resolved paths stay within the configured workspace directory (preventing path traversal attacks).
 
@@ -123,7 +151,7 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_step`, `rocq_step_multi`, `r
 src/rocq_mcp/
   __init__.py       Package init
   server.py         MCP server, 8 tool definitions, pet subprocess management
-  verify.py         Module M. verification template, Print Assumptions parsing
+  verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
   test_compile.py       Tests for rocq_compile
   test_verify.py        Tests for rocq_verify

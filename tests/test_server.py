@@ -54,6 +54,7 @@ Qed.
             "rocq_proof_info",
             "rocq_proof_info_at_pos",
             "rocq_restart",
+            "rocq_try_tactics",
             "rocq_get_file_toc",
             "rocq_search",
         }
@@ -134,6 +135,26 @@ Qed.
         )
         assert len(result) == 1
         assert "No active session found" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_try_tactics_without_session(self):
+        """Test trying tactics without an active session."""
+        result = await handle_call_tool(
+            "rocq_try_tactics", {"session_id": "nonexistent", "tactics": ["auto."]}
+        )
+        assert len(result) == 1
+        assert "No active session found" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_try_tactics_too_many(self):
+        """Test trying too many tactics."""
+        result = await handle_call_tool(
+            "rocq_try_tactics",
+            {"session_id": "nonexistent", "tactics": [f"tac{i}." for i in range(25)]},
+        )
+        assert len(result) == 1
+        # Should hit either "No active session" or "Too many tactics"
+        assert "Error" in result[0].text
 
 
 class TestIntegration:

@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import atexit
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -121,16 +122,53 @@ def find_workspace_root(file_path: str) -> Optional[str]:
     return None
 
 
+def _kill_pet_process(client: Pytanque) -> None:
+    """Kill pet and its child processes (coq-lsp).
+
+    Attempts process group kill to avoid leaving zombie coq-lsp processes.
+    Falls back to direct process kill if process group is not available.
+    Ported from rocq-mcp v2.
+    """
+    if client is None or not hasattr(client, 'process') or client.process is None:
+        return
+    try:
+        # Try to kill the entire process group (pet + coq-lsp)
+        try:
+            pgid = os.getpgid(client.process.pid)
+            if pgid == client.process.pid:
+                # Pet has its own process group — safe to killpg
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                # Same group as us — only kill direct child
+                client.process.terminate()
+        except (OSError, ProcessLookupError):
+            client.process.terminate()
+        try:
+            client.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                client.process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            client.process.wait(timeout=3)
+    except (OSError, ChildProcessError):
+        pass
+    # Close pipe file descriptors
+    for stream in [client.process.stdin, client.process.stdout, client.process.stderr]:
+        try:
+            if stream:
+                stream.close()
+        except Exception:
+            pass
+
+
 def restart_pet_client():
     """Kill and restart the pet client."""
     global petanque_client
 
     if petanque_client is not None:
         logger.warning("Restarting pet client...")
-        try:
-            petanque_client.close()
-        except Exception as e:
-            logger.error(f"Error closing pet client: {e}")
+        _kill_pet_process(petanque_client)
         petanque_client = None
 
     # Clear session states since they're invalid after restart
@@ -161,6 +199,63 @@ def get_client() -> Pytanque:
             petanque_client.connect()
             logger.info("Connected to Petanque using stdio mode")
     return petanque_client
+
+
+def _format_goals(client, state) -> str:
+    """Format goals with hypotheses using complete_goals().
+
+    Uses complete_goals() instead of goals() to also surface shelved and
+    given-up goals. Formats hypotheses (name : type) for each goal.
+    Ported from rocq-mcp v2.
+    """
+    try:
+        complete = client.complete_goals(state)
+    except Exception:
+        # Fall back to simple goals() if complete_goals fails
+        goals = client.goals(state)
+        if not goals:
+            return ""
+        parts = []
+        for i, g in enumerate(goals):
+            if len(goals) > 1:
+                parts.append(f"Goal {i+1}:\n{g.pp}")
+            else:
+                parts.append(g.pp)
+        return "\n\n".join(parts)
+
+    if not complete:
+        return ""
+
+    goals_list = complete.goals if complete.goals else []
+    if not goals_list:
+        return ""
+
+    parts = []
+    for i, g in enumerate(goals_list):
+        hyps_lines = []
+        for h in g.hyps:
+            names = ", ".join(h.names)
+            def_part = f" := {h.def_}" if h.def_ else ""
+            hyps_lines.append(f"{names}{def_part} : {h.ty}")
+        hyps = "\n".join(hyps_lines)
+        goal_text = f"{hyps}\n|- {g.ty}" if hyps else f"|- {g.ty}"
+        if len(goals_list) > 1:
+            parts.append(f"Goal {i+1}:\n{goal_text}")
+        else:
+            parts.append(goal_text)
+
+    result = "\n\n".join(parts)
+
+    # Append shelved/given-up counts if present
+    extras = []
+    if complete.shelf:
+        extras.append(f"{len(complete.shelf)} shelved goal(s)")
+    if complete.given_up:
+        extras.append(f"{len(complete.given_up)} given-up goal(s)")
+    if extras:
+        result += f"\n\n[{', '.join(extras)}]"
+
+    return result
 
 
 # Create the MCP server
@@ -449,6 +544,29 @@ async def handle_list_tools() -> List[types.Tool]:
                 "required": [],
             },
         ),
+        types.Tool(
+            name="rocq_try_tactics",
+            description="Try multiple tactics against the current proof state without advancing the session. "
+                        "Returns results for each tactic (success/failure, resulting goals). "
+                        "Use rocq_run_tactic with the winning tactic to actually commit it. "
+                        "Useful for quickly testing which automation works: "
+                        'e.g., tactics=["auto.", "lia.", "ring.", "reflexivity."]',
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session identifier for the proof session",
+                    },
+                    "tactics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of tactics to try (max 20). Each is tried independently against the current state.",
+                    },
+                },
+                "required": ["session_id", "tactics"],
+            },
+        ),
     ]
 
 
@@ -482,11 +600,8 @@ async def handle_call_tool(
             # Store the state for this session
             current_states[session_id] = state
 
-            # Get initial goals
-            goals = client.goals(state)
-            goals_text = "\n".join(
-                [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-            )
+            # Get initial goals with hypotheses
+            goals_text = _format_goals(client, state)
 
             result = (
                 f"Started proof session for theorem '{theorem_name}' in {file_path}\n"
@@ -494,7 +609,7 @@ async def handle_call_tool(
             result += f"Session ID: {session_id}\n"
             result += f"State ID: {state.st}\n"
             result += f"Proof finished: {state.proof_finished}\n"
-            result += f"Initial goals ({len(goals)}):\n{goals_text}"
+            result += f"Initial goals:\n{goals_text}" if goals_text else "No goals."
 
             return [types.TextContent(type="text", text=result)]
 
@@ -525,20 +640,17 @@ async def handle_call_tool(
                     [f"[Level {level}] {msg}" for level, msg in new_state.feedback]
                 )
 
-            # Get current goals after command
-            goals = client.goals(new_state)
-            goals_text = ""
-            if goals:
-                goals_text = f"\nCurrent goals ({len(goals)}):\n" + "\n".join(
-                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-                )
-            else:
-                goals_text = "\nNo remaining goals - proof may be complete!"
+            # Get current goals after command (with hypotheses)
+            goals_text = _format_goals(client, new_state)
 
             result = f"Executed: {command}\n"
             result += f"New state ID: {new_state.st}\n"
             result += f"Proof finished: {new_state.proof_finished}"
-            result += feedback_text + goals_text
+            result += feedback_text
+            if goals_text:
+                result += f"\nCurrent goals:\n{goals_text}"
+            else:
+                result += "\nNo remaining goals - proof may be complete!"
 
             return [types.TextContent(type="text", text=result)]
 
@@ -554,15 +666,12 @@ async def handle_call_tool(
                 ]
 
             current_state = current_states[session_id]
-            goals = client.goals(current_state)
+            goals_text = _format_goals(client, current_state)
 
-            if not goals:
+            if not goals_text:
                 result = "No current goals - proof may be complete!"
             else:
-                result = f"Current goals ({len(goals)}):\n"
-                result += "\n".join(
-                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-                )
+                result = f"Current goals:\n{goals_text}"
 
             return [types.TextContent(type="text", text=result)]
 
@@ -623,21 +732,13 @@ async def handle_call_tool(
 
             state = client.get_state_at_pos(abs_path, line, character)
 
-            # Get goals at this position
-            goals = client.goals(state)
-            goals_text = ""
-            if goals:
-                goals_text = f"Goals at position ({len(goals)}):\n"
-                goals_text += "\n".join(
-                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-                )
-            else:
-                goals_text = "No goals at this position"
+            # Get goals at this position (with hypotheses)
+            goals_text = _format_goals(client, state)
 
             result = f"State at {file_path}:{line}:{character}\n"
             result += f"State ID: {state.st}\n"
             result += f"Proof finished: {state.proof_finished}\n"
-            result += goals_text
+            result += f"Goals:\n{goals_text}" if goals_text else "No goals at this position"
 
             return [types.TextContent(type="text", text=result)]
 
@@ -719,21 +820,13 @@ async def handle_call_tool(
             # Store the state for this session
             current_states[session_id] = state
 
-            # Get goals at this position
-            goals = client.goals(state)
-            goals_text = ""
-            if goals:
-                goals_text = f"Goals ({len(goals)}):\n"
-                goals_text += "\n".join(
-                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-                )
-            else:
-                goals_text = "No goals at this position"
+            # Get goals at this position (with hypotheses)
+            goals_text = _format_goals(client, state)
 
             result = f"Saved state at {file_path}:{line}:{character} as session '{session_id}'\n"
             result += f"State ID: {state.st}\n"
             result += f"Proof finished: {state.proof_finished}\n"
-            result += goals_text
+            result += f"Goals:\n{goals_text}" if goals_text else "No goals at this position"
             result += f"\n\nYou can now use rocq_run_tactic(session_id='{session_id}', ...) to run tactics."
 
             return [types.TextContent(type="text", text=result)]
@@ -800,20 +893,17 @@ async def handle_call_tool(
                     [f"[Level {level}] {msg}" for level, msg in new_state.feedback]
                 )
 
-            # Get current goals after command
-            goals = client.goals(new_state)
-            goals_text = ""
-            if goals:
-                goals_text = f"\nCurrent goals ({len(goals)}):\n" + "\n".join(
-                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
-                )
-            else:
-                goals_text = "\nNo remaining goals - proof may be complete!"
+            # Get current goals after command (with hypotheses)
+            goals_text = _format_goals(client, new_state)
 
             result = f"Executed at {file_path}:{line}:{character}: {command}\n"
             result += f"New state ID: {new_state.st}\n"
             result += f"Proof finished: {new_state.proof_finished}"
-            result += feedback_text + goals_text
+            result += feedback_text
+            if goals_text:
+                result += f"\nCurrent goals:\n{goals_text}"
+            else:
+                result += "\nNo remaining goals - proof may be complete!"
             if session_id:
                 result += f"\n\nSaved as session '{session_id}'. Use rocq_run_tactic for further interaction."
 
@@ -873,6 +963,50 @@ async def handle_call_tool(
         elif name == "rocq_restart":
             restart_pet_client()
             return [types.TextContent(type="text", text="Pet/coq-lsp process restarted. All sessions cleared. Fresh .vo files will be loaded on next use.")]
+
+        elif name == "rocq_try_tactics":
+            session_id = arguments["session_id"]
+            tactics = arguments["tactics"]
+
+            if session_id not in current_states:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error: No active session found for ID '{session_id}'. Use rocq_start_proof first.",
+                    )
+                ]
+
+            if len(tactics) > 20:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error: Too many tactics ({len(tactics)}). Maximum is 20.",
+                    )
+                ]
+
+            # Try each tactic against the CURRENT state (don't advance session)
+            current_state = current_states[session_id]
+            results = []
+            for tactic in tactics:
+                tac = tactic.strip()
+                if not tac.endswith("."):
+                    tac += "."
+                try:
+                    trial_state = client.run(current_state, tac)
+                    goals_text = _format_goals(client, trial_state)
+                    results.append(
+                        f"  {tac} -> OK"
+                        + (f" (proof finished)" if trial_state.proof_finished else "")
+                        + (f"\n    Goals:\n    " + goals_text.replace("\n", "\n    ") if goals_text and not trial_state.proof_finished else "")
+                    )
+                except PetanqueError as e:
+                    results.append(f"  {tac} -> FAIL: {e.message}")
+
+            result = f"Tried {len(tactics)} tactics against session '{session_id}' (session NOT advanced):\n"
+            result += "\n".join(results)
+            result += "\n\nUse rocq_run_tactic to commit the winning tactic."
+
+            return [types.TextContent(type="text", text=result)]
 
         else:
             return [

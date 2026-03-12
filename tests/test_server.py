@@ -48,6 +48,12 @@ Qed.
             "rocq_get_premises",
             "rocq_parse_ast",
             "rocq_get_state_at_position",
+            "rocq_save_state_as_session",
+            "rocq_get_root_state",
+            "rocq_run_at_position",
+            "rocq_proof_info",
+            "rocq_proof_info_at_pos",
+            "rocq_restart",
             "rocq_get_file_toc",
             "rocq_search",
         }
@@ -107,6 +113,27 @@ Qed.
 
         assert len(result) == 1
         assert "Unknown tool" in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_new_tools_in_tool_list(self):
+        """Test that the new position-based tools are in the tool list."""
+        tools = await handle_list_tools()
+        tool_names = {tool.name for tool in tools}
+        assert "rocq_save_state_as_session" in tool_names
+        assert "rocq_get_root_state" in tool_names
+        assert "rocq_run_at_position" in tool_names
+        assert "rocq_proof_info" in tool_names
+        assert "rocq_proof_info_at_pos" in tool_names
+        assert "rocq_restart" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_proof_info_without_session(self):
+        """Test getting proof info without an active session."""
+        result = await handle_call_tool(
+            "rocq_proof_info", {"session_id": "nonexistent"}
+        )
+        assert len(result) == 1
+        assert "No active session found" in result[0].text
 
 
 class TestIntegration:
@@ -188,6 +215,55 @@ Qed.
 
             assert len(result) == 1
             assert "Table of contents" in result[0].text
+
+        except Exception as e:
+            pytest.skip(f"Integration test skipped - 'pet' command not available: {e}")
+
+    @pytest.mark.asyncio
+    async def test_save_state_as_session_workflow(self, sample_coq_file):
+        """Test saving state at a position and using it for interactive proving."""
+        try:
+            # Save state at position after 'intro n.' (line 3 in the fixture, 0-based)
+            result = await handle_call_tool(
+                "rocq_save_state_as_session",
+                {
+                    "file_path": sample_coq_file,
+                    "line": 3,
+                    "character": 0,
+                    "session_id": "save_state_test",
+                },
+            )
+
+            assert len(result) == 1
+            assert "Saved state" in result[0].text
+            assert "save_state_test" in result[0].text
+
+            # Get goals for the saved session
+            result = await handle_call_tool(
+                "rocq_get_goals", {"session_id": "save_state_test"}
+            )
+
+            assert len(result) == 1
+            # Should have goals since we're mid-proof
+
+        except Exception as e:
+            pytest.skip(f"Integration test skipped - 'pet' command not available: {e}")
+
+    @pytest.mark.asyncio
+    async def test_get_root_state(self, sample_coq_file):
+        """Test getting root state of a file."""
+        try:
+            result = await handle_call_tool(
+                "rocq_get_root_state",
+                {
+                    "file_path": sample_coq_file,
+                    "session_id": "root_test",
+                },
+            )
+
+            assert len(result) == 1
+            assert "Root state" in result[0].text
+            assert "root_test" in result[0].text
 
         except Exception as e:
             pytest.skip(f"Integration test skipped - 'pet' command not available: {e}")

@@ -109,6 +109,41 @@ def start_petanque_server(host: str = "127.0.0.1", port: int = 8833) -> None:
         raise RuntimeError(f"Failed to start pet-server: {e}")
 
 
+def find_workspace_root(file_path: str) -> Optional[str]:
+    """Find the workspace root by looking for _CoqProject file in directory hierarchy."""
+    path = Path(file_path).resolve()
+    if path.is_file():
+        path = path.parent
+
+    # Walk up the directory tree looking for _CoqProject
+    while path != path.parent:
+        coqproject = path / "_CoqProject"
+        if coqproject.exists():
+            return str(path)
+        path = path.parent
+
+    return None
+
+
+def restart_pet_client():
+    """Kill and restart the pet client."""
+    global petanque_client
+
+    if petanque_client is not None:
+        logger.warning("Restarting pet client...")
+        try:
+            petanque_client.close()
+        except Exception as e:
+            logger.error(f"Error closing pet client: {e}")
+        petanque_client = None
+
+    # Clear session states since they're invalid after restart
+    current_states.clear()
+
+    # Get a fresh client
+    return get_client()
+
+
 def get_client() -> Pytanque:
     """Get or create Petanque client connection."""
     global petanque_client
@@ -290,6 +325,134 @@ async def handle_list_tools() -> List[types.Tool]:
                 "required": ["session_id", "query"],
             },
         ),
+        types.Tool(
+            name="rocq_save_state_as_session",
+            description="Get proof state at a file position and save it as a session for interactive proving. "
+                        "This enables proving Section-local lemmas and resuming proofs at arbitrary positions. "
+                        "After calling this, use rocq_run_tactic and rocq_get_goals with the session_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the Coq/Rocq file",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Line number (0-based indexing)",
+                    },
+                    "character": {
+                        "type": "integer",
+                        "description": "Character position within the line (0-based indexing)",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Unique session identifier to save the state under",
+                    },
+                },
+                "required": ["file_path", "line", "character", "session_id"],
+            },
+        ),
+        types.Tool(
+            name="rocq_get_root_state",
+            description="Get the initial (root) state of a document after all imports are loaded. "
+                        "Optionally saves as a session for running arbitrary commands in the file's context.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the Coq/Rocq file",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: save the root state as a session for interactive use",
+                    },
+                },
+                "required": ["file_path"],
+            },
+        ),
+        types.Tool(
+            name="rocq_run_at_position",
+            description="Run a tactic/command at a specific position in a file without needing a session. "
+                        "The resulting state can optionally be saved as a session for further interaction.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the Coq/Rocq file",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Line number (0-based indexing)",
+                    },
+                    "character": {
+                        "type": "integer",
+                        "description": "Character position within the line (0-based indexing)",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "The tactic or command to execute at the given position",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: save resulting state as a session for further interaction",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Optional timeout in seconds for Rocq command execution",
+                        "default": None,
+                    },
+                },
+                "required": ["file_path", "line", "character", "command"],
+            },
+        ),
+        types.Tool(
+            name="rocq_proof_info",
+            description="Get proof metadata (name, statements, range) for a session state. Returns the theorem name, its statement(s), and source range.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session identifier for the proof session",
+                    },
+                },
+                "required": ["session_id"],
+            },
+        ),
+        types.Tool(
+            name="rocq_proof_info_at_pos",
+            description="Get proof metadata at a specific position in a file. Returns theorem name, statement(s), and source range if the position is inside a proof.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the Coq/Rocq file",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Line number (0-based indexing)",
+                    },
+                    "character": {
+                        "type": "integer",
+                        "description": "Character position within the line (0-based indexing)",
+                    },
+                },
+                "required": ["file_path", "line", "character"],
+            },
+        ),
+        types.Tool(
+            name="rocq_restart",
+            description="Restart the pet/coq-lsp process to clear stale .vo caches. Use this after recompiling dependencies (e.g., after 'make' rebuilds .vo files that the MCP server has cached).",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -310,6 +473,12 @@ async def handle_call_tool(
 
             # Resolve absolute path
             abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
 
             # Start the proof session
             state = client.start(abs_path, theorem_name, pre_commands)
@@ -449,6 +618,13 @@ async def handle_call_tool(
             character = arguments["character"]
 
             abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
             state = client.get_state_at_pos(abs_path, line, character)
 
             # Get goals at this position
@@ -473,6 +649,13 @@ async def handle_call_tool(
             file_path = arguments["file_path"]
 
             abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
             toc = client.toc(abs_path)
 
             result = f"Table of contents for {file_path}:\n"
@@ -522,6 +705,180 @@ async def handle_call_tool(
                 result = f"No results found for search query: {query}"
 
             return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_save_state_as_session":
+            file_path = arguments["file_path"]
+            line = arguments["line"]
+            character = arguments["character"]
+            session_id = arguments["session_id"]
+
+            abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
+            state = client.get_state_at_pos(abs_path, line, character)
+
+            # Store the state for this session
+            current_states[session_id] = state
+
+            # Get goals at this position
+            goals = client.goals(state)
+            goals_text = ""
+            if goals:
+                goals_text = f"Goals ({len(goals)}):\n"
+                goals_text += "\n".join(
+                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
+                )
+            else:
+                goals_text = "No goals at this position"
+
+            result = f"Saved state at {file_path}:{line}:{character} as session '{session_id}'\n"
+            result += f"State ID: {state.st}\n"
+            result += f"Proof finished: {state.proof_finished}\n"
+            result += goals_text
+            result += f"\n\nYou can now use rocq_run_tactic(session_id='{session_id}', ...) to run tactics."
+
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_get_root_state":
+            file_path = arguments["file_path"]
+            session_id = arguments.get("session_id")
+
+            abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
+            state = client.get_root_state(abs_path)
+
+            # Optionally store as session
+            if session_id:
+                current_states[session_id] = state
+
+            result = f"Root state of {file_path}\n"
+            result += f"State ID: {state.st}\n"
+            result += f"Proof finished: {state.proof_finished}\n"
+            if state.feedback:
+                result += "Feedback:\n" + "\n".join(
+                    [f"[Level {level}] {msg}" for level, msg in state.feedback]
+                )
+            if session_id:
+                result += f"\n\nSaved as session '{session_id}'. Use rocq_run_tactic to run commands."
+
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_run_at_position":
+            file_path = arguments["file_path"]
+            line = arguments["line"]
+            character = arguments["character"]
+            command = arguments["command"]
+            session_id = arguments.get("session_id")
+            timeout = arguments.get("timeout")
+
+            abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
+            new_state = client.run_at_pos(
+                abs_path, line, character, command,
+                timeout=timeout,
+            )
+
+            # Optionally store as session
+            if session_id:
+                current_states[session_id] = new_state
+
+            # Get feedback messages
+            feedback_text = ""
+            if new_state.feedback:
+                feedback_text = "\nFeedback:\n" + "\n".join(
+                    [f"[Level {level}] {msg}" for level, msg in new_state.feedback]
+                )
+
+            # Get current goals after command
+            goals = client.goals(new_state)
+            goals_text = ""
+            if goals:
+                goals_text = f"\nCurrent goals ({len(goals)}):\n" + "\n".join(
+                    [f"Goal {i+1}:\n{goal.pp}" for i, goal in enumerate(goals)]
+                )
+            else:
+                goals_text = "\nNo remaining goals - proof may be complete!"
+
+            result = f"Executed at {file_path}:{line}:{character}: {command}\n"
+            result += f"New state ID: {new_state.st}\n"
+            result += f"Proof finished: {new_state.proof_finished}"
+            result += feedback_text + goals_text
+            if session_id:
+                result += f"\n\nSaved as session '{session_id}'. Use rocq_run_tactic for further interaction."
+
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_proof_info":
+            session_id = arguments["session_id"]
+
+            if session_id not in current_states:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error: No active session found for ID '{session_id}'. Use rocq_start_proof first.",
+                    )
+                ]
+
+            current_state = current_states[session_id]
+            info = client.proof_info(current_state)
+
+            if info is None:
+                result = f"No proof info available for session '{session_id}' (not inside a proof)."
+            else:
+                result = f"Proof info for session '{session_id}':\n"
+                result += f"Name: {info.name}\n"
+                result += f"Statements: {info.statements}\n"
+                if info.range:
+                    result += f"Range: {info.range}"
+
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_proof_info_at_pos":
+            file_path = arguments["file_path"]
+            line = arguments["line"]
+            character = arguments["character"]
+
+            abs_path = str(Path(file_path).resolve())
+
+            # Find and set workspace root (for _CoqProject flags)
+            workspace_root = find_workspace_root(abs_path)
+            if workspace_root:
+                logger.info(f"Setting workspace to: {workspace_root}")
+                client.set_workspace(debug=False, dir=workspace_root)
+
+            info = client.proof_info_at_pos(abs_path, line, character)
+
+            if info is None:
+                result = f"No proof info at {file_path}:{line}:{character} (not inside a proof)."
+            else:
+                result = f"Proof info at {file_path}:{line}:{character}:\n"
+                result += f"Name: {info.name}\n"
+                result += f"Statements: {info.statements}\n"
+                if info.range:
+                    result += f"Range: {info.range}"
+
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "rocq_restart":
+            restart_pet_client()
+            return [types.TextContent(type="text", text="Pet/coq-lsp process restarted. All sessions cleared. Fresh .vo files will be loaded on next use.")]
 
         else:
             return [

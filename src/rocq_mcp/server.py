@@ -171,6 +171,33 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
         _cleanup_coqc_artifacts(tmp_path)
 
 
+_COQC_POS_RE = re.compile(
+    r'File "[^"]*", line (\d+), characters (\d+)-(\d+):\s*\n((?:Error|Warning):.*?)(?=File "|$)',
+    re.DOTALL,
+)
+
+
+def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
+    """Parse coqc stderr into structured error positions.
+
+    coqc uses 1-based lines, 0-based characters.
+    Returns 0-based line numbers (for pytanque compatibility).
+    """
+    positions = []
+    for m in _COQC_POS_RE.finditer(stderr):
+        line_1based = int(m.group(1))
+        char_start = int(m.group(2))
+        char_end = int(m.group(3))
+        message = m.group(4).strip()
+        positions.append({
+            "line": line_1based - 1,
+            "character": char_start,
+            "end_character": char_end,
+            "message": message[:500],
+        })
+    return positions
+
+
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile
 # ---------------------------------------------------------------------------
@@ -224,10 +251,16 @@ def rocq_compile(
     if result["returncode"] == 0:
         return {"success": True, "output": result["stdout"][:2000]}
     else:
-        return {
-            "success": False,
-            "error": result["stderr"][:_MAX_ERROR_LENGTH],
-        }
+        error_text = result["stderr"][:_MAX_ERROR_LENGTH]
+        positions = _parse_coqc_error_positions(result["stderr"])
+        result_dict: dict[str, Any] = {"success": False, "error": error_text}
+        if positions:
+            result_dict["error_positions"] = positions
+            result_dict["hint"] = (
+                "Use rocq_step with file, line, and character parameters "
+                "to start an interactive session at the error position."
+            )
+        return result_dict
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +400,7 @@ async def _extract_problem_structure(
         except Exception:
             return None
         finally:
-            Path(tmp_path).unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(tmp_path)
 
         if not toc_result:
             return None
@@ -444,7 +477,7 @@ async def _extract_problem_structure(
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            Path(p).unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(p)
 
     result = await _run_with_pet(
         _do_toc,
@@ -1175,11 +1208,11 @@ async def run_query(
                 )
             return {"success": True, "output": output or "(no output)"}
         finally:
-            dummy_path.unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(str(dummy_path))
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            Path(p).unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(p)
 
     return await _run_with_pet(
         _do_query,
@@ -1379,11 +1412,11 @@ async def run_notations(
                 )
             return {"success": True, "output": output}
         finally:
-            dummy_path.unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(str(dummy_path))
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            Path(p).unlink(missing_ok=True)
+            _cleanup_coqc_artifacts(p)
 
     return await _run_with_pet(
         _do_notations,
@@ -1449,6 +1482,30 @@ def _format_goals(goals_list: list[Any]) -> str:
         else:
             parts.append(pp)
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Two-tier timeout helpers
+# ---------------------------------------------------------------------------
+
+_PET_TIMEOUT_GRACE: float = float(os.environ.get("ROCQ_PET_TIMEOUT_GRACE", "10"))
+
+
+def _is_timeout_eligible(tac: str) -> bool:
+    """Check if a tactic can be wrapped with Rocq's Timeout command.
+
+    Timeout N can only wrap commands that end with '.' and do NOT
+    start with bullet markers: '-', '+', '*'.
+    """
+    stripped = tac.strip()
+    if not stripped.endswith("."):
+        return False
+    return not stripped.startswith(("-", "+", "*"))
+
+
+def _compute_hard_timeout(soft_timeout: float) -> float:
+    """Compute the process-level hard timeout from the Rocq-level soft timeout."""
+    return soft_timeout + _PET_TIMEOUT_GRACE
 
 
 # ---------------------------------------------------------------------------
@@ -1556,6 +1613,8 @@ async def run_step(
     theorem: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    line: int = -1,
+    character: int = -1,
 ) -> dict[str, Any]:
     """Core implementation of rocq_step (testable without FastMCP Context)."""
     try:
@@ -1575,25 +1634,43 @@ async def run_step(
 
     timeout: float = lifespan_state["pet_timeout"]
 
+    # Determine if this is a session-start call
+    _start_by_theorem = bool(file and theorem)
+    _start_by_pos = bool(file and not theorem and line >= 0 and character >= 0)
+
     # Path traversal check (before entering thread)
-    if file and theorem:
+    if _start_by_theorem or _start_by_pos:
         file_path = str((Path(workspace).resolve() / file).resolve())
         ws_resolved = str(Path(workspace).resolve())
         if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
             return {"success": False, "error": "File path must be within workspace."}
+
+    # Normalize tactic before _execute so both inner and outer scope
+    # can reference the same normalized form for timeout eligibility.
+    tac = tactic.strip()
+    if not tac.endswith("."):
+        tac += "."
+
+    # Two-tier timeout: if the tactic is eligible for Rocq's Timeout
+    # command, pass it to pet.run() (soft timeout).  The process-level
+    # hard timeout is extended by a grace period so Rocq has time to
+    # report the timeout before we kill the process.
+    eligible = _is_timeout_eligible(tac) and timeout >= 1
+    rocq_timeout = int(timeout) if eligible else None
+    hard_timeout = _compute_hard_timeout(timeout) if eligible else timeout
 
     sem = _get_pet_semaphore()
 
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            if not _pet_lock.acquire(timeout=timeout):
+            if not _pet_lock.acquire(timeout=hard_timeout):
                 raise TimeoutError("Could not acquire pet lock")
             try:
                 pet = _ensure_pet(lifespan_state)
 
                 # Start new session if file+theorem provided
-                if file and theorem:
+                if _start_by_theorem:
                     ws = str(Path(workspace).resolve())
                     resolved_file = str((Path(workspace).resolve() / file).resolve())
                     pet.set_workspace(debug=False, dir=ws)
@@ -1603,6 +1680,19 @@ async def run_step(
                             "state": state,
                             "file": file,
                             "theorem": theorem,
+                            "history": [],
+                        }
+                    )
+                elif _start_by_pos:
+                    ws = str(Path(workspace).resolve())
+                    resolved_file = str((Path(workspace).resolve() / file).resolve())
+                    pet.set_workspace(debug=False, dir=ws)
+                    state = pet.get_state_at_pos(resolved_file, line, character)
+                    _session.update(
+                        {
+                            "state": state,
+                            "file": file,
+                            "theorem": f"@pos({line},{character})",
                             "history": [],
                         }
                     )
@@ -1617,12 +1707,8 @@ async def run_step(
                         ),
                     }
 
-                # Execute tactic
-                tac = tactic.strip()
-                if not tac.endswith("."):
-                    tac += "."
-
-                new_state = pet.run(current_state, tac)
+                # Execute tactic with optional Rocq-level timeout
+                new_state = pet.run(current_state, tac, timeout=rocq_timeout)
 
                 # Get complete goals before updating session state so
                 # that if complete_goals() raises, the session is not
@@ -1656,7 +1742,7 @@ async def run_step(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(_execute),
-                timeout=timeout,
+                timeout=hard_timeout,
             )
             return result
         except asyncio.TimeoutError:
@@ -1680,7 +1766,16 @@ async def run_step(
         except PetanqueError as e:
             # Tactic error -- session state NOT corrupted (run() raised
             # before _session["state"] was updated)
-            return {"success": False, "error": e.message}
+            msg = str(e) if not hasattr(e, "message") else e.message
+            if "timeout" in msg.lower() or "timed out" in msg.lower():
+                return {
+                    "success": False,
+                    "error": (
+                        f"Tactic timed out (Rocq Timeout {int(timeout)}s). "
+                        "Session is still active \u2014 try a different tactic."
+                    ),
+                }
+            return {"success": False, "error": msg}
         except FileNotFoundError:
             return {
                 "success": False,
@@ -1696,16 +1791,24 @@ async def rocq_step(
     file: str = "",
     theorem: str = "",
     workspace: str = "",
+    line: int = -1,
+    character: int = -1,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute a tactic in an interactive proof session and return goals.
 
-    On first call, provide file and theorem to start a new session.
+    Two ways to start a session:
+    1. By theorem name: provide file and theorem.
+    2. By position: provide file, line, and character (0-based).
+       Use this to start at a specific position in the file, e.g., at an
+       error position reported by rocq_compile's error_positions field.
+       Leave theorem empty when using position-based start.
+
     Subsequent calls only need the tactic.
 
     If the session is lost (timeout, crash), you'll get an error.
-    Re-send file + theorem to start a new session, then replay
-    your tactics from your conversation history.
+    Re-send file + theorem (or file + line + character) to start a new
+    session, then replay your tactics from your conversation history.
 
     Send one tactic per call. Do NOT send Qed -- the proof is complete
     when proof_finished is True.
@@ -1716,8 +1819,10 @@ async def rocq_step(
     Args:
         tactic: The tactic to execute (e.g., "intros", "simpl", "lia").
         file: Path to the .v file (relative to workspace). Required for first call.
-        theorem: Name of the theorem to prove. Required for first call.
+        theorem: Name of the theorem to prove. Required for theorem-based start.
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+        line: 0-based line number for position-based session start.
+        character: 0-based character offset for position-based session start.
     """
     return await run_step(
         tactic=tactic,
@@ -1725,6 +1830,8 @@ async def rocq_step(
         theorem=theorem,
         workspace=workspace or ROCQ_WORKSPACE,
         lifespan_state=ctx.lifespan_context,
+        line=line,
+        character=character,
     )
 
 
@@ -1767,6 +1874,7 @@ async def run_step_multi(
             }
 
     timeout: float = lifespan_state["pet_timeout"]
+    hard_timeout = _compute_hard_timeout(timeout)
     sem = _get_pet_semaphore()
 
     # Shared list so partial results survive a timeout
@@ -1775,7 +1883,7 @@ async def run_step_multi(
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            if not _pet_lock.acquire(timeout=timeout):
+            if not _pet_lock.acquire(timeout=hard_timeout):
                 raise TimeoutError("Could not acquire pet lock")
             try:
                 pet = _ensure_pet(lifespan_state)
@@ -1795,9 +1903,14 @@ async def run_step_multi(
                     if not tac.endswith("."):
                         tac += "."
 
+                    # Per-tactic Rocq-level timeout for eligible tactics
+                    tac_rocq_timeout = (
+                        int(timeout) if _is_timeout_eligible(tac) and timeout >= 1 else None
+                    )
+
                     entry: dict[str, Any] = {"tactic": tac}
                     try:
-                        new_state = pet.run(parent_state, tac)
+                        new_state = pet.run(parent_state, tac, timeout=tac_rocq_timeout)
 
                         # Get complete goals for the trial state
                         complete = pet.complete_goals(new_state)
@@ -1826,7 +1939,7 @@ async def run_step_multi(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(_execute),
-                timeout=timeout,
+                timeout=hard_timeout,
             )
             return result
         except asyncio.TimeoutError:
@@ -1874,6 +1987,14 @@ async def rocq_step_multi(
 
     Useful for quickly testing which automation tactic works:
       tactics=["auto", "lia", "lra", "ring", "omega", "tauto"]
+
+    To auto-solve the current subgoal, first run rocq_step with "intros."
+    then call this tool with the standard automation tactics:
+      ["trivial", "reflexivity", "assumption", "exact I", "auto", "eauto",
+       "tauto", "intuition", "lia", "lra", "nia", "nra", "ring", "field",
+       "decide equality", "firstorder"]
+    Pick the first successful tactic and commit it with rocq_step.
+    Note: lia/lra/ring/field require the .v file to import Lia/Lra/Ring/Field.
 
     Args:
         tactics: List of tactics to try (max 20).

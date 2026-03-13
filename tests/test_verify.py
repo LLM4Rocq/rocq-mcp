@@ -232,6 +232,17 @@ class TestAxiomClassification:
     def test_axiom_short_name_single_dot(self):
         assert _axiom_short_name("M.classic") == "classic"
 
+    # --- Ensembles axiom: should be ACCEPTED ---
+
+    def test_extensionality_ensembles_accepted(self):
+        assert _is_standard_axiom("Extensionality_Ensembles") is True
+
+    def test_ensembles_qualified_accepted(self):
+        assert _is_standard_axiom("Coq.Sets.Ensembles.Extensionality_Ensembles") is True
+
+    def test_ensembles_module_prefix_accepted(self):
+        assert _is_standard_axiom("Ensembles.Extensionality_Ensembles") is True
+
 
 # ---------------------------------------------------------------------------
 # Print Assumptions parser

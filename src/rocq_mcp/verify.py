@@ -528,6 +528,8 @@ _KNOWN_SAFE_AXIOMS: set[str] = {
     # --- Dedekind reals (ClassicalDedekindReals) ---
     "sig_forall_dec",
     "sig_not_dec",  # forall P : Prop, {~ ~ P} + {~ P}
+    # --- Sets (Ensembles) ---
+    "Extensionality_Ensembles",  # forall U (A B : Ensemble U), Same_set U A B -> A = B
 }
 
 # Standard library module prefixes. Axioms qualified with these are safe.
@@ -548,6 +550,7 @@ _STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
     "RelationalChoice.",  # relational_choice
     "PropExtensionality.",  # propositional_extensionality
     "Raxioms.",  # R, Rplus, Rmult, etc.
+    "Ensembles.",  # Extensionality_Ensembles
 )
 
 

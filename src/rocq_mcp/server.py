@@ -200,6 +200,90 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
     return positions
 
 
+# Regex to match coqc diagnostic blocks: File "path", line N, characters S-E:\n<body>
+_COQC_DIAG_RE = re.compile(
+    r'(File "([^"]*)", line (\d+), characters (\d+)-(\d+):\s*\n)(.*?)(?=File "|$)',
+    re.DOTALL,
+)
+
+# Regex to extract Error/Warning kind from body
+_KIND_RE = re.compile(r"^(Error|Warning)\b")
+
+# Regex to replace tmp file paths with <proof>
+_TMP_PATH_RE = re.compile(r'"[^"]*tmp[^"]*\.v"')
+
+
+def _format_error(error_str: str, proof_str: str) -> str:
+    """Reformat a raw coqc stderr string into LLM-friendly feedback.
+
+    - Replaces the opaque tmp file path with ``<proof>``
+    - Annotates the first Error-level diagnostic with the source line
+      and a caret underline marking the exact character range
+    - Suppresses pure-warning outputs (they don't prevent compilation)
+
+    Falls back to the raw string (path-cleaned) when no structured
+    location info is present (timeouts, workspace errors, etc.).
+    """
+    if not error_str:
+        return error_str
+
+    proof_lines = proof_str.splitlines()
+    diagnostics = list(_COQC_DIAG_RE.finditer(error_str))
+
+    if not diagnostics:
+        return _TMP_PATH_RE.sub('"<proof>"', error_str).strip()
+
+    parsed = []
+    for m in diagnostics:
+        kind_m = _KIND_RE.match(m.group(6).strip())
+        parsed.append(
+            {
+                "kind": kind_m.group(1) if kind_m else "Error",
+                "line": int(m.group(3)),
+                "char_start": int(m.group(4)),
+                "char_end": int(m.group(5)),
+                "body": m.group(6).strip(),
+            }
+        )
+
+    has_errors = any(d["kind"] == "Error" for d in parsed)
+    if not has_errors:
+        return ""
+
+    # Include warnings before the first error, plus the error itself
+    selected = []
+    for d in parsed:
+        selected.append(d)
+        if d["kind"] == "Error":
+            break
+
+    parts = []
+    for d in selected:
+        line_1 = d["line"]
+        char_start = d["char_start"]
+        char_end = d["char_end"]
+
+        header = f"<proof>, line {line_1}, characters {char_start}-{char_end}:"
+
+        line_idx = line_1 - 1
+        source_line = (
+            proof_lines[line_idx] if 0 <= line_idx < len(proof_lines) else None
+        )
+
+        annotation = ""
+        if source_line is not None:
+            prefix = f"  {line_1:4d} | "
+            caret_offset = len(prefix) + char_start
+            caret_len = max(1, char_end - char_start)
+            annotation = (
+                f"\n{prefix}{source_line}\n" f"{' ' * caret_offset}{'^' * caret_len}"
+            )
+
+        parts.append(f"{header}{annotation}\n{d['body']}")
+
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile
 # ---------------------------------------------------------------------------
@@ -253,7 +337,10 @@ def rocq_compile(
     if result["returncode"] == 0:
         return {"success": True, "output": result["stdout"][:2000]}
     else:
-        error_text = result["stderr"][:_MAX_ERROR_LENGTH]
+        error_text = _format_error(result["stderr"][:_MAX_ERROR_LENGTH], source)
+        if not error_text:
+            # Pure warnings, no errors — treat as success
+            return {"success": True, "output": result["stdout"][:2000]}
         positions = _parse_coqc_error_positions(result["stderr"])
         result_dict: dict[str, Any] = {"success": False, "error": error_text}
         if positions:
@@ -647,7 +734,7 @@ async def rocq_verify(
 
     # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
     phase1_stderr = result["stderr"]
-    phase1_error = phase1_stderr[:_MAX_ERROR_LENGTH]
+    phase1_error = _format_error(phase1_stderr[:_MAX_ERROR_LENGTH], proof)
     phase1_hint = verification_hint(phase1_stderr)
     phase1_failure: dict[str, Any] = {
         "verified": False,
@@ -992,10 +1079,11 @@ def rocq_auto_solve(
         }
 
     if result["returncode"] != 0:
+        details = _format_error(result["stderr"][:2000], combined_source)
         return {
             "solved": False,
             "error": "None of the standard automation tactics succeeded.",
-            "details": result["stderr"][:2000],
+            "details": details or result["stderr"][:2000],
         }
 
     # --- Phase 2: Identify which specific tactic worked ---

@@ -189,12 +189,14 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
         char_start = int(m.group(2))
         char_end = int(m.group(3))
         message = m.group(4).strip()
-        positions.append({
-            "line": line_1based - 1,
-            "character": char_start,
-            "end_character": char_end,
-            "message": message[:500],
-        })
+        positions.append(
+            {
+                "line": line_1based - 1,
+                "character": char_start,
+                "end_character": char_end,
+                "message": message[:500],
+            }
+        )
     return positions
 
 
@@ -524,7 +526,9 @@ def _build_assumptions_result(
             **({"note": note_suffix.rstrip()} if note_suffix else {}),
         }
     elif verdict == "standard_only":
-        note = note_suffix + "Proof uses standard axioms (e.g., classical logic, Reals)."
+        note = (
+            note_suffix + "Proof uses standard axioms (e.g., classical logic, Reals)."
+        )
         return {
             "verified": True,
             "verification_method": method,
@@ -827,7 +831,9 @@ def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
 
     # Extract keyword and name from the statement.
     header_match = re.match(
-        r"(" + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS) + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
+        r"("
+        + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS)
+        + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
         full_statement,
     )
     if not header_match:
@@ -1613,8 +1619,8 @@ async def run_step(
     theorem: str,
     workspace: str,
     lifespan_state: dict[str, Any],
-    line: int = -1,
-    character: int = -1,
+    line: int | None = None,
+    character: int | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_step (testable without FastMCP Context)."""
     try:
@@ -1636,7 +1642,16 @@ async def run_step(
 
     # Determine if this is a session-start call
     _start_by_theorem = bool(file and theorem)
-    _start_by_pos = bool(file and not theorem and line >= 0 and character >= 0)
+    _start_by_pos = bool(
+        file and not theorem and line is not None and character is not None
+    )
+
+    if _start_by_pos:
+        if not (0 <= line <= 100000) or not (0 <= character <= 100000):
+            return {
+                "success": False,
+                "error": "line and character must be in range [0, 100000].",
+            }
 
     # Path traversal check (before entering thread)
     if _start_by_theorem or _start_by_pos:
@@ -1791,8 +1806,8 @@ async def rocq_step(
     file: str = "",
     theorem: str = "",
     workspace: str = "",
-    line: int = -1,
-    character: int = -1,
+    line: int | None = None,
+    character: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Execute a tactic in an interactive proof session and return goals.
@@ -1803,6 +1818,8 @@ async def rocq_step(
        Use this to start at a specific position in the file, e.g., at an
        error position reported by rocq_compile's error_positions field.
        Leave theorem empty when using position-based start.
+
+    If both theorem and line/character are provided, theorem takes precedence.
 
     Subsequent calls only need the tactic.
 
@@ -1905,7 +1922,9 @@ async def run_step_multi(
 
                     # Per-tactic Rocq-level timeout for eligible tactics
                     tac_rocq_timeout = (
-                        int(timeout) if _is_timeout_eligible(tac) and timeout >= 1 else None
+                        int(timeout)
+                        if _is_timeout_eligible(tac) and timeout >= 1
+                        else None
                     )
 
                     entry: dict[str, Any] = {"tactic": tac}

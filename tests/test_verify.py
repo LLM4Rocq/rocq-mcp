@@ -243,6 +243,10 @@ class TestAxiomClassification:
     def test_ensembles_module_prefix_accepted(self):
         assert _is_standard_axiom("Ensembles.Extensionality_Ensembles") is True
 
+    def test_user_extensionality_ensembles_rejected(self):
+        """User-qualified Ensembles axiom should be rejected."""
+        assert _is_standard_axiom("M.Extensionality_Ensembles") is False
+
 
 # ---------------------------------------------------------------------------
 # Print Assumptions parser
@@ -463,7 +467,9 @@ class TestGateFunctions:
     def test_has_definition_keywords_coinductive(self):
         from rocq_mcp.server import _has_definition_keywords
 
-        assert _has_definition_keywords("CoInductive stream := Cons : nat -> stream -> stream.")
+        assert _has_definition_keywords(
+            "CoInductive stream := Cons : nat -> stream -> stream."
+        )
 
     def test_has_definition_keywords_record(self):
         from rocq_mcp.server import _has_definition_keywords
@@ -503,9 +509,9 @@ class TestClassifyTocDetail:
 
     def test_all_shared_defs(self):
         for detail in _SHARED_DEF_DETAILS:
-            assert classify_toc_detail(detail) == DefCategory.SHARED_DEF, (
-                f"{detail} not classified as SHARED_DEF"
-            )
+            assert (
+                classify_toc_detail(detail) == DefCategory.SHARED_DEF
+            ), f"{detail} not classified as SHARED_DEF"
 
     def test_lemma(self):
         assert classify_toc_detail("Lemma") == DefCategory.THEOREM
@@ -679,11 +685,7 @@ class TestStripSharedDefs:
         match when followed by whitespace.  This documents current behavior:
         _strip_shared_defs does NOT strip definitions with primed names.
         """
-        proof = (
-            "Definition x' := 0.\n"
-            "Theorem foo : True.\n"
-            "Proof. exact I. Qed.\n"
-        )
+        proof = "Definition x' := 0.\n" "Theorem foo : True.\n" "Proof. exact I. Qed.\n"
         result = _strip_shared_defs(proof, {"x'"})
         # Due to \b limitation, primed names are NOT stripped (known limitation)
         assert "Definition x'" in result
@@ -692,9 +694,7 @@ class TestStripSharedDefs:
     def test_strip_name_with_digits(self):
         """Names with digits (e.g., state2) should be stripped correctly."""
         proof = (
-            "Definition state2 := 0.\n"
-            "Theorem foo : True.\n"
-            "Proof. exact I. Qed.\n"
+            "Definition state2 := 0.\n" "Theorem foo : True.\n" "Proof. exact I. Qed.\n"
         )
         result = _strip_shared_defs(proof, {"state2"})
         assert "Definition state2" not in result
@@ -831,8 +831,7 @@ class TestBuildSharedDefsVerificationSource:
             defs=[("state", "Definition", "Definition state := list nat.")],
             theorem_source="Theorem foo : True.",
             full_source=(
-                "Definition state := list nat.\n"
-                "Theorem foo : True.\nAdmitted."
+                "Definition state := list nat.\n" "Theorem foo : True.\nAdmitted."
             ),
         )
         proof = (
@@ -856,8 +855,7 @@ class TestBuildSharedDefsVerificationSource:
             defs=[("state", "Definition", "Definition state := list nat.")],
             theorem_source="Theorem foo : True.",
             full_source=(
-                "Definition state := list nat.\n"
-                "Theorem foo : True.\nAdmitted."
+                "Definition state := list nat.\n" "Theorem foo : True.\nAdmitted."
             ),
         )
         proof = (
@@ -1205,8 +1203,8 @@ class TestVerifyInputSanitization:
             '(* "a""*)" *) x.',
             '"(* not a comment *)" y.',
             '(* "a" and "b" *) z.',
-            'normal code. (* comment *) more.',
-            '(* (* nested *) *) after.',
+            "normal code. (* comment *) more.",
+            "(* (* nested *) *) after.",
         ]
         for text in cases:
             ranges = _rocq_comment_ranges(text)

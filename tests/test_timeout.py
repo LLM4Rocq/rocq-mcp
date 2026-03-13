@@ -10,7 +10,6 @@ from rocq_mcp.server import (
     _PET_TIMEOUT_GRACE,
 )
 
-
 # ---------------------------------------------------------------------------
 # _is_timeout_eligible
 # ---------------------------------------------------------------------------
@@ -55,6 +54,18 @@ class TestIsTimeoutEligible:
 
     def test_only_dot(self):
         assert _is_timeout_eligible(".") is True
+
+    def test_numbered_goal(self):
+        assert _is_timeout_eligible("1: auto.") is True
+
+    def test_double_bullet(self):
+        assert _is_timeout_eligible("-- auto.") is False
+
+    def test_whitespace_before_bullet(self):
+        assert _is_timeout_eligible("  - auto.") is False
+
+    def test_semicolon_chain(self):
+        assert _is_timeout_eligible("split; auto.") is True
 
 
 # ---------------------------------------------------------------------------

@@ -352,7 +352,7 @@ def build_verification_source(
         f"{clean_statement}\n"
         f"Proof.\n"
         f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.\n"
-        f"all: first [ assumption | reflexivity | congruence | auto | easy | simpl; auto ].\n"
+        f"all: first [ eassumption | assumption | reflexivity | congruence | auto | easy | simpl; auto ].\n"
         f"Qed.\n\n"
         f"Print Assumptions {problem_name}.\n"
     )
@@ -459,7 +459,7 @@ def build_shared_defs_verification_source(
     parts.append(clean_theorem)
     parts.append("Proof.")
     parts.append(f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.")
-    parts.append("all: first [ assumption | reflexivity | congruence | auto | easy | simpl; auto ].")
+    parts.append("all: first [ eassumption | assumption | reflexivity | congruence | auto | easy | simpl; auto ].")
     parts.append("Qed.")
     parts.append("")
 

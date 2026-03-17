@@ -98,3 +98,137 @@ class TestFormatError:
         )
         result = _format_error(stderr, proof)
         assert "In environment" in result
+
+    def test_large_warnings_before_error(self):
+        """Error after 6000+ bytes of warnings must still be found."""
+        warning_line = (
+            'File "/tmp/tmp.v", line 2, characters 0-75:\n'
+            "Warning: Notation overridden.\n"
+        )
+        warnings = warning_line * 100  # ~7000 bytes of warnings
+        error = (
+            'File "/tmp/tmp.v", line 50, characters 0-10:\n'
+            "Error: The reference foo was not found.\n"
+        )
+        proof = "\n".join(f"line {i}" for i in range(60))
+        result = _format_error(warnings + error, proof)
+        assert "Error:" in result
+        assert "foo was not found" in result
+
+    def test_duplicate_warnings_deduplicated(self):
+        """Identical warnings emitted multiple times should appear only once."""
+        proof = "line 0\nline 1\nline 2\nline 3\n"
+        # Same warning 3 times, then an error
+        warn = (
+            'File "/tmp/tmp.v", line 2, characters 0-10:\n'
+            "Warning: Notation Nat.mul_mod is deprecated.\n"
+        )
+        error = (
+            'File "/tmp/tmp.v", line 4, characters 0-10:\n'
+            "Error: Tactic failure.\n"
+        )
+        stderr = warn * 3 + error
+        result = _format_error(stderr, proof)
+        assert "Error:" in result
+        # The warning should appear exactly once, not three times
+        assert result.count("Nat.mul_mod") == 1
+
+    def test_distinct_warnings_preserved(self):
+        """Different warnings before an error should all be kept."""
+        proof = "line 0\nline 1\nline 2\nline 3\n"
+        warn_a = (
+            'File "/tmp/tmp.v", line 1, characters 0-5:\n'
+            "Warning: Deprecated A.\n"
+        )
+        warn_b = (
+            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
+            "Warning: Deprecated B.\n"
+        )
+        error = (
+            'File "/tmp/tmp.v", line 3, characters 0-5:\n'
+            "Error: Real error.\n"
+        )
+        result = _format_error(warn_a + warn_b + error, proof)
+        assert "Deprecated A" in result
+        assert "Deprecated B" in result
+        assert "Error:" in result
+
+    def test_include_warnings_false_strips_warnings(self):
+        """With include_warnings=False, only the error is returned."""
+        proof = "Line 0\nLine 1\nLine 2\n"
+        stderr = (
+            'File "/tmp/tmp.v", line 1, characters 0-5:\n'
+            "Warning: Something deprecated.\n"
+            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
+            "Warning: Another deprecation.\n"
+            'File "/tmp/tmp.v", line 3, characters 0-5:\n'
+            "Error: Real error.\n"
+        )
+        result = _format_error(stderr, proof, include_warnings=False)
+        assert "Real error" in result
+        assert "Warning" not in result
+        assert "deprecated" not in result
+
+    def test_include_warnings_true_is_default(self):
+        """Default behavior includes warnings before the error."""
+        proof = "Line 0\nLine 1\nLine 2\n"
+        stderr = (
+            'File "/tmp/tmp.v", line 1, characters 0-5:\n'
+            "Warning: Something deprecated.\n"
+            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
+            "Error: Real error.\n"
+        )
+        result = _format_error(stderr, proof)
+        assert "deprecated" in result
+        assert "Real error" in result
+
+    def test_include_warnings_false_pure_warnings_still_empty(self):
+        """Pure warnings with no error still return empty regardless of flag."""
+        proof = "Theorem t : True. Proof. exact I. Qed."
+        stderr = (
+            'File "/tmp/tmp.v", line 1, characters 0-10:\n'
+            "Warning: Deprecated feature.\n"
+        )
+        assert _format_error(stderr, proof, include_warnings=False) == ""
+        assert _format_error(stderr, proof, include_warnings=True) == ""
+
+    def test_excess_unique_warnings_capped(self):
+        """At most _MAX_FORMAT_WARNINGS unique warnings are included."""
+        from rocq_mcp.server import _MAX_FORMAT_WARNINGS
+
+        proof = "\n".join(f"line {i}" for i in range(20))
+        # Generate more unique warnings than the cap
+        warnings = "".join(
+            f'File "/tmp/tmp.v", line {i}, characters 0-5:\n'
+            f"Warning: Unique warning {i}.\n"
+            for i in range(10)
+        )
+        error = (
+            'File "/tmp/tmp.v", line 15, characters 0-5:\n'
+            "Error: The actual error.\n"
+        )
+        result = _format_error(warnings + error, proof)
+        assert "The actual error" in result
+        # Only the first _MAX_FORMAT_WARNINGS unique warnings should appear
+        included = sum(1 for i in range(10) if f"Unique warning {i}" in result)
+        assert included == _MAX_FORMAT_WARNINGS
+
+    def test_structured_output_bounded(self):
+        """Structured diagnostics output must be bounded to _MAX_ERROR_LENGTH."""
+        from rocq_mcp.server import _MAX_ERROR_LENGTH
+
+        proof = "\n".join(f"line {i}" for i in range(200))
+        # Even with warnings within the count cap, a huge error body
+        # should be capped
+        error_body = "Error: " + "x" * (_MAX_ERROR_LENGTH * 2)
+        stderr = f'File "/tmp/tmp.v", line 1, characters 0-5:\n{error_body}\n'
+        result = _format_error(stderr, proof)
+        assert len(result) <= _MAX_ERROR_LENGTH
+
+    def test_no_diagnostics_output_capped(self):
+        """Unstructured stderr must be capped to avoid drowning LLM context."""
+        from rocq_mcp.server import _MAX_ERROR_LENGTH
+
+        huge = "x" * (_MAX_ERROR_LENGTH * 3)
+        result = _format_error(huge, "proof")
+        assert len(result) <= _MAX_ERROR_LENGTH

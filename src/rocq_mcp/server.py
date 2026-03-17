@@ -43,6 +43,7 @@ ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
 ROCQ_COQC_BINARY: str = os.environ.get("ROCQ_COQC_BINARY", "coqc")
 ROCQ_MAX_SOURCE_SIZE: int = int(os.environ.get("ROCQ_MAX_SOURCE_SIZE", "1000000"))
 _MAX_ERROR_LENGTH: int = 4000
+_MAX_FORMAT_WARNINGS: int = 3
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -213,13 +214,22 @@ _KIND_RE = re.compile(r"^(Error|Warning)\b")
 _TMP_PATH_RE = re.compile(r'"[^"]*tmp[^"]*\.v"')
 
 
-def _format_error(error_str: str, proof_str: str) -> str:
+def _format_error(
+    error_str: str, proof_str: str, *, include_warnings: bool = True
+) -> str:
     """Reformat a raw coqc stderr string into LLM-friendly feedback.
 
     - Replaces the opaque tmp file path with ``<proof>``
     - Annotates the first Error-level diagnostic with the source line
       and a caret underline marking the exact character range
     - Suppresses pure-warning outputs (they don't prevent compilation)
+
+    Args:
+        error_str: Raw coqc stderr output.
+        proof_str: The Rocq source that was compiled (for source annotations).
+        include_warnings: If True (default), include deduplicated warnings
+            that precede the first error.  If False, return only the error
+            diagnostic itself — useful when warnings would drown the context.
 
     Falls back to the raw string (path-cleaned) when no structured
     location info is present (timeouts, workspace errors, etc.).
@@ -231,7 +241,11 @@ def _format_error(error_str: str, proof_str: str) -> str:
     diagnostics = list(_COQC_DIAG_RE.finditer(error_str))
 
     if not diagnostics:
-        return _TMP_PATH_RE.sub('"<proof>"', error_str).strip()
+        cleaned = _TMP_PATH_RE.sub('"<proof>"', error_str).strip()
+        # Cap output so unstructured errors don't drown LLM context
+        if len(cleaned) > _MAX_ERROR_LENGTH:
+            cleaned = cleaned[-_MAX_ERROR_LENGTH:]
+        return cleaned
 
     parsed = []
     for m in diagnostics:
@@ -250,9 +264,22 @@ def _format_error(error_str: str, proof_str: str) -> str:
     if not has_errors:
         return ""
 
-    # Include warnings before the first error, plus the error itself
+    # Select diagnostics to include in the output.
+    # Deduplicate warnings by body text — coqc often emits the same
+    # deprecation notice multiple times during elaboration.
+    # Cap at _MAX_FORMAT_WARNINGS unique warnings to avoid drowning
+    # LLM context (math-comp can emit dozens of unique warnings).
     selected = []
+    seen_warnings: set[str] = set()
     for d in parsed:
+        if d["kind"] == "Warning":
+            if not include_warnings:
+                continue
+            if d["body"] in seen_warnings:
+                continue
+            if len(seen_warnings) >= _MAX_FORMAT_WARNINGS:
+                continue
+            seen_warnings.add(d["body"])
         selected.append(d)
         if d["kind"] == "Error":
             break
@@ -281,7 +308,10 @@ def _format_error(error_str: str, proof_str: str) -> str:
 
         parts.append(f"{header}{annotation}\n{d['body']}")
 
-    return "\n\n".join(parts)
+    output = "\n\n".join(parts)
+    if len(output) > _MAX_ERROR_LENGTH:
+        output = output[-_MAX_ERROR_LENGTH:]
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +324,7 @@ def rocq_compile(
     source: str,
     workspace: str = "",
     timeout: int = 0,
+    include_warnings: bool = True,
 ) -> dict[str, Any]:
     """Compile Rocq source code and return structured errors.
 
@@ -304,6 +335,9 @@ def rocq_compile(
         source: Complete Rocq (.v) file content to compile.
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
         timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+        include_warnings: If True (default), include deduplicated warnings
+            before the error in the output.  Set to False to get only the
+            error diagnostic, which keeps context compact.
     """
     workspace = workspace or ROCQ_WORKSPACE
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
@@ -337,10 +371,20 @@ def rocq_compile(
     if result["returncode"] == 0:
         return {"success": True, "output": result["stdout"][:2000]}
     else:
-        error_text = _format_error(result["stderr"][:_MAX_ERROR_LENGTH], source)
+        error_text = _format_error(
+            result["stderr"], source, include_warnings=include_warnings
+        )
         if not error_text:
-            # Pure warnings, no errors — treat as success
-            return {"success": True, "output": result["stdout"][:2000]}
+            # No Error diagnostic parsed, but coqc still failed.
+            # This can happen when voluminous warnings (e.g. math-comp
+            # coercion ambiguity notices) precede the actual error.
+            # Fall back to the tail of raw stderr so the error is visible.
+            raw = result["stderr"].strip()
+            fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
+            fallback = _TMP_PATH_RE.sub('"<proof>"', fallback).strip()
+            if not fallback:
+                fallback = f"coqc exited with code {result['returncode']} (no stderr)."
+            return {"success": False, "error": fallback}
         positions = _parse_coqc_error_positions(result["stderr"])
         result_dict: dict[str, Any] = {"success": False, "error": error_text}
         if positions:
@@ -649,6 +693,7 @@ async def rocq_verify(
     problem_statement: str,
     workspace: str = "",
     timeout: int = 0,
+    include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Verify that a proof actually proves the original statement.
@@ -679,6 +724,8 @@ async def rocq_verify(
         problem_statement: The original problem file content (with Admitted/Abort).
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
         timeout: Verification timeout in seconds (default: ROCQ_VERIFY_TIMEOUT env var).
+        include_warnings: If True (default), include deduplicated warnings
+            before the error in the output.  Set to False for compact errors.
     """
     workspace = workspace or ROCQ_WORKSPACE
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_VERIFY_TIMEOUT
@@ -734,7 +781,19 @@ async def rocq_verify(
 
     # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
     phase1_stderr = result["stderr"]
-    phase1_error = _format_error(phase1_stderr[:_MAX_ERROR_LENGTH], proof)
+    phase1_error = _format_error(
+        phase1_stderr, proof, include_warnings=include_warnings
+    )
+    if not phase1_error:
+        # No Error diagnostic parsed (e.g. voluminous warnings hid it).
+        # Fall back to tail of raw stderr so the caller sees the actual error.
+        raw = phase1_stderr.strip()
+        phase1_error = _TMP_PATH_RE.sub(
+            '"<proof>"',
+            raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
+        ).strip()
+        if not phase1_error:
+            phase1_error = f"coqc exited with code {result['returncode']}."
     phase1_hint = verification_hint(phase1_stderr)
     phase1_failure: dict[str, Any] = {
         "verified": False,
@@ -1004,6 +1063,7 @@ def rocq_auto_solve(
     preamble_tactics: str = "",
     workspace: str = "",
     timeout: int = 0,
+    include_warnings: bool = True,
 ) -> dict[str, Any]:
     """Try to prove a theorem using standard automation tactics.
 
@@ -1023,6 +1083,8 @@ def rocq_auto_solve(
                          (e.g., "intros." or "intros. simpl.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
         timeout: Timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+        include_warnings: If True (default), include deduplicated warnings
+            before the error in the output.  Set to False for compact errors.
     """
     workspace = workspace or ROCQ_WORKSPACE
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
@@ -1079,11 +1141,22 @@ def rocq_auto_solve(
         }
 
     if result["returncode"] != 0:
-        details = _format_error(result["stderr"][:2000], combined_source)
+        details = _format_error(
+            result["stderr"], combined_source,
+            include_warnings=include_warnings,
+        )
+        if not details:
+            # _format_error found no Error diagnostics (e.g. voluminous
+            # warnings hid the error).  Fall back to tail of raw stderr.
+            raw = result["stderr"].strip()
+            details = _TMP_PATH_RE.sub(
+                '"<proof>"',
+                raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
+            ).strip()
         return {
             "solved": False,
             "error": "None of the standard automation tactics succeeded.",
-            "details": details or result["stderr"][:2000],
+            "details": details or f"coqc exited with code {result['returncode']}.",
         }
 
     # --- Phase 2: Identify which specific tactic worked ---

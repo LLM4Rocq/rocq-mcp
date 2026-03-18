@@ -1142,7 +1142,8 @@ def rocq_auto_solve(
 
     if result["returncode"] != 0:
         details = _format_error(
-            result["stderr"], combined_source,
+            result["stderr"],
+            combined_source,
             include_warnings=include_warnings,
         )
         if not details:

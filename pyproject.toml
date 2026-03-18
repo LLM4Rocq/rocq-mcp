@@ -1,24 +1,33 @@
 [project]
 name = "rocq-mcp"
-version = "0.1.0"
-description = "Model Context Protocol (MCP) server for Rocq/Coq proof assistant based on Coq-LSP and Petanque"
-authors = [{name = "Guillaume Baudart", email = "guillaume.baudart@inria.fr"}]
-readme = "README.md"
-license = {text = "Apache-2.0"}
+version = "0.2.0"
+description = "MCP server for Rocq/Coq proof development"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0.0",
-    "pytanque @ git+https://github.com/LLM4Rocq/pytanque.git",
+    "fastmcp>=3.1.0",
+]
+
+[project.optional-dependencies]
+interactive = [
+    "pytanque @ git+https://github.com/LLM4Rocq/pytanque",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "black>=24.0",
 ]
 
 [project.scripts]
-rocq-mcp = "rocq_mcp.server:cli"
+rocq-mcp = "rocq_mcp.server:main"
 
-[tool.uv]
-package = true
-dev-dependencies = [
-    "pytest>=8.4.2",
-    "pytest-asyncio>=0.21.0",
-    "black>=23.0.0",
-]
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

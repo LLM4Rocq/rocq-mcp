@@ -203,26 +203,28 @@ class TestCompileWarningsTruncation:
         assert len(warnings) > server._MAX_ERROR_LENGTH
 
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(fake_stderr),
         )
 
         source = "Theorem t : True. Proof. exact I. Qed."
         result = rocq_compile(source=source, workspace=str(workspace))
 
-        assert result["success"] is False, (
-            "rocq_compile must not report success when coqc exits with code 1"
-        )
-        assert "map_trmx" in result["error"], (
-            "Error content must be preserved, not lost to warning truncation"
-        )
+        assert (
+            result["success"] is False
+        ), "rocq_compile must not report success when coqc exits with code 1"
+        assert (
+            "map_trmx" in result["error"]
+        ), "Error content must be preserved, not lost to warning truncation"
 
     def test_genuine_pure_warnings_still_succeed(self, workspace, monkeypatch):
         """When returncode == 0, warnings-only stderr is still success."""
         from rocq_mcp import server
 
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(
                 'File "/tmp/tmp.v", line 1, characters 0-10:\nWarning: Deprecated.\n',
                 returncode=0,
@@ -238,7 +240,8 @@ class TestCompileWarningsTruncation:
         from rocq_mcp import server
 
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(""),
         )
 
@@ -251,7 +254,8 @@ class TestCompileWarningsTruncation:
         from rocq_mcp import server
 
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result("   \n\n  "),
         )
 
@@ -266,7 +270,8 @@ class TestCompileWarningsTruncation:
 
         warnings = self._big_warnings()
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(warnings),
         )
 
@@ -288,12 +293,15 @@ class TestCompileWarningsTruncation:
             "Error: Tactic failure: Cannot find witness.\n"
         )
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(warn + error),
         )
 
         result = rocq_compile(
-            source="x", workspace=str(workspace), include_warnings=False,
+            source="x",
+            workspace=str(workspace),
+            include_warnings=False,
         )
         assert result["success"] is False
         assert "Tactic failure" in result["error"]
@@ -310,11 +318,11 @@ class TestCompileWarningsTruncation:
             for i in range(50)
         )
         error = (
-            'File "/tmp/tmp.v", line 99, characters 0-10:\n'
-            "Error: Real error here.\n"
+            'File "/tmp/tmp.v", line 99, characters 0-10:\n' "Error: Real error here.\n"
         )
         monkeypatch.setattr(
-            server, "_run_coqc",
+            server,
+            "_run_coqc",
             lambda *a, **kw: self._make_fake_result(warnings + error),
         )
 

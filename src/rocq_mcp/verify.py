@@ -458,8 +458,12 @@ def build_shared_defs_verification_source(
     # 4. Theorem re-statement and apply
     parts.append(clean_theorem)
     parts.append("Proof.")
-    parts.append(f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.")
-    parts.append("all: first [ eassumption | assumption | reflexivity | congruence | auto | easy | simpl; auto ].")
+    parts.append(
+        f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}."
+    )
+    parts.append(
+        "all: first [ eassumption | assumption | reflexivity | congruence | auto | easy | simpl; auto ]."
+    )
     parts.append("Qed.")
     parts.append("")
 

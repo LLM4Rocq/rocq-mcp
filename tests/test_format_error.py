@@ -124,8 +124,7 @@ class TestFormatError:
             "Warning: Notation Nat.mul_mod is deprecated.\n"
         )
         error = (
-            'File "/tmp/tmp.v", line 4, characters 0-10:\n'
-            "Error: Tactic failure.\n"
+            'File "/tmp/tmp.v", line 4, characters 0-10:\n' "Error: Tactic failure.\n"
         )
         stderr = warn * 3 + error
         result = _format_error(stderr, proof)
@@ -137,17 +136,12 @@ class TestFormatError:
         """Different warnings before an error should all be kept."""
         proof = "line 0\nline 1\nline 2\nline 3\n"
         warn_a = (
-            'File "/tmp/tmp.v", line 1, characters 0-5:\n'
-            "Warning: Deprecated A.\n"
+            'File "/tmp/tmp.v", line 1, characters 0-5:\n' "Warning: Deprecated A.\n"
         )
         warn_b = (
-            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
-            "Warning: Deprecated B.\n"
+            'File "/tmp/tmp.v", line 2, characters 0-5:\n' "Warning: Deprecated B.\n"
         )
-        error = (
-            'File "/tmp/tmp.v", line 3, characters 0-5:\n'
-            "Error: Real error.\n"
-        )
+        error = 'File "/tmp/tmp.v", line 3, characters 0-5:\n' "Error: Real error.\n"
         result = _format_error(warn_a + warn_b + error, proof)
         assert "Deprecated A" in result
         assert "Deprecated B" in result
@@ -204,8 +198,7 @@ class TestFormatError:
             for i in range(10)
         )
         error = (
-            'File "/tmp/tmp.v", line 15, characters 0-5:\n'
-            "Error: The actual error.\n"
+            'File "/tmp/tmp.v", line 15, characters 0-5:\n' "Error: The actual error.\n"
         )
         result = _format_error(warnings + error, proof)
         assert "The actual error" in result

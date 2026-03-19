@@ -105,6 +105,17 @@ class TestRocqCommentRanges:
         """Multiple strings inside one comment."""
         assert _rocq_comment_ranges('(* "a" and "b" *)') == [(0, 17)]
 
+    def test_empty_input(self):
+        assert _rocq_comment_ranges("") == []
+
+    def test_adjacent_comments(self):
+        """Adjacent comments (* a *)(* b *) are reported as one merged range."""
+        assert _rocq_comment_ranges("(* a *)(* b *)") == [(0, 14)]
+
+    def test_comment_at_end_with_leading_code(self):
+        """Comment at end of text with preceding code exercises the end-of-text path."""
+        assert _rocq_comment_ranges("x (* a *)") == [(2, 9)]
+
 
 # ---------------------------------------------------------------------------
 # _find_sentence_end

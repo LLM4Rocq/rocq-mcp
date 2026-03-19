@@ -1164,6 +1164,8 @@ class TestVerifyInputSanitization:
         # Comment replaced with space(s), not removed — words stay separate
         assert "Loadbar" not in stripped
         assert "Load" in stripped and "bar" in stripped
+        # No stray delimiter characters in output
+        assert "*" not in stripped
 
     def test_strip_desync_exploit_direct(self):
         """Direct test: desync exploit makes End M. visible after stripping."""
@@ -1192,6 +1194,16 @@ class TestVerifyInputSanitization:
         assert "visible" in stripped
         assert "and" not in stripped
 
+    def test_strip_no_stray_delimiter_chars(self):
+        """Closing *) must not leave a stray * in the output."""
+        from rocq_mcp.verify import _strip_rocq_comments
+
+        # Comment replaced with a space; no stray * or ) in output
+        assert _strip_rocq_comments("(* comment *)") == " "
+        assert _strip_rocq_comments("a(* x *)b") == "a  b"
+        assert _strip_rocq_comments("(* (* nested *) *)") == " "
+        assert _strip_rocq_comments("x (* a *) y (* b *) z") == "x    y    z"
+
     def test_scanners_agree_on_comment_ranges(self):
         """Cross-validate _rocq_scan (via _rocq_comment_ranges) and _strip_rocq_comments."""
         from rocq_mcp.verify import _rocq_scan, _strip_rocq_comments
@@ -1205,6 +1217,8 @@ class TestVerifyInputSanitization:
             '(* "a" and "b" *) z.',
             "normal code. (* comment *) more.",
             "(* (* nested *) *) after.",
+            "(* a *)(* b *)",
+            "x (* end *)",
         ]
         for text in cases:
             ranges = _rocq_comment_ranges(text)
@@ -1219,16 +1233,39 @@ class TestVerifyInputSanitization:
                 if in_comment:
                     scan_comment_chars.add(idx)
 
+            # The scanner skips the second char of two-char tokens (*, ))
+            # so scan positions are a subset of range positions.  Every
+            # scan-comment position must be inside a range, and every
+            # range position must either be a scan-comment position or
+            # the skipped second char of a two-char delimiter.
+            assert scan_comment_chars <= in_comment_positions, (
+                f"Scanner has comment positions outside ranges for: {text!r}\n"
+                f"  scan only: {scan_comment_chars - in_comment_positions}"
+            )
+            extra = in_comment_positions - scan_comment_chars
+            for pos in extra:
+                # Each extra position must be the skipped second char
+                # of a two-char token: (*, *), or "" (escaped quote)
+                assert pos > 0 and (text[pos - 1 : pos + 1] in ("(*", "*)", '""')), (
+                    f"Range position {pos} is not a skipped delimiter char "
+                    f"for: {text!r}"
+                )
+
             # _strip_rocq_comments should produce only non-comment chars
             stripped = _strip_rocq_comments(text)
-            # Non-comment, non-space characters in stripped should all be
-            # outside comment ranges
-            for idx, _ch, in_comment, _in_str in _rocq_scan(text):
-                if not in_comment:
-                    assert _ch in stripped or _ch in "()*", (
-                        f"Non-comment char {_ch!r} at {idx} missing from "
-                        f"stripped output for: {text!r}"
-                    )
+            # Collect non-comment chars from the scan in order
+            expected_chars = [
+                ch for _, ch, in_comment, _ in _rocq_scan(text) if not in_comment
+            ]
+            # Stripped output (ignoring replacement spaces) must contain
+            # exactly the non-comment characters in order
+            stripped_chars = [c for c in stripped if c != " "]
+            expected_non_space = [c for c in expected_chars if c != " "]
+            assert stripped_chars == expected_non_space, (
+                f"Stripped output has wrong characters for: {text!r}\n"
+                f"  expected: {expected_non_space}\n"
+                f"  got:      {stripped_chars}"
+            )
 
 
 # =========================================================================

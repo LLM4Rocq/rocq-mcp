@@ -892,20 +892,47 @@ def _rocq_comment_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     comment_start: int | None = None
     prev_in_comment = False
-    for idx, _ch, in_comment, _in_str in _rocq_scan(text):
+    closing_end: int | None = None
+    depth = 0
+    for idx, ch, in_comment, _in_str in _rocq_scan(text):
         if in_comment and not prev_in_comment:
             comment_start = idx
+            closing_end = None
+            depth = 1
         elif not in_comment and prev_in_comment and comment_start is not None:
-            # idx is the position right after the closing *)
-            # The scan yields the '*' of '*)' with in_comment still True
-            # (depth was > 0 before decrement) -- actually depth > 0 is checked
-            # AFTER decrement.  The closing '*' yields in_comment = (depth > 0).
-            # So when depth goes 1→0, the '*' yields in_comment=False.
-            # That means we enter the 'not in_comment' branch here at the '*'.
-            # The range should end at idx + 2 (covering both * and )).
-            ranges.append((comment_start, idx + 2))
+            # The '*' of '*)' is yielded with in_comment=True, and the
+            # scanner skips past both chars (i += 2).  So idx here is the
+            # first character AFTER the closing ')'.
+            ranges.append((comment_start, idx))
             comment_start = None
+            closing_end = None
+            depth = 0
+        elif in_comment and prev_in_comment and not _in_str:
+            # Track nesting depth for nested (* ... *) inside a comment.
+            # Skip depth changes for (* / *) inside string literals within
+            # a comment, matching the scanner's behavior.
+            if ch == "(" and idx + 1 < len(text) and text[idx + 1] == "*":
+                depth += 1
+            elif ch == "*" and idx + 1 < len(text) and text[idx + 1] == ")":
+                depth -= 1
+        # Track position of closing *) for end-of-text handling, but ONLY
+        # when the *) actually closes the outermost comment (depth -> 0).
+        # For nested comments, an inner *) reduces depth but should not
+        # set closing_end since the outer comment is still open.
+        if (
+            in_comment
+            and not _in_str
+            and ch == "*"
+            and idx + 1 < len(text)
+            and text[idx + 1] == ")"
+            and depth == 0
+        ):
+            closing_end = idx + 2
         prev_in_comment = in_comment
+    # Comment that closes at the very end of text — no subsequent char
+    # triggers the transition above.
+    if prev_in_comment and comment_start is not None and closing_end is not None:
+        ranges.append((comment_start, closing_end))
     return ranges
 
 

@@ -245,7 +245,7 @@ def _rocq_scan(text: str):
                 yield i, ch, True, True
             elif ch == "*" and i + 1 < length and text[i + 1] == ")":
                 depth -= 1
-                yield i, ch, depth > 0, False  # closing *)
+                yield i, ch, True, False  # closing *) – still part of comment
                 i += 2
                 continue
             elif ch == "(" and i + 1 < length and text[i + 1] == "*":

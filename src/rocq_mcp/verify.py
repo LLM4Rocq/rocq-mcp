@@ -95,6 +95,67 @@ _DEF_KEYWORDS_RE_STR = "|".join(
 )
 
 
+def _neutralize_for_regex(text: str) -> str:
+    """Replace comment and string interiors with spaces, preserving text length.
+
+    Comment delimiters ``(* ... *)`` and their contents become spaces.
+    String interiors (between ``"..."``) become spaces but the quote
+    delimiters are preserved outside comments.  This lets regex patterns
+    match on the neutralized text with spans that map 1:1 back to the
+    original.
+    """
+    result = list(text)
+    depth = 0
+    in_str = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    # Escaped quote inside string — blank both
+                    result[i] = " "
+                    result[i + 1] = " "
+                    i += 2
+                    continue
+                # Closing quote
+                in_str = False
+                if depth > 0:
+                    result[i] = " "
+            else:
+                result[i] = " "
+        elif depth > 0:
+            if ch == '"':
+                in_str = True
+                result[i] = " "
+            elif ch == "(" and i + 1 < n and text[i + 1] == "*":
+                depth += 1
+                result[i] = " "
+                result[i + 1] = " "
+                i += 2
+                continue
+            elif ch == "*" and i + 1 < n and text[i + 1] == ")":
+                depth -= 1
+                result[i] = " "
+                result[i + 1] = " "
+                i += 2
+                continue
+            else:
+                result[i] = " "
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "(" and i + 1 < n and text[i + 1] == "*":
+                depth += 1
+                result[i] = " "
+                result[i + 1] = " "
+                i += 2
+                continue
+        i += 1
+    return "".join(result)
+
+
 def _strip_shared_defs(proof: str, shared_names: set[str]) -> str:
     """Remove definition blocks from proof whose names match shared_names.
 
@@ -107,10 +168,20 @@ def _strip_shared_defs(proof: str, shared_names: set[str]) -> str:
     string, matching Rocq's lexical convention.  Dots inside qualified
     names (e.g., ``Nat.add``) are not followed by whitespace and are
     correctly skipped.
+
+    Comments and strings are neutralized (replaced with spaces) before
+    regex matching so that definition keywords and dots inside them
+    do not confuse the sentence boundary detection.  Match spans are
+    mapped back to the original text, preserving comments in the output.
     """
     if not shared_names:
         return proof
-    result = proof
+    # Neutralize comments and strings for safe regex matching.
+    # The neutralized text has the same length as the original,
+    # so match spans map directly back.
+    neutralized = _neutralize_for_regex(proof)
+    # Collect all spans to remove (from ALL names).
+    spans: list[tuple[int, int]] = []
     for name in sorted(shared_names):  # sorted for determinism
         if not name:
             continue
@@ -122,10 +193,25 @@ def _strip_shared_defs(proof: str, shared_names: set[str]) -> str:
             rf"(?ms)^[ \t]*(?:{_DEF_KEYWORDS_RE_STR})\s+{re.escape(name)}\b"
             rf".*?\.(?=\s|$)[ \t]*\n?"
         )
-        # Strip ALL occurrences (count=0), not just the first. Using count=1
-        # would allow an adversary to hide a decoy definition (e.g. in a
-        # comment-like context) to protect their real redefinition from stripping.
-        result = re.sub(pattern, "", result, count=0)
+        # Find ALL occurrences (not just first). Using only the first match
+        # would allow an adversary to hide a decoy definition to protect
+        # their real redefinition from stripping.
+        for m in re.finditer(pattern, neutralized):
+            spans.append((m.start(), m.end()))
+    # Merge overlapping/contained spans to avoid corruption when a
+    # definition body textually contains another definition pattern.
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            # Overlapping or contained — extend the previous span.
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    # Apply in reverse order so removals don't shift earlier offsets.
+    result = proof
+    for start, end in reversed(merged):
+        result = result[:start] + result[end:]
     return result
 
 
@@ -288,17 +374,33 @@ def _strip_rocq_comments(text: str) -> str:
     return "".join(result)
 
 
+def _strip_rocq_strings(text: str) -> str:
+    """Replace the contents of string literals with spaces.
+
+    Preserves string delimiters but blanks interior characters so that
+    forbidden-command patterns do not match inside strings.
+    """
+    result: list[str] = []
+    for _idx, ch, _in_comment, in_str in _rocq_scan(text):
+        if in_str and ch != '"':
+            result.append(" ")
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
 def _check_forbidden_commands(source: str) -> str | None:
     """Check for dangerous Rocq commands in the source text.
 
-    Comments are stripped before scanning so that forbidden keywords
-    inside ``(* ... *)`` do not trigger false positives, and attackers
-    cannot hide commands inside comment-like constructs.
+    Uses :func:`_neutralize_for_regex` to blank comment and string
+    interiors in a single pass, avoiding desync issues that can occur
+    with separate strip-comments / strip-strings passes (e.g. ``""``
+    escape sequences shifting quote boundaries between passes).
 
     Returns an error message string if a forbidden command is found,
     or None if the source is clean.
     """
-    stripped = _strip_rocq_comments(source)
+    stripped = _neutralize_for_regex(source)
     for pattern, message in _FORBIDDEN_PATTERNS:
         if re.search(pattern, stripped):
             return message
@@ -338,6 +440,11 @@ def build_verification_source(
     if forbidden:
         raise ValueError(forbidden)
 
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", problem_name):
+        raise ValueError(
+            f"problem_name must be a valid Rocq identifier. Got: {problem_name!r}"
+        )
+
     clean_statement = _clean_problem_statement(problem_statement)
 
     return (
@@ -369,7 +476,7 @@ def _clean_problem_statement(problem_statement: str) -> str:
         "",
         problem_statement,
     )
-    result = re.sub(r"\s*Proof\s*\.\s*$", "", result)
+    result = re.sub(r"\s*Proof\s*(?:(?:using|with)\b.*)?\.\s*$", "", result)
     return result.strip()
 
 
@@ -411,6 +518,11 @@ def build_shared_defs_verification_source(
     forbidden = _check_forbidden_commands(structure.full_source)
     if forbidden:
         raise ValueError(forbidden)
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", problem_name):
+        raise ValueError(
+            f"problem_name must be a valid Rocq identifier. Got: {problem_name!r}"
+        )
 
     clean_theorem = _clean_problem_statement(structure.theorem_source)
 
@@ -646,8 +758,35 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
 
     Or:
         Closed under the global context
+
+    IMPORTANT: parses from the LAST ``Print Assumptions`` output block
+    in stdout.  This prevents a proof inside Module M from injecting
+    ``Print Assumptions clean_lemma.`` whose output (``Closed under the
+    global context``) would otherwise shadow the template's real output.
+    The template's ``Print Assumptions`` is always the last one because
+    it appears after ``End M.``
     """
     lines = stdout.split("\n")
+
+    # --- Find the LAST Print Assumptions output marker ---
+    # Markers are "Closed under the global context" or "Axioms:".
+    # We parse from the last marker to ignore any injected output from
+    # commands inside Module M.
+    last_marker_idx = None
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s == "Closed under the global context":
+            last_marker_idx = i
+        elif s == "Axioms:" or s.startswith("Axioms:"):
+            last_marker_idx = i
+
+    if last_marker_idx is not None:
+        # Check if the last marker is "Closed under the global context"
+        if lines[last_marker_idx].strip() == "Closed under the global context":
+            return []
+        # Otherwise it's "Axioms:" — parse from there
+        lines = lines[last_marker_idx:]
+
     assumptions: list[tuple[str, str]] = []
     current_name: str | None = None
     current_type_parts: list[str] = []

@@ -724,10 +724,16 @@ class TestAutoSolveUnsolvable:
             "Admitted.\n"
         )
         result = rocq_auto_solve(problem=problem, workspace=str(workspace))
-        # Note: with `auto` hint database this *might* succeed in some
-        # Coq versions. If it fails, verify error is sensible.
-        if not result["solved"]:
+        # Note: with `auto` hint database or lia this *might* succeed in
+        # some Coq versions. Either outcome is valid, but the result must
+        # be well-formed.
+        if result["solved"]:
+            assert "tactic" in result
+            assert isinstance(result["tactic"], str)
+        else:
             assert "error" in result
+            assert isinstance(result["error"], str)
+            assert len(result["error"]) > 0
 
     def test_custom_fixpoint(self, workspace):
         """Custom recursive definition needs manual proof."""

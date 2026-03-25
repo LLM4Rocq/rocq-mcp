@@ -409,6 +409,11 @@ def _extract_source_range(
     end_char: int,
 ) -> str:
     """Extract source text from lines using 0-based line/character positions."""
+    if start_line < 0 or end_line >= len(lines) or start_line > end_line:
+        raise IndexError(
+            f"Invalid range: lines {start_line}-{end_line} "
+            f"(file has {len(lines)} lines)"
+        )
     if start_line == end_line:
         return lines[start_line][start_char:end_char]
     parts: list[str] = []
@@ -417,23 +422,6 @@ def _extract_source_range(
         parts.append(lines[i])
     parts.append(lines[end_line][:end_char])
     return "\n".join(parts)
-
-
-# Definition keywords for Phase 2 gate check.  Based on _SHARED_DEF_DETAILS
-# from verify.py, plus "Let" which is a valid definition keyword in problem
-# statements even though it is not a shared-def detail for toc classification.
-_DEF_KEYWORDS: set[str] = _SHARED_DEF_DETAILS | {"Let"}
-
-_DEF_KEYWORD_RE = re.compile(
-    r"\b("
-    + "|".join(re.escape(k) for k in sorted(_DEF_KEYWORDS, key=len, reverse=True))
-    + r")\b"
-)
-
-
-def _has_definition_keywords(text: str) -> bool:
-    """Quick regex check for Inductive/Record/Definition/Fixpoint etc. in text."""
-    return bool(_DEF_KEYWORD_RE.search(text))
 
 
 def _flatten_toc_elements(elements: list[Any]) -> list[Any]:
@@ -509,7 +497,7 @@ async def _extract_problem_structure(
 
     Returns None if pet is not available or toc fails.
     """
-    lines = problem_statement.split("\n")
+    lines = problem_statement.splitlines()
     _temp_files: list[str] = []
 
     def _do_toc(pet: Any) -> ProblemStructure | None:
@@ -591,9 +579,19 @@ async def _extract_problem_structure(
                     )
                 )
 
-        # Extract preamble: everything before the first reported definition
-        if first_def_line is not None and first_def_line > 0:
-            preamble_source = "\n".join(lines[:first_def_line])
+        # Extract preamble: everything before the first definition or theorem.
+        # This captures Require Import / Open Scope lines that must be placed
+        # outside Module M in Phase 2.
+        first_significant_line = first_def_line
+        if first_significant_line is None and theorem_source:
+            # No shared defs — use the theorem line as the boundary
+            for elem in deduped_elements:
+                cat = classify_toc_detail(elem.detail)
+                if cat == DefCategory.THEOREM and elem.range:
+                    first_significant_line = elem.range.start.line
+                    break
+        if first_significant_line is not None and first_significant_line > 0:
+            preamble_source = "\n".join(lines[:first_significant_line])
         else:
             preamble_source = ""
 
@@ -782,7 +780,7 @@ async def rocq_verify(
     # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
     phase1_stderr = result["stderr"]
     phase1_error = _format_error(
-        phase1_stderr, proof, include_warnings=include_warnings
+        phase1_stderr, verification_source, include_warnings=include_warnings
     )
     if not phase1_error:
         # No Error diagnostic parsed (e.g. voluminous warnings hid it).
@@ -802,11 +800,9 @@ async def rocq_verify(
     }
 
     # Phase 2 condition: problem statement contains definition keywords
-    # (Inductive, Record, etc.) that may cause type incompatibility across
-    # the Module M boundary.  Phase 2 is safe to attempt speculatively:
+    # (Inductive, Record, etc.) or Require/Import statements that may cause
+    # issues inside Module M.  Phase 2 is safe to attempt speculatively:
     # it either succeeds (correct) or fails (we return the Phase 1 error).
-    if not _has_definition_keywords(problem_statement):
-        return phase1_failure
 
     # --- Phase 2: Shared-defs template via pytanque toc ---
     lifespan_state = ctx.lifespan_context if ctx else None
@@ -818,8 +814,12 @@ async def rocq_verify(
         problem_statement, problem_name, workspace, lifespan_state
     )
 
-    if structure is None or not structure.has_shared_defs:
-        # Could not extract structure or no shared defs found — return Phase 1 error
+    if structure is None:
+        # Could not extract structure — return Phase 1 error
+        return phase1_failure
+
+    if not structure.has_shared_defs and not structure.preamble_source.strip():
+        # No shared defs and no preamble to extract — Phase 2 won't help
         return phase1_failure
 
     try:
@@ -1310,8 +1310,8 @@ def _kill_pet(pet: Any) -> None:
             else:
                 pet.process.kill()
             pet.process.wait(timeout=3)
-    except (OSError, ChildProcessError):
-        # Process already dead or group doesn't exist
+    except (OSError, ChildProcessError, subprocess.TimeoutExpired):
+        # Process already dead, group doesn't exist, or refused to die
         pass
     # Close pipe file descriptors
     _try_close_pet(pet)
@@ -1319,7 +1319,7 @@ def _kill_pet(pet: Any) -> None:
 
 def _try_close_pet(pet: Any) -> None:
     """Close pytanque's pipe file descriptors without killing."""
-    if pet.process is None:
+    if pet is None or pet.process is None:
         return
     for stream in [pet.process.stdin, pet.process.stdout, pet.process.stderr]:
         try:
@@ -1337,6 +1337,12 @@ def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
     to call without the lock (it's a signal, not a protocol operation).
     The next _ensure_pet call (under _pet_lock) will see the dead process
     and respawn.
+
+    Note: there is a brief race window where a concurrent _ensure_pet
+    call may have already read pet_client before this function sets it
+    to None.  The stale pet object will fail with a broken-pipe error,
+    which is caught by the caller's broad exception handler and triggers
+    a respawn on the next call.
     """
     pet = lifespan_state.get("pet_client")
     if pet:
@@ -1440,10 +1446,16 @@ async def rocq_query(
                   (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
     """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
     return await run_query(
         command=command,
         preamble=preamble,
-        workspace=workspace or ROCQ_WORKSPACE,
+        workspace=workspace,
         lifespan_state=ctx.lifespan_context,
     )
 
@@ -1707,7 +1719,19 @@ def _compute_hard_timeout(soft_timeout: float) -> float:
 # Tool: rocq_step (Phase 2)
 # ---------------------------------------------------------------------------
 
-# Session state (single-client stdio model)
+# Session state (single-client stdio model).
+#
+# THREAD SAFETY NOTE: _session is mutated from both the async event loop
+# (timeout handler at line ~1949) and background threads (via _execute()
+# inside asyncio.to_thread).  After a timeout, there is a logical race
+# where the orphaned thread may write to _session["state"] after the
+# timeout handler has reset it.  This is mitigated by:
+# 1. CPython's GIL ensures dict operations are atomic at the C level.
+# 2. _ensure_pet checks process liveness before using the pet object.
+# 3. The server is single-client (stdio), so concurrent requests don't occur.
+# A proper fix would use a threading.Lock around all _session mutations,
+# but the current architecture makes this infeasible without significant
+# refactoring (the orphaned thread holds _pet_lock indefinitely).
 _session: dict[str, Any] = {
     "state": None,
     "file": None,
@@ -1852,7 +1876,7 @@ async def run_step(
     # Normalize tactic before _execute so both inner and outer scope
     # can reference the same normalized form for timeout eligibility.
     tac = tactic.strip()
-    if not tac.endswith("."):
+    if tac not in ("{", "}") and not tac.endswith("."):
         tac += "."
 
     # Two-tier timeout: if the tactic is eligible for Rocq's Timeout
@@ -2030,11 +2054,17 @@ async def rocq_step(
         line: 0-based line number for position-based session start.
         character: 0-based character offset for position-based session start.
     """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
     return await run_step(
         tactic=tactic,
         file=file,
         theorem=theorem,
-        workspace=workspace or ROCQ_WORKSPACE,
+        workspace=workspace,
         lifespan_state=ctx.lifespan_context,
         line=line,
         character=character,
@@ -2106,7 +2136,7 @@ async def run_step_multi(
 
                 for tactic in tactics:
                     tac = tactic.strip()
-                    if not tac.endswith("."):
+                    if tac not in ("{", "}") and not tac.endswith("."):
                         tac += "."
 
                     # Per-tactic Rocq-level timeout for eligible tactics

@@ -43,14 +43,15 @@ class TestCompileVerifyWorkflow:
     async def test_compile_then_verify_cheat(
         self, workspace, cheating_proof, simple_problem_statement
     ):
-        """Compile may succeed but verify catches the type-redefinition cheat."""
+        """Cheat is rejected: either compilation fails or verify catches it."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
         compile_result = rocq_compile(source=cheating_proof, workspace=str(workspace))
-        # The cheat may or may not compile (depends on exact Rocq version)
-        # The critical assertion is that verify rejects it.
+        # The cheat may or may not compile (depends on exact Rocq version).
+        # If compilation already rejects it, the cheat is caught — test passes.
         if not compile_result["success"]:
-            pytest.skip("cheating proof did not compile on this Rocq version")
+            return
+        # If it compiles, verify must catch it.
         verify_result = await rocq_verify(
             proof=cheating_proof,
             problem_name="add_0_r",
@@ -104,12 +105,11 @@ class TestCompileVerifyWorkflow:
     async def test_admitted_proof_rejected_end_to_end(
         self, workspace, admitted_proof, simple_problem_statement
     ):
-        """Proof with an Admitted helper: compile may pass, verify must reject."""
+        """Proof with an Admitted helper: compile passes, verify must reject."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
         compile_result = rocq_compile(source=admitted_proof, workspace=str(workspace))
-        if not compile_result["success"]:
-            pytest.skip("admitted proof did not compile on this Rocq version")
+        assert compile_result["success"] is True
         verify_result = await rocq_verify(
             proof=admitted_proof,
             problem_name="add_0_r",
@@ -117,6 +117,80 @@ class TestCompileVerifyWorkflow:
             workspace=str(workspace),
         )
         assert verify_result["verified"] is False
+
+    async def test_print_assumptions_injection_rejected(self, workspace):
+        """CRITICAL: Print Assumptions stdout injection must not bypass verification.
+
+        The proof injects ``Print Assumptions clean.`` inside Module M,
+        producing ``Closed under the global context`` on stdout before the
+        template's real ``Print Assumptions`` output.  The parser must use
+        the LAST output block and correctly detect the Admitted helper.
+        """
+        from rocq_mcp.server import rocq_compile, rocq_verify
+
+        injection_proof = (
+            "From Coq Require Import Arith.\n\n"
+            "Lemma helper : forall n : nat, n + 0 = n. Admitted.\n"
+            "Lemma clean : True. Proof. exact I. Qed.\n"
+            "Print Assumptions clean.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Proof.\n"
+            "  intros n. apply helper.\n"
+            "Qed.\n"
+        )
+        problem = (
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Admitted.\n"
+        )
+        compile_result = rocq_compile(
+            source=injection_proof, workspace=str(workspace)
+        )
+        assert compile_result["success"] is True
+
+        verify_result = await rocq_verify(
+            proof=injection_proof,
+            problem_name="add_0_r",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert verify_result["verified"] is False, (
+            "Print Assumptions stdout injection bypassed verification! "
+            f"Result: {verify_result}"
+        )
+
+    def test_compile_rejects_forbidden_redirect(self, workspace):
+        """rocq_compile must reject source containing Redirect."""
+        from rocq_mcp.server import rocq_compile
+
+        result = rocq_compile(
+            source='Redirect "/tmp/evil" Print nat.\nTheorem t : True. Proof. exact I. Qed.',
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert "forbidden" in result["error"].lower()
+
+    def test_compile_rejects_forbidden_load(self, workspace):
+        """rocq_compile must reject source containing Load."""
+        from rocq_mcp.server import rocq_compile
+
+        result = rocq_compile(
+            source='Load "evil".\nTheorem t : True. Proof. exact I. Qed.',
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert "forbidden" in result["error"].lower()
+
+    def test_compile_rejects_forbidden_drop(self, workspace):
+        """rocq_compile must reject source containing Drop."""
+        from rocq_mcp.server import rocq_compile
+
+        result = rocq_compile(
+            source="Drop.\nTheorem t : True. Proof. exact I. Qed.",
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert "forbidden" in result["error"].lower()
 
     async def test_no_artifacts_after_workflow(
         self, workspace, simple_proof, simple_problem_statement
@@ -290,6 +364,49 @@ class TestSharedDefsVerifyWorkflow:
         )
 
         assert result["verified"] is False
+
+    async def test_phase2_with_require_import_no_defs(
+        self, lifespan_state, workspace
+    ):
+        """Require Import Znumtheory without Inductive/Def triggers Phase 2.
+
+        Znumtheory's Require inside Module M is fragile and may cause
+        failures on some Rocq versions.  Phase 2 extracts the preamble
+        outside Module M, making verification succeed.
+        """
+        from rocq_mcp.server import rocq_verify
+
+        problem = (
+            "Require Import Nat.\n"
+            "Require Import ZArith.\n"
+            "From Coq Require Import Znumtheory.\n"
+            "Require Import Lia.\n"
+            "Open Scope Z_scope.\n\n"
+            "Theorem simple_z : forall n : Z,\n"
+            "  (0 <= n)%Z -> (0 <= n)%Z.\n"
+            "Admitted.\n"
+        )
+        proof = (
+            "Require Import Nat.\n"
+            "Require Import ZArith.\n"
+            "From Coq Require Import Znumtheory.\n"
+            "Require Import Lia.\n"
+            "Open Scope Z_scope.\n\n"
+            "Theorem simple_z : forall n : Z,\n"
+            "  (0 <= n)%Z -> (0 <= n)%Z.\n"
+            "Proof. auto. Qed.\n"
+        )
+
+        ctx = _MockContext(lifespan_state)
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="simple_z",
+            problem_statement=problem,
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+
+        assert result["verified"] is True
 
 
 # =========================================================================

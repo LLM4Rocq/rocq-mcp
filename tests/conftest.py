@@ -113,7 +113,7 @@ def admitted_proof():
     """A proof with Admitted inside (helper lemma admitted, not fully proved)."""
     return (
         "From Coq Require Import Arith.\n\n"
-        "Lemma helper : forall n, n = n. Admitted.\n\n"
+        "Lemma helper : forall n : nat, n + 0 = n. Admitted.\n\n"
         "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
         "Proof.\n"
         "  intros n. apply helper.\n"

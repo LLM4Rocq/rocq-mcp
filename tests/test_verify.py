@@ -5,12 +5,12 @@ Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestAxiomClassification
     - TestParseAssumptions
     - TestBuildVerificationSource
-    - TestGateFunctions
     - TestClassifyTocDetail
     - TestVerificationHint
     - TestStripSharedDefs
     - TestBuildSharedDefsVerificationSource
     - TestVerifyInputSanitization
+    - TestCheckForbiddenCommands
 
 Part B: Integration tests for rocq_verify (require coqc)
     - TestVerifySuccess
@@ -28,6 +28,7 @@ import pytest
 
 from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.verify import (
+    _check_forbidden_commands,
     _clean_problem_statement,
     _is_standard_axiom,
     _axiom_short_name,
@@ -104,6 +105,46 @@ class TestCleanProblemStatement:
         """Stripping 'Proof.\\nAdmitted.' must also strip trailing Proof."""
         cleaned = _clean_problem_statement("Theorem t : True.\nProof.\nAdmitted.")
         assert not cleaned.endswith("Proof.")
+        assert "Theorem t : True." in cleaned
+
+    def test_proof_using_stripped(self):
+        """'Proof using vars. Admitted.' must strip both Admitted and Proof using."""
+        cleaned = _clean_problem_statement(
+            "Theorem t : True.\nProof using x y.\nAdmitted."
+        )
+        assert "Proof" not in cleaned
+        assert "Theorem t : True." in cleaned
+
+    def test_proof_with_stripped(self):
+        """'Proof with tactic. Admitted.' must strip both Admitted and Proof with."""
+        cleaned = _clean_problem_statement(
+            "Theorem t : True.\nProof with auto.\nAdmitted."
+        )
+        assert "Proof" not in cleaned
+        assert "Theorem t : True." in cleaned
+
+    def test_proof_using_multiple_vars(self):
+        """'Proof using a b c.' must be fully stripped."""
+        cleaned = _clean_problem_statement(
+            "Theorem t : True.\nProof using a b c.\nAdmitted."
+        )
+        assert "Proof" not in cleaned
+        assert "Theorem t : True." in cleaned
+
+    def test_proof_using_qualified_name(self):
+        """Proof using with qualified names (dots) must be fully stripped."""
+        cleaned = _clean_problem_statement(
+            "Theorem t : True.\nProof using Nat.add.\nAdmitted."
+        )
+        assert "Proof" not in cleaned
+        assert "Theorem t : True." in cleaned
+
+    def test_proof_with_qualified_name(self):
+        """Proof with tactic containing dots must be fully stripped."""
+        cleaned = _clean_problem_statement(
+            "Theorem t : True.\nProof with Nat.add_comm.\nAdmitted."
+        )
+        assert "Proof" not in cleaned
         assert "Theorem t : True." in cleaned
 
 
@@ -341,6 +382,53 @@ class TestParseAssumptions:
         assert len(result) == 1
         assert result[0][0] == "cheat"
 
+    def test_injected_closed_before_real_axioms(self):
+        """CRITICAL: injected 'Closed under the global context' before real axioms.
+
+        An adversary can inject ``Print Assumptions clean_lemma.`` inside
+        Module M, producing 'Closed under the global context' on stdout
+        before the template's real Print Assumptions output that shows
+        suspicious axioms.  The parser must use the LAST output block.
+        """
+        stdout = (
+            "Closed under the global context\n"
+            "Axioms:\n"
+            "M.helper : forall n : nat, n + 0 = n\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        assert len(result) == 1
+        assert result[0][0] == "M.helper"
+
+    def test_injected_closed_before_real_closed(self):
+        """Multiple 'Closed' lines: last one wins (still closed)."""
+        stdout = (
+            "Closed under the global context\n"
+            "Closed under the global context\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        assert result == []
+
+    def test_injected_axioms_before_real_closed(self):
+        """Injected Axioms block before real 'Closed': last block wins."""
+        stdout = (
+            "Axioms:\n"
+            "M.fake : False\n"
+            "Closed under the global context\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        assert result == []
+
+    def test_classify_injected_closed_before_suspicious(self):
+        """Higher-level: injected Closed before suspicious axioms must be suspicious."""
+        stdout = (
+            "Closed under the global context\n"
+            "Axioms:\n"
+            "M.cheat : False\n"
+        )
+        verdict, details = parse_and_classify_assumptions(stdout)
+        assert verdict == "suspicious"
+        assert "M.cheat" in details["suspicious_names"]
+
     # --- parse_and_classify_assumptions (higher-level) ---
 
     def test_classify_closed(self):
@@ -450,41 +538,22 @@ class TestBuildVerificationSource:
         )
         assert "{ apply Nat.add_comm. }" in source
 
+    def test_rejects_invalid_problem_name(self):
+        """problem_name with newlines or special chars must be rejected."""
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="foo.\nAxiom cheat : False.\nPrint Assumptions",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
-# ---------------------------------------------------------------------------
-# Gate functions (_has_definition_keywords)
-# ---------------------------------------------------------------------------
-
-
-class TestGateFunctions:
-    """Test the gate functions that decide Phase 2 fallback eligibility."""
-
-    def test_has_definition_keywords_inductive(self):
-        from rocq_mcp.server import _has_definition_keywords
-
-        assert _has_definition_keywords("Inductive color := Red.")
-
-    def test_has_definition_keywords_coinductive(self):
-        from rocq_mcp.server import _has_definition_keywords
-
-        assert _has_definition_keywords(
-            "CoInductive stream := Cons : nat -> stream -> stream."
-        )
-
-    def test_has_definition_keywords_record(self):
-        from rocq_mcp.server import _has_definition_keywords
-
-        assert _has_definition_keywords("Record point := { x : nat; y : nat }.")
-
-    def test_has_definition_keywords_fixpoint(self):
-        from rocq_mcp.server import _has_definition_keywords
-
-        assert _has_definition_keywords("Fixpoint f (n : nat) := n.")
-
-    def test_has_definition_keywords_no_match(self):
-        from rocq_mcp.server import _has_definition_keywords
-
-        assert not _has_definition_keywords("Theorem foo : True.\nAdmitted.")
+    def test_rejects_empty_problem_name(self):
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +634,96 @@ class TestVerificationHint:
 
     def test_default_hint(self):
         hint = verification_hint("Some unknown error occurred")
-        assert len(hint) > 0  # Should return something
+        assert "does not prove" in hint
+
+
+# ---------------------------------------------------------------------------
+# _neutralize_for_regex
+# ---------------------------------------------------------------------------
+
+
+class TestNeutralizeForRegex:
+    """Test the position-preserving neutralization function."""
+
+    def test_preserves_length(self):
+        from rocq_mcp.verify import _neutralize_for_regex
+
+        for text in [
+            "no comments or strings",
+            "(* a comment *)",
+            '"a string"',
+            '(* "string in comment" *)',
+            "(* (* nested *) *)",
+            'x (* c *) "s" y',
+            '(* "a""b" *) z',
+        ]:
+            result = _neutralize_for_regex(text)
+            assert len(result) == len(text), (
+                f"Length mismatch for {text!r}: {len(result)} != {len(text)}"
+            )
+
+    def test_blanks_comment_interiors(self):
+        from rocq_mcp.verify import _neutralize_for_regex
+
+        result = _neutralize_for_regex("a(* comment *)b")
+        assert result[0] == "a"
+        assert result[-1] == "b"
+        assert result[1:14] == " " * 13
+
+    def test_blanks_string_interiors(self):
+        from rocq_mcp.verify import _neutralize_for_regex
+
+        result = _neutralize_for_regex('a"Load"b')
+        assert result[0] == "a"
+        assert result[-1] == "b"
+        assert result[1] == '"'
+        assert result[6] == '"'
+        assert result[2:6] == "    "
+
+    def test_no_change_for_plain_text(self):
+        from rocq_mcp.verify import _neutralize_for_regex
+
+        text = "Definition foo := 42."
+        assert _neutralize_for_regex(text) == text
+
+
+# ---------------------------------------------------------------------------
+# _extract_source_range
+# ---------------------------------------------------------------------------
+
+
+class TestExtractSourceRange:
+    """Test _extract_source_range bounds checking."""
+
+    def test_single_line(self):
+        from rocq_mcp.server import _extract_source_range
+
+        lines = ["hello world", "second line"]
+        assert _extract_source_range(lines, 0, 0, 0, 5) == "hello"
+
+    def test_multi_line(self):
+        from rocq_mcp.server import _extract_source_range
+
+        lines = ["first", "second", "third"]
+        assert _extract_source_range(lines, 0, 0, 2, 5) == "first\nsecond\nthird"
+
+    def test_negative_start_raises(self):
+        from rocq_mcp.server import _extract_source_range
+
+        with pytest.raises(IndexError):
+            _extract_source_range(["hello"], -1, 0, 0, 5)
+
+    def test_end_beyond_lines_raises(self):
+        from rocq_mcp.server import _extract_source_range
+
+        with pytest.raises(IndexError):
+            _extract_source_range(["hello"], 0, 0, 5, 0)
+
+    def test_start_after_end_raises(self):
+        from rocq_mcp.server import _extract_source_range
+
+        with pytest.raises(IndexError):
+            _extract_source_range(["first", "second"], 1, 0, 0, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +895,40 @@ class TestStripSharedDefs:
         assert result.count("Definition state") == 0
         assert "Theorem foo" in result
 
+    def test_strip_nested_definition_in_body(self):
+        """A definition whose body textually contains another definition pattern.
+
+        If 'outer' and 'inner' are both in shared_names, the regex for
+        'outer' produces a span that contains the span for 'inner'.
+        Without merging, removing the inner span first corrupts the
+        outer removal because offsets shift.
+        """
+        proof = (
+            "Definition inner := 0.\n"
+            "Definition outer := Definition inner := 0.\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"outer", "inner"})
+        assert "Definition outer" not in result
+        assert "Definition inner" not in result
+        assert "Theorem foo" in result
+        # The theorem and proof must survive intact.
+        assert "Proof. exact I. Qed." in result
+
+    def test_comments_outside_stripped_def_preserved(self):
+        """Comments NOT inside a stripped definition should be preserved."""
+        proof = (
+            "Definition state := 0.\n"
+            "(* This is an important comment. *)\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state"})
+        assert "Definition state" not in result
+        assert "(* This is an important comment. *)" in result
+        assert "Theorem foo" in result
+
 
 class TestBuildSharedDefsVerificationSource:
     """Test the shared-defs verification template builder."""
@@ -879,6 +1071,16 @@ class TestBuildSharedDefsVerificationSource:
                 "Theorem foo : True.\nProof. exact I. Qed.", "foo", structure
             )
 
+    def test_rejects_invalid_problem_name(self):
+        """problem_name with injection payload must be rejected."""
+        structure = self._make_structure()
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_shared_defs_verification_source(
+                proof="Theorem foo : True. Proof. exact I. Qed.",
+                problem_name="foo.\nAxiom cheat : False",
+                structure=structure,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Input sanitization (injection attacks)
@@ -890,27 +1092,28 @@ class TestVerifyInputSanitization:
 
     def test_problem_name_with_newline(self):
         """Newlines in problem_name must be rejected by build_verification_source."""
-        # The server-level regex rejects this before build_verification_source
-        # is ever called, but let's verify the template isn't abusable either.
-        # build_verification_source doesn't validate problem_name itself,
-        # so we test via the server's rocq_verify which does the regex check.
-        # For a pure unit test, we verify the regex pattern rejects it.
-        import re
-
-        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
-        assert pattern.match("add_0_r\nAxiom cheat : False") is None
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="add_0_r\nAxiom cheat : False",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
     def test_problem_name_with_spaces(self):
-        import re
-
-        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
-        assert pattern.match("add_0_r Axiom cheat") is None
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="add_0_r Axiom cheat",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
     def test_problem_name_with_semicolon(self):
-        import re
-
-        pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*$")
-        assert pattern.match("add_0_r;evil") is None
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="add_0_r;evil",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
 
     def test_problem_name_valid_identifier(self):
         """A valid Rocq identifier should work."""
@@ -1179,6 +1382,44 @@ class TestVerifyInputSanitization:
 
         assert "End M." in _strip_rocq_comments('(* " *) " *) End M.')
 
+    def test_forbidden_inside_string_not_rejected(self):
+        """Forbidden keywords inside string literals must NOT trigger rejection."""
+        source = build_verification_source(
+            proof='Definition msg := "Load something".\nTheorem t : True. Proof. exact I. Qed.',
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.",
+        )
+        assert "Module M." in source
+
+    def test_forbidden_outside_string_still_rejected(self):
+        """Forbidden commands outside strings must still be caught."""
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_verification_source(
+                proof='Definition msg := "safe".\nLoad evil.',
+                problem_name="t",
+                problem_statement="Theorem t : True.\nAdmitted.",
+            )
+
+    def test_strip_rocq_strings(self):
+        """_strip_rocq_strings blanks interior of strings, keeps delimiters."""
+        from rocq_mcp.verify import _strip_rocq_strings
+
+        assert _strip_rocq_strings('"Load"') == '"    "'
+        assert _strip_rocq_strings('x "ab" y') == 'x "  " y'
+        assert _strip_rocq_strings("no strings") == "no strings"
+
+    def test_strip_shared_defs_ignores_def_in_comment(self):
+        """_strip_shared_defs should not match definition keywords inside comments."""
+        proof = (
+            "(* Definition state := old. *)\n"
+            "Theorem foo : True.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        result = _strip_shared_defs(proof, {"state"})
+        # The Definition inside the comment should not be stripped;
+        # the comment itself is replaced with spaces.
+        assert "Theorem foo" in result
+
     def test_strip_escaped_quote_in_string_in_comment(self):
         """\"\" escape in string inside comment must not end the string."""
         from rocq_mcp.verify import _strip_rocq_comments
@@ -1266,6 +1507,100 @@ class TestVerifyInputSanitization:
                 f"  expected: {expected_non_space}\n"
                 f"  got:      {stripped_chars}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Direct tests for _check_forbidden_commands
+# ---------------------------------------------------------------------------
+
+
+class TestCheckForbiddenCommands:
+    """Direct unit tests for the forbidden command scanner."""
+
+    def test_clean_source_returns_none(self):
+        assert _check_forbidden_commands("Theorem t : True. Proof. exact I. Qed.") is None
+
+    def test_redirect_detected(self):
+        assert _check_forbidden_commands('Redirect "/tmp/out" Print nat.') is not None
+
+    def test_extraction_to_file_detected(self):
+        assert _check_forbidden_commands('Extraction "/tmp/evil.ml" nat.') is not None
+
+    def test_drop_detected(self):
+        assert _check_forbidden_commands("Drop.") is not None
+
+    def test_separate_extraction_detected(self):
+        assert _check_forbidden_commands("Separate Extraction nat.") is not None
+
+    def test_recursive_extraction_detected(self):
+        assert _check_forbidden_commands("Recursive Extraction nat.") is not None
+
+    def test_cd_detected(self):
+        assert _check_forbidden_commands('Cd "/tmp".') is not None
+
+    def test_load_detected(self):
+        assert _check_forbidden_commands("Load evil.") is not None
+
+    def test_extraction_library_detected(self):
+        assert _check_forbidden_commands("Extraction Library nat.") is not None
+
+    def test_declare_ml_module_detected(self):
+        assert _check_forbidden_commands('Declare ML Module "evil".') is not None
+
+    def test_unset_guard_checking_detected(self):
+        assert _check_forbidden_commands("Unset Guard Checking.") is not None
+
+    def test_unset_positivity_checking_detected(self):
+        assert _check_forbidden_commands("Unset Positivity Checking.") is not None
+
+    def test_unset_universe_checking_detected(self):
+        assert _check_forbidden_commands("Unset Universe Checking.") is not None
+
+    def test_bypass_check_detected(self):
+        assert _check_forbidden_commands("#[bypass_check(guard)] Fixpoint f := f.") is not None
+
+    def test_end_m_detected(self):
+        assert _check_forbidden_commands("End M.") is not None
+
+    def test_reset_detected(self):
+        assert _check_forbidden_commands("Reset Initial.") is not None
+
+    def test_back_detected(self):
+        assert _check_forbidden_commands("Back 2.") is not None
+
+    def test_undo_detected(self):
+        assert _check_forbidden_commands("Undo.") is not None
+
+    def test_add_loadpath_detected(self):
+        assert _check_forbidden_commands('Add LoadPath "/tmp".') is not None
+
+    def test_add_rec_loadpath_detected(self):
+        assert _check_forbidden_commands('Add Rec LoadPath "/tmp".') is not None
+
+    def test_add_ml_path_detected(self):
+        assert _check_forbidden_commands('Add ML Path "/tmp".') is not None
+
+    def test_forbidden_inside_comment_ignored(self):
+        """Forbidden commands inside comments must NOT be detected."""
+        assert _check_forbidden_commands("(* Drop. Load evil. End M. *)") is None
+
+    def test_forbidden_inside_string_ignored(self):
+        """Forbidden commands inside strings must NOT be detected."""
+        assert _check_forbidden_commands('"Drop. Load evil."') is None
+
+    def test_forbidden_after_comment_detected(self):
+        """Forbidden commands after a comment must be caught."""
+        result = _check_forbidden_commands("(* safe *) Drop.")
+        assert result is not None
+
+    def test_end_other_module_not_detected(self):
+        """End Foo. must not be detected — only End M. is forbidden."""
+        assert _check_forbidden_commands("End Foo.") is None
+
+    def test_returns_descriptive_message(self):
+        """Error messages should describe the forbidden command."""
+        msg = _check_forbidden_commands("Drop.")
+        assert "Drop" in msg
 
 
 # =========================================================================
@@ -1493,6 +1828,17 @@ class TestVerifyInputValidation:
             proof="x" * 2_000_000,
             problem_name="test",
             problem_statement="Theorem test : True.\nAdmitted.",
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "size" in result["error"].lower()
+
+    async def test_oversized_problem_statement(self, workspace):
+        """Problem statement exceeding max size should be rejected."""
+        result = await rocq_verify(
+            proof="Theorem test : True. Proof. exact I. Qed.",
+            problem_name="test",
+            problem_statement="x" * 2_000_000,
             workspace=str(workspace),
         )
         assert result["verified"] is False

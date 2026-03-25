@@ -192,6 +192,72 @@ class TestCompileVerifyWorkflow:
         assert result["success"] is False
         assert "forbidden" in result["error"].lower()
 
+    def test_compile_with_coqproject(self, tmp_path):
+        """rocq_compile resolves local imports via _CoqProject flags."""
+        import subprocess
+        from rocq_mcp.server import rocq_compile, ROCQ_COQC_BINARY
+
+        # Set up a mini project with a helper module
+        (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
+        (tmp_path / "Helper.v").write_text("Definition my_const : nat := 42.\n")
+
+        # Compile Helper.v directly with coqc to produce Helper.vo
+        subprocess.run(
+            [ROCQ_COQC_BINARY, "-Q", ".", "TestProj", "Helper.v"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+
+        # Now compile source that imports Helper via rocq_compile
+        result = rocq_compile(
+            source=(
+                "From TestProj Require Import Helper.\n"
+                "Definition x := my_const.\n"
+            ),
+            workspace=str(tmp_path),
+        )
+        assert result["success"] is True, f"Failed: {result.get('error', '')}"
+
+    async def test_verify_with_coqproject(self, tmp_path):
+        """rocq_verify works with local imports resolved via _CoqProject."""
+        import subprocess
+        from rocq_mcp.server import rocq_compile, rocq_verify, ROCQ_COQC_BINARY
+
+        # Set up a mini project
+        (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
+        (tmp_path / "Helper.v").write_text(
+            "Definition my_const : nat := 42.\n"
+        )
+        subprocess.run(
+            [ROCQ_COQC_BINARY, "-Q", ".", "TestProj", "Helper.v"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+
+        proof = (
+            "From TestProj Require Import Helper.\n"
+            "Theorem t : my_const = 42.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        problem = (
+            "From TestProj Require Import Helper.\n"
+            "Theorem t : my_const = 42.\n"
+            "Admitted.\n"
+        )
+
+        compile_result = rocq_compile(source=proof, workspace=str(tmp_path))
+        assert compile_result["success"] is True
+
+        verify_result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(tmp_path),
+        )
+        assert verify_result["verified"] is True, (
+            f"Verify failed: {verify_result.get('error', '')}"
+        )
+
     async def test_no_artifacts_after_workflow(
         self, workspace, simple_proof, simple_problem_statement
     ):

@@ -107,6 +107,98 @@ def _cleanup_coqc_artifacts(tmp_path: str) -> None:
         base.with_suffix(ext).unlink(missing_ok=True)
 
 
+# Allowlisted -arg values for _CoqProject / _RocqProject parsing.
+# Only exact matches or prefix matches are allowed; everything else is
+# silently dropped to prevent coqc flag injection (e.g. -load-vernac-source).
+_SAFE_COQC_ARGS: frozenset[str] = frozenset(
+    {
+        "-noinit",
+        "-indices-matter",
+        "-impredicative-set",
+        "-type-in-type",
+        "-allow-rewrite-rules",
+        "-allow-sprop",
+        "-cumulative-sprop",
+    }
+)
+_SAFE_COQC_ARG_PREFIXES: tuple[str, ...] = ("-w ",)
+
+
+def _is_safe_arg(value: str) -> bool:
+    """Check if an -arg value is in the allowlist."""
+    return value in _SAFE_COQC_ARGS or any(
+        value.startswith(p) for p in _SAFE_COQC_ARG_PREFIXES
+    )
+
+
+def _check_path_containment(ws: Path, dir_arg: str) -> str | None:
+    """Resolve dir_arg relative to ws and return it if within ws, else None."""
+    if os.path.isabs(dir_arg):
+        return None
+    resolved = (ws / dir_arg).resolve()
+    ws_resolved = ws.resolve()
+    if resolved == ws_resolved or str(resolved).startswith(str(ws_resolved) + os.sep):
+        return dir_arg
+    return None
+
+
+def _parse_project_flags(ws: Path) -> list[str]:
+    """Parse _RocqProject or _CoqProject and return coqc flags.
+
+    Looks for ``_RocqProject`` first, then ``_CoqProject`` as fallback.
+    If neither exists, returns ``["-Q", str(ws), "Test"]`` to preserve
+    backwards-compatible behaviour for workspaces without a project file.
+
+    Recognised directives: ``-Q``, ``-R``, ``-I``, ``-arg``.
+    Comment lines (starting with ``#``), ``.v`` file entries, and bare
+    directory names are silently skipped.
+
+    Security:
+    - ``-arg`` values are checked against an allowlist to prevent
+      coqc flag injection (e.g. ``-load-vernac-source``).
+    - Directory paths in ``-Q``/``-R``/``-I`` are validated to stay
+      within the workspace (absolute paths and ``../`` escapes rejected).
+    """
+    for name in ("_RocqProject", "_CoqProject"):
+        proj = ws / name
+        if proj.is_file():
+            break
+    else:
+        return ["-Q", str(ws), "Test"]
+
+    flags: list[str] = []
+    lines = proj.read_text().splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line or line.startswith("#"):
+            i += 1
+            continue
+        if line == "-arg" and i + 1 < len(lines):
+            value = lines[i + 1].strip()
+            if _is_safe_arg(value):
+                flags.extend(value.split(None, 1))
+            i += 2
+        elif line.startswith("-arg "):
+            value = line[len("-arg ") :].strip()
+            if _is_safe_arg(value):
+                flags.extend(value.split(None, 1))
+            i += 1
+        elif line.startswith(("-R ", "-Q ")):
+            parts = line.split(None, 2)
+            if len(parts) == 3 and _check_path_containment(ws, parts[1]) is not None:
+                flags.extend(parts)
+            i += 1
+        elif line.startswith("-I "):
+            parts = line.split(None, 1)
+            if len(parts) == 2 and _check_path_containment(ws, parts[1]) is not None:
+                flags.extend(parts)
+            i += 1
+        else:
+            i += 1
+    return flags
+
+
 def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
     """Write source to temp file, run coqc, return result dict.
 
@@ -126,7 +218,7 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
 
     try:
         proc = subprocess.Popen(
-            [ROCQ_COQC_BINARY, "-Q", str(ws), "Test", tmp_path],
+            [ROCQ_COQC_BINARY, *_parse_project_flags(ws), tmp_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

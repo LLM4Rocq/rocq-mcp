@@ -3,6 +3,7 @@
 TestFormatError: error formatting, annotation, truncation
 TestParseCoqcErrorPositions: structured error position parsing
 TestValidateWorkspace: workspace containment + existence checks
+TestParseProjectFlags: _RocqProject / _CoqProject parsing
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import pytest
 from rocq_mcp.server import (
     _format_error,
     _parse_coqc_error_positions,
+    _parse_project_flags,
     _validate_workspace,
     _MAX_ERROR_LENGTH,
     _MAX_FORMAT_WARNINGS,
@@ -281,3 +283,178 @@ class TestValidateWorkspace:
         """When ROCQ_WORKSPACE is not explicitly set, containment is not checked."""
         with mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", False):
             assert _validate_workspace(str(tmp_path)) is None
+
+
+# =========================================================================
+# _parse_project_flags
+# =========================================================================
+
+
+class TestParseProjectFlags:
+    """Test _RocqProject / _CoqProject parsing."""
+
+    def test_no_project_file_fallback(self, tmp_path):
+        """Without a project file, fall back to -Q <ws> Test."""
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", str(tmp_path), "Test"]
+
+    def test_coqproject_q_flag(self, tmp_path):
+        """_CoqProject with -Q is parsed correctly."""
+        (tmp_path / "_CoqProject").write_text("-Q . MyProject\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "MyProject"]
+
+    def test_coqproject_r_flag(self, tmp_path):
+        """_CoqProject with -R is parsed correctly."""
+        (tmp_path / "_CoqProject").write_text("-R theories MyLib\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-R", "theories", "MyLib"]
+
+    def test_coqproject_i_flag(self, tmp_path):
+        """_CoqProject with -I is parsed correctly."""
+        (tmp_path / "_CoqProject").write_text("-I src\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-I", "src"]
+
+    def test_rocqproject_takes_priority(self, tmp_path):
+        """_RocqProject takes priority over _CoqProject."""
+        (tmp_path / "_CoqProject").write_text("-Q . Old\n")
+        (tmp_path / "_RocqProject").write_text("-Q . New\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "New"]
+
+    def test_arg_same_line(self, tmp_path):
+        """-arg value on same line."""
+        (tmp_path / "_CoqProject").write_text("-arg -noinit\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-noinit"]
+
+    def test_arg_next_line(self, tmp_path):
+        """-arg on one line, value on next."""
+        (tmp_path / "_CoqProject").write_text("-arg\n-noinit\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-noinit"]
+
+    def test_comments_and_blanks_ignored(self, tmp_path):
+        """Comments (#) and blank lines are skipped."""
+        (tmp_path / "_CoqProject").write_text(
+            "# This is a comment\n"
+            "\n"
+            "-Q . MyProject\n"
+            "# Another comment\n"
+        )
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "MyProject"]
+
+    def test_v_files_ignored(self, tmp_path):
+        """.v file entries are silently skipped."""
+        (tmp_path / "_CoqProject").write_text(
+            "-Q . MyProject\n"
+            "src/Foo.v\n"
+            "src/Bar.v\n"
+        )
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "MyProject"]
+
+    def test_multiple_flags(self, tmp_path):
+        """Multiple flags are all collected."""
+        (tmp_path / "_CoqProject").write_text(
+            "-R . MyLib\n"
+            "-Q extra Extra\n"
+            "-I plugins\n"
+        )
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-R", ".", "MyLib", "-Q", "extra", "Extra", "-I", "plugins"]
+
+    def test_empty_project_file(self, tmp_path):
+        """Empty project file produces no flags."""
+        (tmp_path / "_CoqProject").write_text("")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    # --- Security: -arg allowlist ---
+
+    def test_arg_dangerous_load_rejected(self, tmp_path):
+        """-arg -load-vernac-source must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text(
+            "-Q . Safe\n" "-arg -load-vernac-source\n"
+        )
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "Safe"]
+        assert "-load-vernac-source" not in flags
+
+    def test_arg_dangerous_output_dir_rejected(self, tmp_path):
+        """-arg -output-directory must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-arg -output-directory\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_arg_dangerous_init_file_rejected(self, tmp_path):
+        """-arg -init-file must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-arg -init-file\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_arg_safe_noinit_allowed(self, tmp_path):
+        """-arg -noinit is in the allowlist."""
+        (tmp_path / "_CoqProject").write_text("-arg -noinit\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-noinit"]
+
+    def test_arg_safe_warning_allowed(self, tmp_path):
+        """-arg -w <warning> is split into two separate coqc arguments."""
+        (tmp_path / "_CoqProject").write_text("-arg -w -notation-overridden\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-w", "-notation-overridden"]
+
+    def test_arg_unknown_rejected(self, tmp_path):
+        """Unknown -arg values are silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-arg -some-unknown-flag\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_arg_next_line_dangerous_rejected(self, tmp_path):
+        """-arg (next-line form) with dangerous value must be dropped."""
+        (tmp_path / "_CoqProject").write_text("-arg\n-load-vernac-source\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    # --- Security: path containment ---
+
+    def test_q_absolute_path_rejected(self, tmp_path):
+        """-Q with absolute path must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-Q /etc Evil\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_r_path_traversal_rejected(self, tmp_path):
+        """-R with ../ path escape must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-R ../../evil Evil\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_i_absolute_path_rejected(self, tmp_path):
+        """-I with absolute path must be silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-I /usr/lib\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_q_subdir_allowed(self, tmp_path):
+        """-Q with a subdirectory path is allowed."""
+        (tmp_path / "_CoqProject").write_text("-Q theories MyLib\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", "theories", "MyLib"]
+
+    # --- Parsing edge cases ---
+
+    def test_q_malformed_missing_name_dropped(self, tmp_path):
+        """-Q with missing logical name is silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-Q .\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
+    def test_arg_dangling_at_eof(self, tmp_path):
+        """-arg as the last line with no value is silently dropped."""
+        (tmp_path / "_CoqProject").write_text("-arg\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []

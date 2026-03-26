@@ -401,30 +401,19 @@ class TestParseAssumptions:
 
     def test_injected_closed_before_real_closed(self):
         """Multiple 'Closed' lines: last one wins (still closed)."""
-        stdout = (
-            "Closed under the global context\n"
-            "Closed under the global context\n"
-        )
+        stdout = "Closed under the global context\n" "Closed under the global context\n"
         result = _parse_assumptions_raw(stdout)
         assert result == []
 
     def test_injected_axioms_before_real_closed(self):
         """Injected Axioms block before real 'Closed': last block wins."""
-        stdout = (
-            "Axioms:\n"
-            "M.fake : False\n"
-            "Closed under the global context\n"
-        )
+        stdout = "Axioms:\n" "M.fake : False\n" "Closed under the global context\n"
         result = _parse_assumptions_raw(stdout)
         assert result == []
 
     def test_classify_injected_closed_before_suspicious(self):
         """Higher-level: injected Closed before suspicious axioms must be suspicious."""
-        stdout = (
-            "Closed under the global context\n"
-            "Axioms:\n"
-            "M.cheat : False\n"
-        )
+        stdout = "Closed under the global context\n" "Axioms:\n" "M.cheat : False\n"
         verdict, details = parse_and_classify_assumptions(stdout)
         assert verdict == "suspicious"
         assert "M.cheat" in details["suspicious_names"]
@@ -658,9 +647,9 @@ class TestNeutralizeForRegex:
             '(* "a""b" *) z',
         ]:
             result = _neutralize_for_regex(text)
-            assert len(result) == len(text), (
-                f"Length mismatch for {text!r}: {len(result)} != {len(text)}"
-            )
+            assert len(result) == len(
+                text
+            ), f"Length mismatch for {text!r}: {len(result)} != {len(text)}"
 
     def test_blanks_comment_interiors(self):
         from rocq_mcp.verify import _neutralize_for_regex
@@ -1518,7 +1507,9 @@ class TestCheckForbiddenCommands:
     """Direct unit tests for the forbidden command scanner."""
 
     def test_clean_source_returns_none(self):
-        assert _check_forbidden_commands("Theorem t : True. Proof. exact I. Qed.") is None
+        assert (
+            _check_forbidden_commands("Theorem t : True. Proof. exact I. Qed.") is None
+        )
 
     def test_redirect_detected(self):
         assert _check_forbidden_commands('Redirect "/tmp/out" Print nat.') is not None
@@ -1557,7 +1548,10 @@ class TestCheckForbiddenCommands:
         assert _check_forbidden_commands("Unset Universe Checking.") is not None
 
     def test_bypass_check_detected(self):
-        assert _check_forbidden_commands("#[bypass_check(guard)] Fixpoint f := f.") is not None
+        assert (
+            _check_forbidden_commands("#[bypass_check(guard)] Fixpoint f := f.")
+            is not None
+        )
 
     def test_end_m_detected(self):
         assert _check_forbidden_commands("End M.") is not None

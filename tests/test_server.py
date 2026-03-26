@@ -23,7 +23,6 @@ from rocq_mcp.server import (
     _MAX_FORMAT_WARNINGS,
 )
 
-
 # =========================================================================
 # _format_error
 # =========================================================================
@@ -34,9 +33,9 @@ class TestFormatError:
 
     PROOF = (
         "Theorem t : True.\n"  # line 1
-        "Proof.\n"              # line 2
-        "  exact I.\n"          # line 3
-        "Qed.\n"                # line 4
+        "Proof.\n"  # line 2
+        "  exact I.\n"  # line 3
+        "Qed.\n"  # line 4
     )
 
     def test_empty_string_returns_empty(self):
@@ -61,10 +60,7 @@ class TestFormatError:
 
     def test_warnings_only_returns_empty(self):
         """Pure warnings (no Error) should return empty string."""
-        stderr = (
-            'File "/tmp/test.v", line 1, characters 0-10:\n'
-            "Warning: Deprecated."
-        )
+        stderr = 'File "/tmp/test.v", line 1, characters 0-10:\n' "Warning: Deprecated."
         result = _format_error(stderr, self.PROOF)
         assert result == ""
 
@@ -94,9 +90,7 @@ class TestFormatError:
                 "Warning: Same warning.\n"
             )
         stderr = (
-            warnings
-            + 'File "/tmp/test.v", line 3, characters 2-9:\n'
-            + "Error: Fail."
+            warnings + 'File "/tmp/test.v", line 3, characters 2-9:\n' + "Error: Fail."
         )
         result = _format_error(stderr, self.PROOF)
         # "Same warning" should appear only once (deduplicated)
@@ -111,14 +105,13 @@ class TestFormatError:
                 f"Warning: Unique warning {i}.\n"
             )
         stderr = (
-            warnings
-            + 'File "/tmp/test.v", line 3, characters 2-9:\n'
-            + "Error: Fail."
+            warnings + 'File "/tmp/test.v", line 3, characters 2-9:\n' + "Error: Fail."
         )
         result = _format_error(stderr, self.PROOF)
         # Count unique warnings in output
         count = sum(
-            1 for i in range(_MAX_FORMAT_WARNINGS + 3)
+            1
+            for i in range(_MAX_FORMAT_WARNINGS + 3)
             if f"Unique warning {i}" in result
         )
         assert count == _MAX_FORMAT_WARNINGS
@@ -140,10 +133,7 @@ class TestFormatError:
         """Output exceeding _MAX_ERROR_LENGTH is truncated."""
         # Create a very long error body
         long_body = "x" * (_MAX_ERROR_LENGTH + 500)
-        stderr = (
-            'File "/tmp/test.v", line 3, characters 2-9:\n'
-            f"Error: {long_body}"
-        )
+        stderr = 'File "/tmp/test.v", line 3, characters 2-9:\n' f"Error: {long_body}"
         result = _format_error(stderr, self.PROOF)
         assert len(result) <= _MAX_ERROR_LENGTH
 
@@ -155,10 +145,7 @@ class TestFormatError:
 
     def test_out_of_range_line_number(self):
         """Line number beyond proof lines should not crash."""
-        stderr = (
-            'File "/tmp/test.v", line 999, characters 0-5:\n'
-            "Error: Something."
-        )
+        stderr = 'File "/tmp/test.v", line 999, characters 0-5:\n' "Error: Something."
         result = _format_error(stderr, self.PROOF)
         assert "Something" in result
         # No source annotation since line 999 doesn't exist
@@ -166,10 +153,7 @@ class TestFormatError:
 
     def test_caret_length_is_at_least_one(self):
         """Even for zero-length char range, at least one caret."""
-        stderr = (
-            'File "/tmp/test.v", line 1, characters 5-5:\n'
-            "Error: Empty range."
-        )
+        stderr = 'File "/tmp/test.v", line 1, characters 5-5:\n' "Error: Empty range."
         result = _format_error(stderr, self.PROOF)
         assert "^" in result
 
@@ -184,8 +168,7 @@ class TestParseCoqcErrorPositions:
 
     def test_single_error(self):
         stderr = (
-            'File "/tmp/test.v", line 3, characters 2-9:\n'
-            "Error: Not a proposition."
+            'File "/tmp/test.v", line 3, characters 2-9:\n' "Error: Not a proposition."
         )
         positions = _parse_coqc_error_positions(stderr)
         assert len(positions) == 1
@@ -218,10 +201,7 @@ class TestParseCoqcErrorPositions:
 
     def test_message_truncated_at_500(self):
         long_msg = "Error: " + "x" * 600
-        stderr = (
-            f'File "/tmp/test.v", line 1, characters 0-5:\n'
-            f"{long_msg}"
-        )
+        stderr = f'File "/tmp/test.v", line 1, characters 0-5:\n' f"{long_msg}"
         positions = _parse_coqc_error_positions(stderr)
         assert len(positions) == 1
         assert len(positions[0]["message"]) <= 500
@@ -264,8 +244,10 @@ class TestValidateWorkspace:
         outside = tmp_path / "outside"
         outside.mkdir()
 
-        with mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", True), \
-             mock.patch("rocq_mcp.server.ROCQ_WORKSPACE", str(root)):
+        with (
+            mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", True),
+            mock.patch("rocq_mcp.server.ROCQ_WORKSPACE", str(root)),
+        ):
             # Inside root: OK
             assert _validate_workspace(str(root)) is None
 
@@ -338,10 +320,7 @@ class TestParseProjectFlags:
     def test_comments_and_blanks_ignored(self, tmp_path):
         """Comments (#) and blank lines are skipped."""
         (tmp_path / "_CoqProject").write_text(
-            "# This is a comment\n"
-            "\n"
-            "-Q . MyProject\n"
-            "# Another comment\n"
+            "# This is a comment\n" "\n" "-Q . MyProject\n" "# Another comment\n"
         )
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-Q", ".", "MyProject"]
@@ -349,9 +328,7 @@ class TestParseProjectFlags:
     def test_v_files_ignored(self, tmp_path):
         """.v file entries are silently skipped."""
         (tmp_path / "_CoqProject").write_text(
-            "-Q . MyProject\n"
-            "src/Foo.v\n"
-            "src/Bar.v\n"
+            "-Q . MyProject\n" "src/Foo.v\n" "src/Bar.v\n"
         )
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-Q", ".", "MyProject"]
@@ -359,9 +336,7 @@ class TestParseProjectFlags:
     def test_multiple_flags(self, tmp_path):
         """Multiple flags are all collected."""
         (tmp_path / "_CoqProject").write_text(
-            "-R . MyLib\n"
-            "-Q extra Extra\n"
-            "-I plugins\n"
+            "-R . MyLib\n" "-Q extra Extra\n" "-I plugins\n"
         )
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-R", ".", "MyLib", "-Q", "extra", "Extra", "-I", "plugins"]

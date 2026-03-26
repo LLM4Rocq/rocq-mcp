@@ -143,9 +143,7 @@ class TestCompileVerifyWorkflow:
             "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
             "Admitted.\n"
         )
-        compile_result = rocq_compile(
-            source=injection_proof, workspace=str(workspace)
-        )
+        compile_result = rocq_compile(source=injection_proof, workspace=str(workspace))
         assert compile_result["success"] is True
 
         verify_result = await rocq_verify(
@@ -211,8 +209,7 @@ class TestCompileVerifyWorkflow:
         # Now compile source that imports Helper via rocq_compile
         result = rocq_compile(
             source=(
-                "From TestProj Require Import Helper.\n"
-                "Definition x := my_const.\n"
+                "From TestProj Require Import Helper.\n" "Definition x := my_const.\n"
             ),
             workspace=str(tmp_path),
         )
@@ -225,9 +222,7 @@ class TestCompileVerifyWorkflow:
 
         # Set up a mini project
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
-        (tmp_path / "Helper.v").write_text(
-            "Definition my_const : nat := 42.\n"
-        )
+        (tmp_path / "Helper.v").write_text("Definition my_const : nat := 42.\n")
         subprocess.run(
             [ROCQ_COQC_BINARY, "-Q", ".", "TestProj", "Helper.v"],
             cwd=str(tmp_path),
@@ -254,9 +249,9 @@ class TestCompileVerifyWorkflow:
             problem_statement=problem,
             workspace=str(tmp_path),
         )
-        assert verify_result["verified"] is True, (
-            f"Verify failed: {verify_result.get('error', '')}"
-        )
+        assert (
+            verify_result["verified"] is True
+        ), f"Verify failed: {verify_result.get('error', '')}"
 
     async def test_no_artifacts_after_workflow(
         self, workspace, simple_proof, simple_problem_statement
@@ -431,9 +426,7 @@ class TestSharedDefsVerifyWorkflow:
 
         assert result["verified"] is False
 
-    async def test_phase2_with_require_import_no_defs(
-        self, lifespan_state, workspace
-    ):
+    async def test_phase2_with_require_import_no_defs(self, lifespan_state, workspace):
         """Require Import Znumtheory without Inductive/Def triggers Phase 2.
 
         Znumtheory's Require inside Module M is fragile and may cause

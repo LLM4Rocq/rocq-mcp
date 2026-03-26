@@ -8,7 +8,7 @@ An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover
 
 ## Prerequisites
 
-- **Rocq / Coq** -- `coqc` must be on your `PATH` (needed by all tools).
+- **Rocq / Coq** -- `coqc` must be on your `PATH` (needed by all tools). If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). Otherwise it defaults to `-Q <workspace> Test`.
 - **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_step`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile, verify, and auto_solve tools still work.
 - **Python 3.11+**
 
@@ -112,6 +112,13 @@ Printing flags (`Set Printing All`, `Set Printing Universes`, `Set Printing Widt
 
 All tools that accept file paths validate that resolved paths stay within the configured workspace directory (preventing path traversal attacks).
 
+### Project file security
+
+When `_RocqProject` or `_CoqProject` is present, the server parses it for coqc load-path flags (`-Q`, `-R`, `-I`). For safety:
+
+- **`-arg` allowlist** -- Only known-safe flags are passed through (e.g., `-noinit`, `-w`, `-impredicative-set`). Dangerous flags like `-load-vernac-source` are silently dropped.
+- **Path containment** -- Directories in `-Q`/`-R`/`-I` must resolve within the workspace. Absolute paths and `../` traversals outside the workspace are rejected.
+
 ## Running
 
 The server uses stdio transport:
@@ -156,12 +163,16 @@ tests/
   test_compile.py       Tests for rocq_compile
   test_verify.py        Tests for rocq_verify
   test_auto_solve.py    Tests for rocq_auto_solve (unit + integration)
+  test_server.py        Tests for server helpers (_format_error, _parse_project_flags, etc.)
+  test_format_error.py  Tests for error formatting
   test_query.py         Tests for rocq_query (requires pet)
   test_step.py          Tests for rocq_step (requires pet)
+  test_step_at_pos.py   Tests for rocq_step position-based start
   test_step_enhanced.py Tests for rocq_step complete_goals enhancement
   test_step_multi.py    Tests for rocq_step_multi
   test_toc.py           Tests for rocq_toc
   test_notations.py     Tests for rocq_notations
+  test_timeout.py       Tests for timeout handling
   test_integration.py   Integration tests
 ```
 

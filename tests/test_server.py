@@ -4,11 +4,15 @@ TestFormatError: error formatting, annotation, truncation
 TestParseCoqcErrorPositions: structured error position parsing
 TestValidateWorkspace: workspace containment + existence checks
 TestParseProjectFlags: _RocqProject / _CoqProject parsing
+TestForceReleasePetLock: _force_release_pet_lock deadlock recovery
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -16,8 +20,10 @@ import pytest
 
 from rocq_mcp.server import (
     _format_error,
+    _force_release_pet_lock,
     _parse_coqc_error_positions,
     _parse_project_flags,
+    _PetLockTimeout,
     _validate_workspace,
     _MAX_ERROR_LENGTH,
     _MAX_FORMAT_WARNINGS,
@@ -433,3 +439,105 @@ class TestParseProjectFlags:
         (tmp_path / "_CoqProject").write_text("-arg\n")
         flags = _parse_project_flags(tmp_path)
         assert flags == []
+
+
+# =========================================================================
+# _force_release_pet_lock — deadlock recovery
+# =========================================================================
+
+
+class TestForceReleasePetLock:
+    """Tests for _force_release_pet_lock deadlock recovery."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_pet_lock(self):
+        """Save and restore _pet_lock to prevent cross-test contamination."""
+        import rocq_mcp.server as srv
+
+        original = srv._pet_lock
+        yield
+        srv._pet_lock = original
+
+    @pytest.mark.asyncio
+    async def test_unlocked_is_noop(self):
+        """When lock is free, _force_release_pet_lock is a no-op."""
+        import rocq_mcp.server as srv
+
+        old_lock = srv._pet_lock
+        await _force_release_pet_lock()
+        # Lock should still be the same object (not replaced)
+        assert srv._pet_lock is old_lock
+        # Lock must still be usable (not left in acquired state)
+        assert old_lock.acquire(timeout=0.1)
+        old_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_replaces_stuck_lock(self):
+        """When lock is held by another thread, replaces with fresh lock."""
+        import rocq_mcp.server as srv
+
+        old_lock = srv._pet_lock
+        # Simulate an orphaned thread holding the lock
+        old_lock.acquire()
+        try:
+            await _force_release_pet_lock()
+            # Global lock should be replaced with a new one
+            assert srv._pet_lock is not old_lock
+            # New lock should be acquirable
+            assert srv._pet_lock.acquire(timeout=0.1)
+            srv._pet_lock.release()
+        finally:
+            old_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_orphaned_thread_releases_old_lock_harmlessly(self):
+        """Orphaned thread releasing old lock doesn't affect new global lock."""
+        import rocq_mcp.server as srv
+
+        old_lock = srv._pet_lock
+        old_lock.acquire()
+
+        await _force_release_pet_lock()
+        new_lock = srv._pet_lock
+        assert new_lock is not old_lock
+
+        # Simulate orphaned thread waking up and releasing old lock
+        old_lock.release()
+
+        # New lock is unaffected
+        assert new_lock.acquire(timeout=0.1)
+        new_lock.release()
+
+    def test_execute_captures_local_ref(self):
+        """_execute functions capture local lock ref for safe release."""
+        import rocq_mcp.server as srv
+
+        results = []
+        acquired_event = threading.Event()
+
+        def simulate_execute():
+            lock = srv._pet_lock  # capture local ref like _execute does
+            lock.acquire()
+            acquired_event.set()
+            try:
+                time.sleep(0.1)
+                results.append("completed")
+            finally:
+                lock.release()
+
+        t = threading.Thread(target=simulate_execute)
+        t.start()
+        acquired_event.wait(timeout=2)  # deterministic sync
+        # Replace global (simulating _force_release_pet_lock)
+        srv._pet_lock = threading.Lock()
+        t.join(timeout=2)
+
+        assert results == ["completed"]
+
+    def test_pet_lock_timeout_is_not_asyncio_timeout(self):
+        """_PetLockTimeout is NOT caught by except asyncio.TimeoutError."""
+        with pytest.raises(_PetLockTimeout):
+            try:
+                raise _PetLockTimeout("test")
+            except asyncio.TimeoutError:
+                pytest.fail("_PetLockTimeout must not be caught as TimeoutError")

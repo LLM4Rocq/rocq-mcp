@@ -242,7 +242,10 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
                     proc.kill()
                 except OSError:
                     pass
-            stdout, stderr = proc.communicate()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
             return {
                 "returncode": -1,
                 "stdout": stdout or "",
@@ -1337,7 +1340,49 @@ def rocq_auto_solve(
 
 # Global lock for ALL pytanque operations. Pytanque's stdio pipe is
 # single-duplex -- concurrent reads/writes corrupt JSON-RPC framing.
+# NOTE: _pet_lock may be replaced after a timeout (see _force_release_pet_lock).
+# All _execute functions must capture a local reference before acquiring.
 _pet_lock = threading.Lock()
+
+
+class _PetLockTimeout(Exception):
+    """Lock acquisition timed out (distinct from asyncio.TimeoutError).
+
+    On Python 3.11+, TimeoutError *is* asyncio.TimeoutError. Using a
+    private class prevents lock contention from being caught by the
+    asyncio.wait_for timeout handler, which would incorrectly kill pet
+    and destroy the proof session.
+    """
+
+
+async def _force_release_pet_lock() -> None:
+    """Recover from a deadlocked _pet_lock after timeout.
+
+    After _invalidate_pet kills the pet process, the orphaned thread's
+    blocking pet.run() should fail and release the lock.  We wait briefly
+    for this natural release.  If the lock is still held after a grace
+    period, replace the global lock with a fresh one so subsequent
+    operations can proceed.
+
+    This is safe because every _execute function captures a local
+    reference to the lock before acquiring it, so the orphaned thread
+    releases its own (now-discarded) lock object.
+
+    Runs the blocking acquire in a thread to avoid stalling the event loop.
+    """
+
+    def _try_reacquire() -> bool:
+        lock = _pet_lock  # capture local ref
+        if lock.acquire(timeout=2):
+            lock.release()
+            return True
+        return False
+
+    global _pet_lock
+    if await asyncio.to_thread(_try_reacquire):
+        return
+    # Orphaned thread still holds the lock -- replace with fresh lock
+    _pet_lock = threading.Lock()
 
 
 def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
@@ -1814,16 +1859,16 @@ def _compute_hard_timeout(soft_timeout: float) -> float:
 # Session state (single-client stdio model).
 #
 # THREAD SAFETY NOTE: _session is mutated from both the async event loop
-# (timeout handler at line ~1949) and background threads (via _execute()
-# inside asyncio.to_thread).  After a timeout, there is a logical race
-# where the orphaned thread may write to _session["state"] after the
-# timeout handler has reset it.  This is mitigated by:
+# (timeout handler) and background threads (via _execute() inside
+# asyncio.to_thread).  After a timeout, there is a logical race where
+# the orphaned thread may write to _session["state"] after the timeout
+# handler has reset it.  This is mitigated by:
 # 1. CPython's GIL ensures dict operations are atomic at the C level.
 # 2. _ensure_pet checks process liveness before using the pet object.
-# 3. The server is single-client (stdio), so concurrent requests don't occur.
-# A proper fix would use a threading.Lock around all _session mutations,
-# but the current architecture makes this infeasible without significant
-# refactoring (the orphaned thread holds _pet_lock indefinitely).
+# 3. The server is single-client (stdio), so concurrent requests
+#    don't occur.
+# 4. _force_release_pet_lock replaces the global lock after timeout,
+#    so subsequent operations are not blocked by the orphaned thread.
 _session: dict[str, Any] = {
     "state": None,
     "file": None,
@@ -1881,41 +1926,53 @@ async def _run_with_pet(
         }
 
     timeout: float = lifespan_state["pet_timeout"]
+    # Lock acquire uses a shorter timeout than wait_for so that
+    # _PetLockTimeout fires before asyncio.TimeoutError on contention.
+    # This avoids unnecessarily killing pet when the issue is just
+    # lock contention, not a pet hang.
+    lock_timeout = timeout * 0.8
 
     def _execute() -> Any:
-        if not _pet_lock.acquire(timeout=timeout):
-            raise TimeoutError("Could not acquire pet lock")
+        lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
+        if not lock.acquire(timeout=lock_timeout):
+            raise _PetLockTimeout("Could not acquire pet lock")
         try:
             pet = _ensure_pet(lifespan_state)
             return fn(pet)
         finally:
-            _pet_lock.release()
+            lock.release()
 
     sem = _get_pet_semaphore()
-    try:
-        async with sem:
+    async with sem:
+        try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(_execute),
                 timeout=timeout,
             )
             return result
-    except asyncio.TimeoutError:
-        _invalidate_pet(lifespan_state)
-        if on_timeout:
-            on_timeout()
-        return {
-            "success": False,
-            "error": f"{description} timed out after {timeout}s.",
-        }
-    except PetanqueError as e:
-        return {"success": False, "error": e.message}
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "error": "pet binary not found on PATH. Install coq-lsp.",
-        }
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {e}"}
+        except asyncio.TimeoutError:
+            _invalidate_pet(lifespan_state)
+            await _force_release_pet_lock()
+            if on_timeout:
+                on_timeout()
+            return {
+                "success": False,
+                "error": f"{description} timed out after {timeout}s.",
+            }
+        except _PetLockTimeout:
+            return {
+                "success": False,
+                "error": (f"{description}: pet is busy (lock contention). Try again."),
+            }
+        except PetanqueError as e:
+            return {"success": False, "error": e.message}
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "error": "pet binary not found on PATH. Install coq-lsp.",
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error: {e}"}
 
 
 async def run_step(
@@ -1984,8 +2041,9 @@ async def run_step(
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            if not _pet_lock.acquire(timeout=hard_timeout):
-                raise TimeoutError("Could not acquire pet lock")
+            lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
+            if not lock.acquire(timeout=hard_timeout * 0.8):
+                raise _PetLockTimeout("Could not acquire pet lock")
             try:
                 pet = _ensure_pet(lifespan_state)
 
@@ -2057,7 +2115,7 @@ async def run_step(
                     result["given_up_goals"] = len(complete.given_up)
                 return result
             finally:
-                _pet_lock.release()
+                lock.release()
 
         try:
             result = await asyncio.wait_for(
@@ -2067,6 +2125,7 @@ async def run_step(
             return result
         except asyncio.TimeoutError:
             _invalidate_pet(lifespan_state)
+            await _force_release_pet_lock()
             _session.update(
                 {
                     "state": None,
@@ -2082,6 +2141,11 @@ async def run_step(
                     "file/theorem preserved. Start a new session (provide "
                     "file + theorem) and replay your tactics."
                 ),
+            }
+        except _PetLockTimeout:
+            return {
+                "success": False,
+                "error": "pet is busy (lock contention). Try again.",
             }
         except PetanqueError as e:
             # Tactic error -- session state NOT corrupted (run() raised
@@ -2211,8 +2275,9 @@ async def run_step_multi(
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            if not _pet_lock.acquire(timeout=hard_timeout):
-                raise TimeoutError("Could not acquire pet lock")
+            lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
+            if not lock.acquire(timeout=hard_timeout * 0.8):
+                raise _PetLockTimeout("Could not acquire pet lock")
             try:
                 pet = _ensure_pet(lifespan_state)
 
@@ -2264,7 +2329,7 @@ async def run_step_multi(
                 # Do NOT update _session -- this is read-only exploration
                 return {"success": True, "results": list(partial_results)}
             finally:
-                _pet_lock.release()
+                lock.release()
 
         try:
             result = await asyncio.wait_for(
@@ -2274,6 +2339,7 @@ async def run_step_multi(
             return result
         except asyncio.TimeoutError:
             _invalidate_pet(lifespan_state)
+            await _force_release_pet_lock()
             _session.update(
                 {
                     "state": None,
@@ -2294,6 +2360,11 @@ async def run_step_multi(
             if partial_results:
                 resp["partial_results"] = list(partial_results)
             return resp
+        except _PetLockTimeout:
+            return {
+                "success": False,
+                "error": "pet is busy (lock contention). Try again.",
+            }
         except PetanqueError as e:
             return {"success": False, "error": e.message}
         except FileNotFoundError:

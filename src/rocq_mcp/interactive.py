@@ -270,6 +270,24 @@ def _state_invalidate_all() -> None:
     _state_current_id = None
 
 
+def _reconstruct_tactic_path(state_id: int) -> list[str]:
+    """Walk the parent_id chain backward and return tactics in root→leaf order.
+
+    Returns an empty list if the chain is broken (eviction/crash).
+    """
+    tactics: list[str] = []
+    current_id: int | None = state_id
+    while current_id is not None:
+        entry = _state_get(current_id)
+        if entry is None:
+            break  # chain broken by eviction
+        if entry.tactic is not None:
+            tactics.append(entry.tactic)
+        current_id = entry.parent_id
+    tactics.reverse()
+    return tactics
+
+
 # ---------------------------------------------------------------------------
 # Register pet invalidation hooks
 # ---------------------------------------------------------------------------
@@ -751,6 +769,15 @@ async def run_check(
             result["shelved_goals"] = len(complete.shelf)
         if complete and complete.given_up:
             result["given_up_goals"] = len(complete.given_up)
+        if state.proof_finished and prev_state_id is not None:
+            tactics = _reconstruct_tactic_path(prev_state_id)
+            if tactics:
+                result["proof_tactics"] = tactics
+            result["proof_hint"] = (
+                "Proof complete! Assemble imports + theorem statement "
+                "+ Proof. + tactics + Qed. then validate with "
+                "rocq_compile and rocq_verify."
+            )
         return result
 
     # Timeout strategy: single-command uses two-tier, multi uses global

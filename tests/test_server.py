@@ -541,3 +541,99 @@ class TestForceReleasePetLock:
                 raise _PetLockTimeout("test")
             except asyncio.TimeoutError:
                 pytest.fail("_PetLockTimeout must not be caught as TimeoutError")
+
+
+class TestReconstructTacticPath:
+    """Tests for _reconstruct_tactic_path (state table chain walk)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state_table(self):
+        """Reset state table before/after each test."""
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        yield
+        _state_invalidate_all()
+
+    def _add_state(self, parent_id, tactic, step=0):
+        """Helper: add a mock state entry to the table."""
+        from rocq_mcp.interactive import _state_add
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.proof_finished = False
+        return _state_add(
+            state=state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=parent_id,
+            tactic=tactic,
+            step=step,
+        )
+
+    def test_single_tactic(self):
+        """Chain: root → tactic1."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        root = self._add_state(None, None, step=0)
+        s1 = self._add_state(root, "intros.", step=1)
+        assert _reconstruct_tactic_path(s1) == ["intros."]
+
+    def test_multi_step_chain(self):
+        """Chain: root → t1 → t2 → t3."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        root = self._add_state(None, None, step=0)
+        s1 = self._add_state(root, "intros.", step=1)
+        s2 = self._add_state(s1, "induction n.", step=2)
+        s3 = self._add_state(s2, "reflexivity.", step=3)
+        assert _reconstruct_tactic_path(s3) == [
+            "intros.",
+            "induction n.",
+            "reflexivity.",
+        ]
+
+    def test_root_state_returns_empty(self):
+        """Root state (tactic=None) returns empty list."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        root = self._add_state(None, None, step=0)
+        assert _reconstruct_tactic_path(root) == []
+
+    def test_branching_follows_parent_chain(self):
+        """Two branches from root — each returns only its own path."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        root = self._add_state(None, None, step=0)
+        # Branch A
+        a1 = self._add_state(root, "intros.", step=1)
+        a2 = self._add_state(a1, "auto.", step=2)
+        # Branch B
+        b1 = self._add_state(root, "intro n.", step=1)
+        b2 = self._add_state(b1, "lia.", step=2)
+
+        assert _reconstruct_tactic_path(a2) == ["intros.", "auto."]
+        assert _reconstruct_tactic_path(b2) == ["intro n.", "lia."]
+
+    def test_nonexistent_state_returns_empty(self):
+        """Querying a non-existent state_id returns empty list."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        assert _reconstruct_tactic_path(9999) == []
+
+    def test_broken_chain_returns_partial(self):
+        """If ancestor is evicted, returns partial chain from first found."""
+        from rocq_mcp.interactive import (
+            _reconstruct_tactic_path,
+            _state_table,
+        )
+
+        root = self._add_state(None, None, step=0)
+        s1 = self._add_state(root, "intros.", step=1)
+        s2 = self._add_state(s1, "auto.", step=2)
+        # Simulate eviction of root and s1
+        del _state_table[root]
+        del _state_table[s1]
+        # Only s2 survives — chain is broken
+        assert _reconstruct_tactic_path(s2) == ["auto."]

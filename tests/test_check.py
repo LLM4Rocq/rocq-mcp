@@ -444,3 +444,203 @@ class TestCheckTimeout:
             assert "timed out" in err_lower or "timeout" in err_lower
         finally:
             _invalidate_pet(state)
+
+
+# ---------------------------------------------------------------------------
+# TestCheckProofTactics
+# ---------------------------------------------------------------------------
+
+
+class TestCheckProofTactics:
+    """Verify proof_tactics and proof_hint are returned when proof_finished."""
+
+    @pytest.mark.asyncio
+    async def test_single_tactic_proof(self, workspace, lifespan_state):
+        """A one-tactic proof returns proof_tactics with that tactic."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_single.v"
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="exact I.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+        assert "proof_tactics" in cr
+        assert cr["proof_tactics"] == ["exact I."]
+        assert "proof_hint" in cr
+        assert "Proof complete" in cr["proof_hint"]
+
+    @pytest.mark.asyncio
+    async def test_multi_step_proof(self, workspace, lifespan_state):
+        """A multi-step proof returns all tactics in order."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_multi.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        # Step 1
+        cr1 = await run_check(
+            body="intros.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr1["success"] is True
+        assert cr1["proof_finished"] is False
+        assert "proof_tactics" not in cr1
+
+        # Step 2 — finishes the proof
+        cr2 = await run_check(
+            body="reflexivity.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=cr1["state_id"],
+        )
+        assert cr2["success"] is True
+        assert cr2["proof_finished"] is True
+        assert cr2["proof_tactics"] == ["intros.", "reflexivity."]
+
+    @pytest.mark.asyncio
+    async def test_batch_proof(self, workspace, lifespan_state):
+        """A batch body that finishes the proof returns all tactics."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_batch.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="intros. reflexivity.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+        assert cr["proof_tactics"] == ["intros.", "reflexivity."]
+
+    @pytest.mark.asyncio
+    async def test_no_proof_tactics_when_not_finished(self, workspace, lifespan_state):
+        """proof_tactics and proof_hint are absent when proof is not finished."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_notfinished.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="intros.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is False
+        assert "proof_tactics" not in cr
+        assert "proof_hint" not in cr
+
+    @pytest.mark.asyncio
+    async def test_branching_returns_committed_path(self, workspace, lifespan_state):
+        """After branching, proof_tactics reflects only the committed path."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_branch.v"
+        vfile.write_text(
+            "From Coq Require Import Arith.\n\n"
+            "Theorem t : forall n : nat, n + 0 = n.\n"
+            "Proof.\n"
+            "  intros n. induction n as [| n' IH].\n"
+            "  - reflexivity.\n"
+            "  - simpl. rewrite IH. reflexivity.\n"
+            "Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+        root = sr["state_id"]
+
+        # Path A: start with intros
+        cr_a = await run_check(
+            body="intros n.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        assert cr_a["success"] is True
+
+        # Path B (abandoned): also from root, different tactic
+        cr_b = await run_check(
+            body="intro.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        assert cr_b["success"] is True
+
+        # Continue path A to completion
+        cr_finish = await run_check(
+            body="induction n as [| n' IH]. - reflexivity. - simpl. rewrite IH. reflexivity.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=cr_a["state_id"],
+        )
+        assert cr_finish["success"] is True
+        assert cr_finish["proof_finished"] is True
+        # Path B's "intro." must NOT appear in the tactics
+        tactics = cr_finish["proof_tactics"]
+        assert tactics[0] == "intros n."
+        assert "intro." not in tactics

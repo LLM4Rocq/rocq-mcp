@@ -158,14 +158,14 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_
 src/rocq_mcp/
   __init__.py       Package init
   server.py         MCP server, 8 tool definitions, pet subprocess management
-  coqc_tools.py     coqc-based tools: compile, verify
+  compile.py        coqc-based tools: compile, verify
   interactive.py    pytanque-based tools: start, check, step_multi, query, toc, notations
   verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
   conftest.py           Shared fixtures
   test_compile.py       Tests for rocq_compile
   test_verify.py        Tests for rocq_verify
-  test_auto_solve.py    Tests for auto_solve internals
+  test_auto_solve.py    Tests for sentence utilities and step_multi auto-solving
   test_server.py        Tests for server helpers (_format_error, _parse_project_flags, etc.)
   test_format_error.py  Tests for error formatting
   test_query.py         Tests for rocq_query (requires pet)

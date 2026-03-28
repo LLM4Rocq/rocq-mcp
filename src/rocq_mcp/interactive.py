@@ -14,7 +14,7 @@ Tools:
 
 Infrastructure:
 - **Import cache** — ``_get_or_create_import_state`` caches the pytanque
-  State after running import commands, giving ~65x speedup on repeated calls.
+  State after running import commands, skipping re-processing on repeated calls.
 - **State table** — ``_state_table`` stores all proof states with integer
   IDs, enabling tree-shaped exploration via ``from_state=N``.
 """
@@ -147,8 +147,7 @@ def _get_or_create_import_state(
     Writes all *import_commands* to a cache ``.v`` file so that coq-lsp
     processes them natively, then calls ``get_state_at_pos`` at the end
     of the file.  Subsequent calls with the same imports and workspace
-    return the cached State instantly (~0ms vs ~200ms for large imports
-    like mathcomp).
+    return the cached State instantly (skipping import re-processing).
     """
     imports_key = hashlib.sha256("\n".join(import_commands).encode()).hexdigest()
     ws = str(Path(workspace).resolve())
@@ -287,7 +286,7 @@ def _reconstruct_tactic_path(state_id: int) -> tuple[list[str], bool]:
     """Walk the parent_id chain backward and return (tactics in root→leaf order, complete).
 
     Returns (tactics, True) if the full chain to root was traversed.
-    Returns (tactics, False) if the chain was broken by eviction or depth limit.
+    Returns (tactics, False) if the chain was broken by eviction or cycle.
     """
     tactics: list[str] = []
     current_id: int | None = state_id
@@ -333,7 +332,7 @@ async def run_query(
     """Core implementation of rocq_query (testable without FastMCP Context).
 
     Uses the import cache for preamble commands — repeated queries with the
-    same imports skip the import phase entirely (~65x faster).
+    same imports skip the import phase entirely.
     """
     forbidden = _check_forbidden_commands(command)
     if forbidden:

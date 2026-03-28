@@ -227,7 +227,7 @@ def _format_error(
     # Deduplicate warnings by body text — coqc often emits the same
     # deprecation notice multiple times during elaboration.
     # Cap at _MAX_FORMAT_WARNINGS unique warnings to avoid drowning
-    # LLM context (math-comp can emit dozens of unique warnings).
+    # LLM context (large projects can emit many unique warnings).
     selected = []
     seen_warnings: set[str] = set()
     for d in parsed:

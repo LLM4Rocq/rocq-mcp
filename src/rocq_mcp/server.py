@@ -881,7 +881,7 @@ async def rocq_check(
     """Run proof commands from cached imports — fast iterative checking.
 
     Much faster than rocq_compile for iterative proof development:
-    imports are cached (~0.2s first time, ~0ms after), and on error
+    imports are cached (first call processes them, subsequent calls skip), and on error
     returns the last valid state for immediate interactive recovery
     via rocq_check(from_state=...) or rocq_step_multi(from_state=...).
 

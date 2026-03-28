@@ -5,6 +5,16 @@ TestParseCoqcErrorPositions: structured error position parsing
 TestValidateWorkspace: workspace containment + existence checks
 TestParseProjectFlags: _RocqProject / _CoqProject parsing
 TestForceReleasePetLock: _force_release_pet_lock deadlock recovery
+TestReconstructTacticPath: state table chain walk + completeness flag
+TestFormatGoals: goal formatting, truncation by count and length
+TestRunCheckBodySizeLimit: run_check body size rejection
+TestStateTableEviction: eviction logic + expired/nonexistent error messages
+TestPetInvalidationHooks: invalidation hooks clear state table + import cache
+TestRunCheckBodyWithinLimit: run_check body within size limit passes check
+TestKillPet: _kill_pet process termination (signals, escalation, FD cleanup)
+TestEnsurePetHooks: _ensure_pet invalidation hooks on dead pet detection
+TestRunWithPetExceptionHandling: _run_with_pet PetanqueError/BrokenPipe/FileNotFound paths
+TestFormatGoalsDefField: _format_goals hypothesis def_ field rendering
 """
 
 from __future__ import annotations
@@ -24,10 +34,12 @@ from rocq_mcp.server import (
     _parse_coqc_error_positions,
     _parse_project_flags,
     _PetLockTimeout,
+    _run_with_pet,
     _validate_workspace,
     _MAX_ERROR_LENGTH,
     _MAX_FORMAT_WARNINGS,
 )
+from rocq_mcp.interactive import _format_goals
 
 # =========================================================================
 # _format_error
@@ -578,7 +590,9 @@ class TestReconstructTacticPath:
 
         root = self._add_state(None, None, step=0)
         s1 = self._add_state(root, "intros.", step=1)
-        assert _reconstruct_tactic_path(s1) == ["intros."]
+        tactics, complete = _reconstruct_tactic_path(s1)
+        assert tactics == ["intros."]
+        assert complete is True
 
     def test_multi_step_chain(self):
         """Chain: root → t1 → t2 → t3."""
@@ -588,18 +602,22 @@ class TestReconstructTacticPath:
         s1 = self._add_state(root, "intros.", step=1)
         s2 = self._add_state(s1, "induction n.", step=2)
         s3 = self._add_state(s2, "reflexivity.", step=3)
-        assert _reconstruct_tactic_path(s3) == [
+        tactics, complete = _reconstruct_tactic_path(s3)
+        assert tactics == [
             "intros.",
             "induction n.",
             "reflexivity.",
         ]
+        assert complete is True
 
     def test_root_state_returns_empty(self):
         """Root state (tactic=None) returns empty list."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
         root = self._add_state(None, None, step=0)
-        assert _reconstruct_tactic_path(root) == []
+        tactics, complete = _reconstruct_tactic_path(root)
+        assert tactics == []
+        assert complete is True
 
     def test_branching_follows_parent_chain(self):
         """Two branches from root — each returns only its own path."""
@@ -613,14 +631,20 @@ class TestReconstructTacticPath:
         b1 = self._add_state(root, "intro n.", step=1)
         b2 = self._add_state(b1, "lia.", step=2)
 
-        assert _reconstruct_tactic_path(a2) == ["intros.", "auto."]
-        assert _reconstruct_tactic_path(b2) == ["intro n.", "lia."]
+        tactics_a, complete_a = _reconstruct_tactic_path(a2)
+        assert tactics_a == ["intros.", "auto."]
+        assert complete_a is True
+        tactics_b, complete_b = _reconstruct_tactic_path(b2)
+        assert tactics_b == ["intro n.", "lia."]
+        assert complete_b is True
 
     def test_nonexistent_state_returns_empty(self):
         """Querying a non-existent state_id returns empty list."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        assert _reconstruct_tactic_path(9999) == []
+        tactics, complete = _reconstruct_tactic_path(9999)
+        assert tactics == []
+        assert complete is False
 
     def test_broken_chain_returns_partial(self):
         """If ancestor is evicted, returns partial chain from first found."""
@@ -636,4 +660,857 @@ class TestReconstructTacticPath:
         del _state_table[root]
         del _state_table[s1]
         # Only s2 survives — chain is broken
-        assert _reconstruct_tactic_path(s2) == ["auto."]
+        tactics, complete = _reconstruct_tactic_path(s2)
+        assert tactics == ["auto."]
+        assert complete is False
+
+    def test_cycle_detection(self):
+        """A state whose parent_id points to itself terminates without infinite loop."""
+        from rocq_mcp.interactive import (
+            _reconstruct_tactic_path,
+            _state_table,
+        )
+
+        s1 = self._add_state(None, "intros.", step=0)
+        # Manually create a cycle: s1's parent_id points to itself
+        _state_table[s1].parent_id = s1
+        tactics, complete = _reconstruct_tactic_path(s1)
+        # Should terminate; chain is not complete (cycle detected before reaching root)
+        assert isinstance(tactics, list)
+        assert complete is False
+
+    def test_completeness_flag_true(self):
+        """A normal chain root->s1->s2 returns (tactics, True)."""
+        from rocq_mcp.interactive import _reconstruct_tactic_path
+
+        root = self._add_state(None, None, step=0)
+        s1 = self._add_state(root, "t1.", step=1)
+        s2 = self._add_state(s1, "t2.", step=2)
+        tactics, complete = _reconstruct_tactic_path(s2)
+        assert tactics == ["t1.", "t2."]
+        assert complete is True
+
+    def test_completeness_flag_false_on_eviction(self):
+        """When the root is evicted, returns (partial_tactics, False)."""
+        from rocq_mcp.interactive import (
+            _reconstruct_tactic_path,
+            _state_table,
+        )
+
+        root = self._add_state(None, None, step=0)
+        s1 = self._add_state(root, "intros.", step=1)
+        s2 = self._add_state(s1, "auto.", step=2)
+        # Evict root
+        del _state_table[root]
+        tactics, complete = _reconstruct_tactic_path(s2)
+        assert complete is False
+        # Should still have the tactics from surviving states
+        assert "auto." in tactics
+
+
+# =========================================================================
+# _format_goals — truncation and formatting
+# =========================================================================
+
+
+class TestFormatGoals:
+    """Test _format_goals formatting, truncation by count and by length."""
+
+    def _make_goal(self, hyps_list=None, conclusion="True"):
+        """Create a mock goal object with .hyps and .ty attributes."""
+        from unittest.mock import MagicMock
+
+        goal = MagicMock()
+        goal.ty = conclusion
+        if hyps_list is None:
+            goal.hyps = []
+        else:
+            mock_hyps = []
+            for names, ty in hyps_list:
+                h = MagicMock()
+                h.names = names
+                h.ty = ty
+                h.def_ = None
+                mock_hyps.append(h)
+            goal.hyps = mock_hyps
+        return goal
+
+    def test_truncates_many_goals(self):
+        """More than _MAX_GOALS_SHOWN goals triggers the count truncation message."""
+        from rocq_mcp.interactive import _format_goals, _MAX_GOALS_SHOWN
+
+        goals = [
+            self._make_goal(conclusion=f"goal_{i}") for i in range(_MAX_GOALS_SHOWN + 5)
+        ]
+        result = _format_goals(goals)
+        assert "goals total, showing first" in result
+        assert str(_MAX_GOALS_SHOWN + 5) in result
+
+    def test_truncates_long_output(self):
+        """Goals producing very long text (>_MAX_GOALS_LENGTH) are truncated."""
+        from rocq_mcp.interactive import _format_goals, _MAX_GOALS_LENGTH
+
+        # Create a single goal with a very long conclusion
+        long_conclusion = "x" * (_MAX_GOALS_LENGTH + 500)
+        goals = [self._make_goal(conclusion=long_conclusion)]
+        result = _format_goals(goals)
+        assert "truncated" in result
+        # The result should be bounded (within _MAX_GOALS_LENGTH + truncation message)
+        # The function truncates at _MAX_GOALS_LENGTH then appends message
+        assert len(result) < _MAX_GOALS_LENGTH + 200
+
+    def test_normal_goals_not_truncated(self):
+        """Two small goals should not trigger any truncation."""
+        from rocq_mcp.interactive import _format_goals
+
+        goals = [
+            self._make_goal(hyps_list=([["n"], "nat"],), conclusion="n = n"),
+            self._make_goal(hyps_list=([["m"], "nat"],), conclusion="m = m"),
+        ]
+        result = _format_goals(goals)
+        assert "truncated" not in result
+        assert "goals total, showing first" not in result
+        # Both goals should be present
+        assert "Goal 1:" in result
+        assert "Goal 2:" in result
+        assert "n = n" in result
+        assert "m = m" in result
+
+
+# =========================================================================
+# run_check body size limit
+# =========================================================================
+
+
+class TestRunCheckBodySizeLimit:
+    """Test that run_check rejects bodies larger than ROCQ_MAX_SOURCE_SIZE."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state_table(self):
+        """Reset state table before/after each test."""
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        yield
+        _state_invalidate_all()
+
+    def _add_state(self, parent_id, tactic, step=0):
+        """Helper: add a mock state entry to the table."""
+        from rocq_mcp.interactive import _state_add
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.proof_finished = False
+        return _state_add(
+            state=state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=parent_id,
+            tactic=tactic,
+            step=step,
+        )
+
+    @pytest.mark.asyncio
+    async def test_body_too_large(self, monkeypatch):
+        """run_check with body exceeding ROCQ_MAX_SOURCE_SIZE returns error."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_check
+
+        # Set a small source size limit for testing
+        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 100)
+
+        # Create a state so that from_state lookup would succeed
+        root = self._add_state(None, None, step=0)
+
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": None,
+        }
+
+        # Create body larger than the limit
+        big_body = "x" * 200
+
+        result = await run_check(
+            body=big_body,
+            workspace="/tmp",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        assert result["success"] is False
+        assert (
+            "too large" in result["error"].lower()
+            or "Body too large" in result["error"]
+        )
+
+
+# =========================================================================
+# State table eviction
+# =========================================================================
+
+
+class TestStateTableEviction:
+    """Test state table eviction when _MAX_STATES is exceeded."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state_table(self):
+        """Reset state table before/after each test."""
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        yield
+        _state_invalidate_all()
+
+    def _add_state(self, parent_id, tactic, step=0):
+        """Helper: add a mock state entry to the table."""
+        from rocq_mcp.interactive import _state_add
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.proof_finished = False
+        return _state_add(
+            state=state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=parent_id,
+            tactic=tactic,
+            step=step,
+        )
+
+    def test_eviction_removes_oldest(self, monkeypatch):
+        """When more states than _MAX_STATES are added, oldest are evicted."""
+        import rocq_mcp.interactive as intermod
+
+        monkeypatch.setattr(intermod, "_MAX_STATES", 5)
+
+        ids = []
+        for i in range(7):
+            sid = self._add_state(None, f"tactic_{i}.", step=i)
+            ids.append(sid)
+
+        from rocq_mcp.interactive import _state_table
+
+        # Only the last 5 should remain
+        assert len(_state_table) == 5
+        # First 2 should be evicted
+        assert ids[0] not in _state_table
+        assert ids[1] not in _state_table
+        # Last 5 should still exist
+        for sid in ids[2:]:
+            assert sid in _state_table
+
+    def test_evicted_state_returns_expired_error(self, monkeypatch):
+        """Looking up an evicted state_id returns an 'expired' error."""
+        import rocq_mcp.interactive as intermod
+        from rocq_mcp.interactive import _state_get_or_error
+
+        monkeypatch.setattr(intermod, "_MAX_STATES", 3)
+
+        ids = []
+        for i in range(5):
+            sid = self._add_state(None, f"tactic_{i}.", step=i)
+            ids.append(sid)
+
+        # ids[0] and ids[1] should have been evicted
+        entry, err = _state_get_or_error(ids[0])
+        assert entry is None
+        assert err is not None
+        assert "expired" in err.lower()
+
+    def test_nonexistent_state_returns_does_not_exist(self):
+        """Looking up a state_id higher than _state_next_id returns 'does not exist'."""
+        from rocq_mcp.interactive import _state_get_or_error, _state_next_id
+
+        # Use an ID well beyond the next expected ID
+        future_id = _state_next_id + 1000
+        entry, err = _state_get_or_error(future_id)
+        assert entry is None
+        assert err is not None
+        assert "does not exist" in err.lower()
+
+
+# =========================================================================
+# Pet invalidation hooks
+# =========================================================================
+
+
+class TestPetInvalidationHooks:
+    """Test that pet invalidation hooks clear state table and import cache."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        from rocq_mcp.interactive import _state_invalidate_all, _invalidate_import_cache
+
+        _state_invalidate_all()
+        _invalidate_import_cache()
+        yield
+        _state_invalidate_all()
+        _invalidate_import_cache()
+
+    def test_hooks_clear_state_table(self):
+        """Invalidation hooks clear the state table."""
+        from rocq_mcp.interactive import _state_add, _state_table, _state_invalidate_all
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.proof_finished = False
+        _state_add(
+            state=state,
+            file="t.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+        assert len(_state_table) > 0
+
+        _state_invalidate_all()
+        assert len(_state_table) == 0
+
+    def test_hooks_clear_import_cache(self):
+        """Invalidation hooks clear the import cache."""
+        from rocq_mcp.interactive import _import_cache, _invalidate_import_cache
+
+        _import_cache["test_key"] = "test_value"
+        assert len(_import_cache) > 0
+
+        _invalidate_import_cache()
+        assert len(_import_cache) == 0
+
+    def test_hooks_registered_in_server(self):
+        """Both hooks are registered in _pet_invalidation_hooks."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all, _invalidate_import_cache
+
+        hook_funcs = srv._pet_invalidation_hooks
+        assert _state_invalidate_all in hook_funcs
+        assert _invalidate_import_cache in hook_funcs
+
+    def test_invalidate_pet_calls_hooks(self):
+        """_invalidate_pet triggers hooks that clear state table and import cache."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import (
+            _state_add,
+            _state_table,
+            _import_cache,
+        )
+        from unittest.mock import MagicMock
+
+        # Populate state table
+        state = MagicMock()
+        state.proof_finished = False
+        _state_add(
+            state=state,
+            file="t.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+        assert len(_state_table) > 0
+
+        # Populate import cache
+        _import_cache["key"] = "value"
+        assert len(_import_cache) > 0
+
+        # Call _invalidate_pet (no real pet, so pet_client is None)
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+        srv._invalidate_pet(lifespan_state)
+
+        # Both should be cleared
+        assert len(_state_table) == 0
+        assert len(_import_cache) == 0
+
+    def test_import_cache_generation_incremented(self):
+        """_invalidate_import_cache increments the generation counter."""
+        from rocq_mcp.interactive import (
+            _import_cache_generation,
+            _invalidate_import_cache,
+        )
+        import rocq_mcp.interactive as intermod
+
+        gen_before = intermod._import_cache_generation
+        _invalidate_import_cache()
+        assert intermod._import_cache_generation == gen_before + 1
+
+
+# =========================================================================
+# run_check body within size limit
+# =========================================================================
+
+
+class TestRunCheckBodyWithinLimit:
+    """Test that run_check does NOT reject bodies within ROCQ_MAX_SOURCE_SIZE."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_state_table(self):
+        """Reset state table before/after each test."""
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        yield
+        _state_invalidate_all()
+
+    def _add_state(self, parent_id, tactic, step=0):
+        """Helper: add a mock state entry to the table."""
+        from rocq_mcp.interactive import _state_add
+        from unittest.mock import MagicMock
+
+        state = MagicMock()
+        state.proof_finished = False
+        return _state_add(
+            state=state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=parent_id,
+            tactic=tactic,
+            step=step,
+        )
+
+    @pytest.mark.asyncio
+    async def test_body_within_limit(self, monkeypatch):
+        """run_check with body within ROCQ_MAX_SOURCE_SIZE passes the size check."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_check
+
+        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 1000)
+
+        root = self._add_state(None, None, step=0)
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": None,
+        }
+
+        # Body within limit - should NOT be rejected by size check
+        # (will fail for other reasons like no pet, but that's fine)
+        small_body = "x" * 100
+        result = await run_check(
+            body=small_body,
+            workspace="/tmp",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        # Should NOT have the "Body too large" error
+        if not result["success"]:
+            assert "too large" not in result.get("error", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_body_exactly_at_limit(self, monkeypatch):
+        """run_check with body exactly at ROCQ_MAX_SOURCE_SIZE passes the size check."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_check
+
+        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
+
+        root = self._add_state(None, None, step=0)
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": None,
+        }
+
+        # Body exactly at limit (not over)
+        exact_body = "x" * 200
+        result = await run_check(
+            body=exact_body,
+            workspace="/tmp",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        # Should NOT have the "Body too large" error
+        if not result["success"]:
+            assert "too large" not in result.get("error", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_body_one_over_limit(self, monkeypatch):
+        """run_check with body one byte over ROCQ_MAX_SOURCE_SIZE is rejected."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_check
+
+        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
+
+        root = self._add_state(None, None, step=0)
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": None,
+        }
+
+        # Body one byte over limit
+        over_body = "x" * 201
+        result = await run_check(
+            body=over_body,
+            workspace="/tmp",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root,
+        )
+        assert result["success"] is False
+        assert "too large" in result["error"].lower()
+
+
+# =========================================================================
+# _kill_pet — process termination
+# =========================================================================
+
+
+class TestKillPet:
+    """Unit tests for _kill_pet process termination."""
+
+    def test_kill_pet_none(self):
+        """_kill_pet with None pet is a no-op."""
+        from rocq_mcp.server import _kill_pet
+
+        _kill_pet(None)  # Should not raise
+
+    def test_kill_pet_none_process(self):
+        """_kill_pet with pet.process=None is a no-op."""
+        from rocq_mcp.server import _kill_pet
+
+        class FakePet:
+            process = None
+
+        _kill_pet(FakePet())  # Should not raise
+
+    def test_kill_pet_already_dead_skips_signals(self):
+        """_kill_pet skips signals if process already exited (PID reuse guard)."""
+        from rocq_mcp.server import _kill_pet
+        from unittest.mock import MagicMock, patch
+
+        pet = MagicMock()
+        pet.process.poll.return_value = 0  # Already exited
+        pet.process.stdin = MagicMock()
+        pet.process.stdout = MagicMock()
+        pet.process.stderr = MagicMock()
+        pet._own_pgrp = True
+
+        with patch("rocq_mcp.server.os.killpg") as mock_killpg:
+            _kill_pet(pet)
+            mock_killpg.assert_not_called()  # No signals sent
+
+        # But FDs should still be closed
+        pet.process.stdin.close.assert_called_once()
+        pet.process.stdout.close.assert_called_once()
+        pet.process.stderr.close.assert_called_once()
+
+    def test_kill_pet_with_own_pgrp_sends_sigterm(self):
+        """_kill_pet with _own_pgrp=True uses os.killpg(SIGTERM)."""
+        from rocq_mcp.server import _kill_pet
+        from unittest.mock import MagicMock, patch
+        import signal
+
+        pet = MagicMock()
+        pet.process.poll.return_value = None  # Still running
+        pet.process.pid = 12345
+        pet.process.wait.return_value = 0  # Exits after SIGTERM
+        pet.process.stdin = MagicMock()
+        pet.process.stdout = MagicMock()
+        pet.process.stderr = MagicMock()
+        pet._own_pgrp = True
+
+        with (
+            patch("rocq_mcp.server.os.getpgid", return_value=12345) as mock_getpgid,
+            patch("rocq_mcp.server.os.killpg") as mock_killpg,
+        ):
+            _kill_pet(pet)
+            mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_kill_pet_without_own_pgrp_uses_terminate(self):
+        """_kill_pet with _own_pgrp=False uses process.terminate()."""
+        from rocq_mcp.server import _kill_pet
+        from unittest.mock import MagicMock
+
+        pet = MagicMock()
+        pet.process.poll.return_value = None  # Still running
+        pet.process.wait.return_value = 0
+        pet.process.stdin = MagicMock()
+        pet.process.stdout = MagicMock()
+        pet.process.stderr = MagicMock()
+        pet._own_pgrp = False
+
+        _kill_pet(pet)
+        pet.process.terminate.assert_called_once()
+
+    def test_kill_pet_escalates_to_sigkill(self):
+        """_kill_pet escalates to SIGKILL if SIGTERM doesn't work."""
+        from rocq_mcp.server import _kill_pet
+        from unittest.mock import MagicMock, patch
+        import signal
+        import subprocess
+
+        pet = MagicMock()
+        pet.process.poll.return_value = None  # Still running
+        pet.process.pid = 12345
+        # First wait raises TimeoutExpired, second succeeds
+        pet.process.wait.side_effect = [
+            subprocess.TimeoutExpired("coqc", 2),
+            0,
+        ]
+        pet.process.stdin = MagicMock()
+        pet.process.stdout = MagicMock()
+        pet.process.stderr = MagicMock()
+        pet._own_pgrp = True
+
+        with (
+            patch("rocq_mcp.server.os.getpgid", return_value=12345),
+            patch("rocq_mcp.server.os.killpg") as mock_killpg,
+        ):
+            _kill_pet(pet)
+            assert mock_killpg.call_count == 2
+            mock_killpg.assert_any_call(12345, signal.SIGTERM)
+            mock_killpg.assert_any_call(12345, signal.SIGKILL)
+
+
+# =========================================================================
+# _ensure_pet — invalidation hooks on dead pet
+# =========================================================================
+
+
+class TestEnsurePetHooks:
+    """Test that _ensure_pet calls invalidation hooks when pet is dead."""
+
+    def test_hooks_called_on_dead_pet_detection(self):
+        """When _ensure_pet finds a dead pet, it calls _kill_pet and hooks."""
+        import rocq_mcp.server as server
+        from unittest.mock import MagicMock, patch
+
+        hook_calls = []
+        original_hooks = list(server._pet_invalidation_hooks)
+        server._pet_invalidation_hooks.append(lambda: hook_calls.append("called"))
+
+        dead_pet = MagicMock()
+        dead_pet.process.poll.return_value = 1  # Dead
+        dead_pet.process.stdin = MagicMock()
+        dead_pet.process.stdout = MagicMock()
+        dead_pet.process.stderr = MagicMock()
+        dead_pet._own_pgrp = False
+
+        lifespan_state = {"pet_client": dead_pet}
+
+        try:
+            # Mock pytanque import to avoid real subprocess
+            mock_pytanque = MagicMock()
+            mock_new_pet = MagicMock()
+            mock_new_pet.process = MagicMock()
+            mock_new_pet.process.pid = 99999
+            mock_pytanque.Pytanque.return_value = mock_new_pet
+            mock_pytanque.PytanqueMode = MagicMock()
+
+            with patch.dict("sys.modules", {"pytanque": mock_pytanque}):
+                server._ensure_pet(lifespan_state)
+
+            assert "called" in hook_calls, "Invalidation hooks should fire on dead pet"
+            assert lifespan_state["pet_client"] is mock_new_pet
+        finally:
+            server._pet_invalidation_hooks[:] = original_hooks
+
+
+# =========================================================================
+# _run_with_pet — exception handling paths
+# =========================================================================
+
+
+class TestRunWithPetExceptionHandling:
+    """Tests for _run_with_pet exception handling paths."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_semaphore(self):
+        """Reset the global semaphore so tests don't interfere."""
+        import rocq_mcp.server as srv
+
+        srv._pet_semaphore = None
+        yield
+        srv._pet_semaphore = None
+
+    @pytest.mark.asyncio
+    async def test_petanque_error_dead_pet_returns_pet_restarted(self):
+        """PetanqueError + dead pet -> pet_restarted: True."""
+        from unittest.mock import MagicMock
+
+        try:
+            from pytanque import PetanqueError
+        except ImportError:
+            pytest.skip("pytanque not installed")
+
+        # Create a mock pet that appears dead (poll returns non-None)
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = 1  # dead
+        mock_pet.process.stdin = None
+        mock_pet.process.stdout = None
+        mock_pet.process.stderr = None
+        mock_pet._own_pgrp = False
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 10.0,
+            "current_workspace": None,
+        }
+
+        def fn_that_raises(pet):
+            raise PetanqueError(1, "Connection lost")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            result = await _run_with_pet(fn_that_raises, lifespan_state, "Test")
+        assert result["success"] is False
+        assert result.get("pet_restarted") is True
+        assert "Pet process died" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_petanque_error_alive_pet_returns_plain_error(self):
+        """PetanqueError + alive pet -> plain error without pet_restarted."""
+        from unittest.mock import MagicMock
+
+        try:
+            from pytanque import PetanqueError
+        except ImportError:
+            pytest.skip("pytanque not installed")
+
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None  # alive
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 10.0,
+            "current_workspace": None,
+        }
+
+        def fn_that_raises(pet):
+            raise PetanqueError(1, "Tactic failed")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            result = await _run_with_pet(fn_that_raises, lifespan_state, "Test")
+        assert result["success"] is False
+        assert "pet_restarted" not in result
+        assert "Tactic failed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_broken_pipe_calls_on_timeout_callback(self):
+        """BrokenPipeError calls on_timeout callback and returns pet_restarted."""
+        from unittest.mock import MagicMock
+
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = 1  # dead
+        mock_pet.process.stdin = None
+        mock_pet.process.stdout = None
+        mock_pet.process.stderr = None
+        mock_pet._own_pgrp = False
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 10.0,
+            "current_workspace": None,
+        }
+
+        callback_called = []
+
+        def fn_that_raises(pet):
+            raise BrokenPipeError("broken")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            result = await _run_with_pet(
+                fn_that_raises,
+                lifespan_state,
+                "Test",
+                on_timeout=lambda: callback_called.append(True),
+            )
+        assert result["success"] is False
+        assert result.get("pet_restarted") is True
+        assert len(callback_called) == 1
+
+    @pytest.mark.asyncio
+    async def test_file_not_found_returns_helpful_error(self):
+        """FileNotFoundError returns helpful error message."""
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 10.0,
+            "current_workspace": None,
+        }
+
+        def fn(pet):
+            pass  # won't be called
+
+        with pytest.MonkeyPatch.context() as mp:
+
+            def raise_fnf(ls):
+                raise FileNotFoundError("pet")
+
+            mp.setattr("rocq_mcp.server._ensure_pet", raise_fnf)
+            result = await _run_with_pet(fn, lifespan_state, "Test")
+        assert result["success"] is False
+        assert "pet binary not found" in result["error"]
+
+
+# =========================================================================
+# _format_goals — def_ field handling
+# =========================================================================
+
+
+class TestFormatGoalsDefField:
+    """Test _format_goals with hypothesis def_ field."""
+
+    def test_hypothesis_with_def(self):
+        """Hypothesis with def_ should include ':= <value>' in output."""
+        from unittest.mock import MagicMock
+
+        goal = MagicMock()
+        hyp = MagicMock()
+        hyp.names = ["x"]
+        hyp.def_ = "0"
+        hyp.ty = "nat"
+        goal.hyps = [hyp]
+        goal.ty = "x = 0"
+
+        result = _format_goals([goal])
+        assert ":= 0" in result
+        assert ": nat" in result
+
+    def test_hypothesis_without_def(self):
+        """Hypothesis with def_=None should NOT include ':=' in output."""
+        from unittest.mock import MagicMock
+
+        goal = MagicMock()
+        hyp = MagicMock()
+        hyp.names = ["x"]
+        hyp.def_ = None
+        hyp.ty = "nat"
+        goal.hyps = [hyp]
+        goal.ty = "x = 0"
+
+        result = _format_goals([goal])
+        assert ":=" not in result
+        assert ": nat" in result
+
+    def test_hypothesis_with_empty_string_def(self):
+        """Hypothesis with def_='' (empty) should NOT include ':=' in output."""
+        from unittest.mock import MagicMock
+
+        goal = MagicMock()
+        hyp = MagicMock()
+        hyp.names = ["x"]
+        hyp.def_ = ""
+        hyp.ty = "nat"
+        goal.hyps = [hyp]
+        goal.ty = "x = 0"
+
+        result = _format_goals([goal])
+        assert ":=" not in result
+        assert ": nat" in result

@@ -43,28 +43,41 @@ import rocq_mcp.server as _server
 # rocq_mcp.server is visible.
 from rocq_mcp.server import _PetLockTimeout
 
-# _split_rocq_sentences is in coqc_tools — import directly (no cycle).
-from rocq_mcp.coqc_tools import _split_rocq_sentences
+# _split_rocq_sentences is in compile — import directly (no cycle).
+from rocq_mcp.compile import _split_rocq_sentences
 
 # ---------------------------------------------------------------------------
-# Goal formatting helper (shared by run_step, run_step_multi, fast_check)
+# Goal formatting helper (shared by run_check, run_step_multi)
 # ---------------------------------------------------------------------------
+
+_MAX_GOALS_LENGTH: int = 8000  # Max chars for formatted goals output
+_MAX_GOALS_SHOWN: int = 10  # Max number of goals to format
 
 
 def _format_goals(goals_list: list[Any]) -> str:
     """Format goal objects into readable text with hypotheses."""
+    total = len(goals_list)
+    shown = min(total, _MAX_GOALS_SHOWN)
     parts = []
-    for i, g in enumerate(goals_list):
+    for i, g in enumerate(goals_list[:shown]):
         hyps = "\n".join(
             f"{', '.join(h.names)}" f"{' := ' + h.def_ if h.def_ else ''}" f" : {h.ty}"
             for h in g.hyps
         )
         pp = f"{hyps}\n|-{g.ty}"
-        if len(goals_list) > 1:
+        if total > 1:
             parts.append(f"Goal {i + 1}:\n{pp}")
         else:
             parts.append(pp)
-    return "\n\n".join(parts)
+    if total > shown:
+        parts.append(f"... ({total} goals total, showing first {shown})")
+    result = "\n\n".join(parts)
+    total_len = len(result)
+    if total_len > _MAX_GOALS_LENGTH:
+        result = (
+            result[:_MAX_GOALS_LENGTH] + f"... (truncated, {total_len} chars total)"
+        )
+    return result
 
 
 def _try_get_goals(pet: Any, state: Any) -> str | None:
@@ -137,7 +150,7 @@ def _get_or_create_import_state(
     return the cached State instantly (~0ms vs ~200ms for large imports
     like mathcomp).
     """
-    imports_key = hashlib.md5("\n".join(import_commands).encode()).hexdigest()
+    imports_key = hashlib.sha256("\n".join(import_commands).encode()).hexdigest()
     ws = str(Path(workspace).resolve())
 
     cached = _import_cache.get(imports_key)
@@ -152,7 +165,7 @@ def _get_or_create_import_state(
     # will process these as part of the file, so ``get_state_at_pos``
     # at the end gives us the complete post-import state.
     cache_content = "\n".join(import_commands) + "\n" if import_commands else ""
-    cache_file = Path(ws) / "rocq_mcp_cache_.v"
+    cache_file = Path(ws) / f"rocq_mcp_cache_{os.getpid()}_.v"
     file_changed = not cache_file.exists() or cache_file.read_text() != cache_content
     if file_changed:
         cache_file.write_text(cache_content)
@@ -270,14 +283,19 @@ def _state_invalidate_all() -> None:
     _state_current_id = None
 
 
-def _reconstruct_tactic_path(state_id: int) -> list[str]:
-    """Walk the parent_id chain backward and return tactics in root→leaf order.
+def _reconstruct_tactic_path(state_id: int) -> tuple[list[str], bool]:
+    """Walk the parent_id chain backward and return (tactics in root→leaf order, complete).
 
-    Returns an empty list if the chain is broken (eviction/crash).
+    Returns (tactics, True) if the full chain to root was traversed.
+    Returns (tactics, False) if the chain was broken by eviction or depth limit.
     """
     tactics: list[str] = []
     current_id: int | None = state_id
+    visited: set[int] = set()
     while current_id is not None:
+        if current_id in visited:
+            break  # cycle detected
+        visited.add(current_id)
         entry = _state_get(current_id)
         if entry is None:
             break  # chain broken by eviction
@@ -285,7 +303,8 @@ def _reconstruct_tactic_path(state_id: int) -> list[str]:
             tactics.append(entry.tactic)
         current_id = entry.parent_id
     tactics.reverse()
-    return tactics
+    complete = current_id is None  # True only if we reached root (parent_id=None)
+    return tactics, complete
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +597,7 @@ async def run_start(
                 "goals": goals,
                 "file": file,
                 "theorem": theorem,
+                "proof_finished": getattr(state, "proof_finished", False),
             }
         elif _start_by_pos:
             resolved_file = str((Path(workspace).resolve() / file).resolve())
@@ -599,6 +619,7 @@ async def run_start(
                 "goals": goals,
                 "file": file,
                 "theorem": f"@pos({line},{character})",
+                "proof_finished": getattr(state, "proof_finished", False),
             }
         else:
             # Preamble mode
@@ -621,6 +642,7 @@ async def run_start(
                 "goals": "",
                 "file": "<preamble>",
                 "theorem": "<preamble>",
+                "proof_finished": getattr(import_state, "proof_finished", False),
             }
 
     return await _server._run_with_pet(
@@ -648,6 +670,12 @@ async def run_check(
     Returns state_id, goals, proof_finished, and timing info.
     On error mid-batch, returns last_valid_state_id for recovery.
     """
+    if len(body) > _server.ROCQ_MAX_SOURCE_SIZE:
+        return {
+            "success": False,
+            "error": f"Body too large ({len(body)} bytes, max {_server.ROCQ_MAX_SOURCE_SIZE}).",
+        }
+
     forbidden = _check_forbidden_commands(body)
     if forbidden:
         return {"success": False, "error": forbidden}
@@ -660,19 +688,21 @@ async def run_check(
         if err:
             return {"success": False, "error": err}
         base_state_id = from_state
-    elif _state_current_id is not None:
-        entry = _state_get(_state_current_id)
-        if entry is None:
+    else:
+        cur_id = _state_current_id
+        if cur_id is not None:
+            entry = _state_get(cur_id)
+            if entry is None:
+                return {
+                    "success": False,
+                    "error": "No active state. Use rocq_start first.",
+                }
+            base_state_id = cur_id
+        else:
             return {
                 "success": False,
                 "error": "No active state. Use rocq_start first.",
             }
-        base_state_id = _state_current_id
-    else:
-        return {
-            "success": False,
-            "error": "No active state. Use rocq_start first.",
-        }
 
     # Empty body — return early
     if not commands:
@@ -701,33 +731,47 @@ async def run_check(
                 ),
             }
 
-        start_time = time.monotonic()
-        _server._set_workspace_if_needed(pet, entry.workspace, lifespan_state)
+        # Re-validate state under lock (pet may have restarted since outer check)
+        re_entry, re_err = _state_get_or_error(base_state_id)
+        if re_err:
+            return {"success": False, "error": re_err}
+        entry_to_use = re_entry
 
-        state = entry.state
+        start_time = time.monotonic()
+        _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
+
+        state = entry_to_use.state
         prev_state_id = base_state_id
 
         for i, cmd in enumerate(commands):
             try:
-                # Two-tier timeout for single-command mode
-                if is_single and _is_timeout_eligible(cmd) and _timeout >= 1:
-                    rocq_timeout = int(_timeout)
+                if _is_timeout_eligible(cmd) and _timeout >= 1:
+                    if is_single:
+                        rocq_timeout = int(_timeout)
+                    else:
+                        # Budget: divide timeout among commands so total
+                        # stays within the hard_timeout window.
+                        rocq_timeout = max(1, int(_timeout / len(commands)))
                 else:
                     rocq_timeout = None
 
                 new_state = pet.run(state, cmd, timeout=rocq_timeout)
                 state_id = _state_add(
                     state=new_state,
-                    file=entry.file,
-                    theorem=entry.theorem,
-                    workspace=entry.workspace,
+                    file=entry_to_use.file,
+                    theorem=entry_to_use.theorem,
+                    workspace=entry_to_use.workspace,
                     parent_id=prev_state_id,
                     tactic=cmd,
-                    step=entry.step + i + 1,
+                    step=entry_to_use.step + i + 1,
                 )
                 prev_state_id = state_id
                 state = new_state
             except PetanqueError as e:
+                # If pet died, re-raise so _run_with_pet detects it
+                # and returns pet_restarted=True to the client.
+                if not _server._pet_alive(lifespan_state.get("pet_client")):
+                    raise
                 goals = _try_get_goals(pet, state)
                 result: dict[str, Any] = {
                     "success": False,
@@ -770,9 +814,11 @@ async def run_check(
         if complete and complete.given_up:
             result["given_up_goals"] = len(complete.given_up)
         if state.proof_finished and prev_state_id is not None:
-            tactics = _reconstruct_tactic_path(prev_state_id)
+            tactics, chain_complete = _reconstruct_tactic_path(prev_state_id)
             if tactics:
                 result["proof_tactics"] = tactics
+            if not chain_complete:
+                result["proof_tactics_complete"] = False
             result["proof_hint"] = (
                 "Proof complete! Assemble imports + theorem statement "
                 "+ Proof. + tactics + Qed. then validate with "
@@ -780,8 +826,8 @@ async def run_check(
             )
         return result
 
-    # Timeout strategy: single-command uses two-tier, multi uses global
-    if is_single and _timeout >= 1:
+    # Timeout strategy: both single and multi-command use two-tier when eligible
+    if _timeout >= 1:
         hard_timeout = _compute_hard_timeout(_timeout)
     else:
         hard_timeout = _timeout
@@ -842,10 +888,19 @@ async def run_step_multi(
     # Shared list so partial results survive a timeout
     partial_results: list[dict[str, Any]] = []
 
+    # Quick pre-check to avoid acquiring lock for invalid states.
+    # Re-validated inside _execute (state may be invalidated between checks).
+    if from_state is not None:
+        entry, err = _state_get_or_error(from_state)
+        if err:
+            return {"success": False, "error": err}
+    elif _state_current_id is None:
+        return {"success": False, "error": "No active state. Use rocq_start first."}
+
     async with sem:
 
         def _execute() -> dict[str, Any]:
-            # Access _pet_lock via module ref — see run_step comment.
+            # Access _pet_lock via module ref — see run_check comment.
             lock = _server._pet_lock
             if not lock.acquire(timeout=hard_timeout * 0.8):
                 raise _PetLockTimeout("Could not acquire pet lock")
@@ -884,8 +939,11 @@ async def run_step_multi(
                         tac += "."
 
                     # Per-tactic Rocq-level timeout for eligible tactics
+                    # Budget: divide timeout among all tactics so total
+                    # stays within the hard_timeout window.
+                    per_tactic_budget = max(1, int(timeout / len(tactics)))
                     tac_rocq_timeout = (
-                        int(timeout)
+                        per_tactic_budget
                         if _is_timeout_eligible(tac) and timeout >= 1
                         else None
                     )
@@ -908,6 +966,10 @@ async def run_step_multi(
                         if complete and complete.given_up:
                             entry_dict["given_up_goals"] = len(complete.given_up)
                     except PetanqueError as e:
+                        # If pet died, re-raise so outer handler detects it
+                        # and returns pet_restarted=True to the client.
+                        if not _server._pet_alive(lifespan_state.get("pet_client")):
+                            raise
                         entry_dict["success"] = False
                         entry_dict["error"] = e.message
 
@@ -939,6 +1001,7 @@ async def run_step_multi(
                     f"Multi-tactic exploration timed out after {timeout}s. "
                     "All states invalidated. Use rocq_start to begin a new session."
                 ),
+                "pet_restarted": True,
             }
             if partial_results:
                 resp["partial_results"] = list(partial_results)
@@ -949,11 +1012,27 @@ async def run_step_multi(
                 "error": "pet is busy (lock contention). Try again.",
             }
         except PetanqueError as e:
+            if not _server._pet_alive(lifespan_state.get("pet_client")):
+                _server._invalidate_pet(lifespan_state)
+                await _server._force_release_pet_lock()
+                return {
+                    "success": False,
+                    "error": f"Pet process died: {e.message}",
+                    "pet_restarted": True,
+                }
             return {"success": False, "error": e.message}
         except FileNotFoundError:
             return {
                 "success": False,
                 "error": "pet binary not found on PATH.",
             }
-        except Exception as e:
+        except (BrokenPipeError, ConnectionError) as e:
+            _server._invalidate_pet(lifespan_state)
+            await _server._force_release_pet_lock()
+            return {
+                "success": False,
+                "error": f"Pet process died: {e}",
+                "pet_restarted": True,
+            }
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
             return {"success": False, "error": f"Unexpected error: {e}"}

@@ -544,6 +544,16 @@ class TestBuildVerificationSource:
                 problem_statement="Theorem t : True.\nAdmitted.",
             )
 
+    def test_printing_depth_reset_in_standard_template(self):
+        """Standard Module M template must reset Printing Depth after End M."""
+        source = build_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.",
+        )
+        after_end = source[source.index("End M.") :]
+        assert "Set Printing Depth 1000000." in after_end
+
 
 # ---------------------------------------------------------------------------
 # classify_toc_detail
@@ -1029,6 +1039,23 @@ class TestBuildSharedDefsVerificationSource:
         idx_module = source.index("Module M.")
         idx_end = source.index("End M.")
         assert idx_module < idx_helper < idx_end
+
+    def test_printing_depth_reset_in_shared_defs_template(self):
+        """Shared-defs template must reset Printing Depth after End M."""
+        structure = self._make_structure(
+            defs=[("state", "Definition", "Definition state := list nat.")],
+            theorem_source="Theorem foo : True.",
+            full_source=(
+                "Definition state := list nat.\n" "Theorem foo : True.\nAdmitted."
+            ),
+        )
+        source = build_shared_defs_verification_source(
+            proof="Definition state := list nat.\nTheorem foo : True.\nProof. exact I. Qed.",
+            problem_name="foo",
+            structure=structure,
+        )
+        after_end = source[source.index("End M.") :]
+        assert "Set Printing Depth 1000000." in after_end
 
     def test_end_m_in_proof_rejected_shared_defs(self):
         """End M. in proof must be rejected even in shared-defs template."""
@@ -1591,10 +1618,102 @@ class TestCheckForbiddenCommands:
         """End Foo. must not be detected — only End M. is forbidden."""
         assert _check_forbidden_commands("End Foo.") is None
 
+    def test_print_universes_with_file_blocked(self):
+        """Print Universes with a file argument writes to disk and must be blocked."""
+        assert _check_forbidden_commands('Print Universes "/tmp/out.txt".') is not None
+
+    def test_print_sorted_universes_with_file_blocked(self):
+        """Print Sorted Universes with a file argument writes to disk and must be blocked."""
+        assert (
+            _check_forbidden_commands('Print Sorted Universes "/tmp/out.txt".')
+            is not None
+        )
+
+    def test_print_universes_without_file_allowed(self):
+        """Print Universes without a file (stdout only) is safe and must be allowed."""
+        assert _check_forbidden_commands("Print Universes.") is None
+
+    def test_extraction_testcompile_blocked(self):
+        """Extraction TestCompile invokes an external compiler and must be blocked."""
+        assert _check_forbidden_commands("Extraction TestCompile nat.") is not None
+
+    def test_extraction_bare_allowed(self):
+        """Plain Extraction (stdout) is acceptable and must not be blocked."""
+        assert _check_forbidden_commands("Extraction nat.") is None
+
+    def test_print_universes_in_comment_allowed(self):
+        """Print Universes inside a comment must not trigger the scanner."""
+        assert (
+            _check_forbidden_commands('(* Print Universes "/tmp/out.txt". *)') is None
+        )
+
     def test_returns_descriptive_message(self):
         """Error messages should describe the forbidden command."""
         msg = _check_forbidden_commands("Drop.")
         assert "Drop" in msg
+
+
+# ---------------------------------------------------------------------------
+# Whitespace bypass variants for multi-word forbidden patterns (SEC-1/2/3/4)
+# ---------------------------------------------------------------------------
+
+
+class TestForbiddenWhitespaceBypasses:
+    """Verify that multi-word forbidden patterns match newline/tab/multi-space variants."""
+
+    def test_declare_ml_module_newline(self):
+        result = _check_forbidden_commands('Declare ML\n  Module "test".')
+        assert result is not None
+        assert "Declare ML Module" in result
+
+    def test_declare_ml_module_tab(self):
+        result = _check_forbidden_commands('Declare ML\tModule "test".')
+        assert result is not None
+
+    def test_declare_ml_module_double_space(self):
+        result = _check_forbidden_commands('Declare  ML  Module "test".')
+        assert result is not None
+
+    def test_separate_extraction_newline(self):
+        result = _check_forbidden_commands("Separate\nExtraction foo.")
+        assert result is not None
+        assert "Separate Extraction" in result
+
+    def test_separate_extraction_tab(self):
+        result = _check_forbidden_commands("Separate\tExtraction foo.")
+        assert result is not None
+
+    def test_recursive_extraction_newline(self):
+        result = _check_forbidden_commands("Recursive\n  Extraction foo.")
+        assert result is not None
+        assert "Recursive Extraction" in result
+
+    def test_recursive_extraction_crlf(self):
+        result = _check_forbidden_commands("Recursive\r\nExtraction foo.")
+        assert result is not None
+
+    def test_extraction_output_directory_basic(self):
+        result = _check_forbidden_commands('Set Extraction Output Directory "/tmp".')
+        assert result is not None
+        assert "Extraction Output Directory" in result
+
+    def test_extraction_output_directory_newline(self):
+        result = _check_forbidden_commands('Set Extraction\nOutput\nDirectory "/tmp".')
+        assert result is not None
+
+    def test_extraction_output_directory_in_comment_ok(self):
+        """Extraction Output Directory inside a comment should NOT be flagged."""
+        result = _check_forbidden_commands(
+            '(* Set Extraction Output Directory "/tmp". *)'
+        )
+        assert result is None
+
+    def test_extraction_output_directory_in_string_ok(self):
+        """Extraction Output Directory inside a string should NOT be flagged."""
+        result = _check_forbidden_commands(
+            'Definition x := "Extraction Output Directory".'
+        )
+        assert result is None
 
 
 # =========================================================================
@@ -1631,10 +1750,7 @@ class TestVerifySuccess:
         )
         assert result["verified"] is True
         # Should list classic as a standard axiom
-        if (
-            "assumptions" in result
-            and result["assumptions"] != "Closed under the global context"
-        ):
+        if "assumptions" in result and result["assumptions"] != []:
             assert any("classic" in a for a in result["assumptions"])
 
     async def test_braces_in_proof(self, workspace, braces_proof):
@@ -1647,6 +1763,27 @@ class TestVerifySuccess:
         result = await rocq_verify(
             proof=braces_proof,
             problem_name="add_comm_example",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+
+    async def test_printing_depth_reset(self, workspace):
+        """Proof that sets Printing Depth to 1 must still verify.
+
+        If Set Printing Depth 1 is inside the proof (Module M), it could
+        truncate Print Assumptions output. The template resets Printing Depth
+        to 1000000 after End M., so verification should succeed.
+        """
+        proof = (
+            "Require Import Arith.\n"
+            "Theorem depth_test : 1 + 1 = 2.\n"
+            "Proof. Set Printing Depth 1. reflexivity. Qed.\n"
+        )
+        problem = "Require Import Arith.\nTheorem depth_test : 1 + 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="depth_test",
             problem_statement=problem,
             workspace=str(workspace),
         )

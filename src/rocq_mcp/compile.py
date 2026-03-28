@@ -1,4 +1,4 @@
-"""Rocq MCP Server — coqc-based tools (compile, verify, auto_solve).
+"""Rocq MCP Server — coqc-based tools (compile, verify).
 
 This module contains the implementation of all tools that use the coqc
 binary directly (no pytanque dependency for core operation).  The
@@ -13,14 +13,12 @@ import re
 import signal
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from typing import Any
 
 from rocq_mcp.verify import (
     _check_forbidden_commands,
     _rocq_scan,
-    _THEOREM_DETAILS,
     build_verification_source,
     build_shared_defs_verification_source,
     classify_toc_detail,
@@ -85,18 +83,28 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
                 "timed_out": False,
             }
         except subprocess.TimeoutExpired:
-            # Kill the entire process group (coqc + any children)
+            # Graceful shutdown: SIGTERM first, escalate to SIGKILL
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except OSError:
                 try:
-                    proc.kill()
+                    proc.terminate()
                 except OSError:
                     pass
             try:
-                stdout, stderr = proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(timeout=3)
             except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except OSError:
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = "", ""
             return {
                 "returncode": -1,
                 "stdout": stdout or "",
@@ -590,7 +598,7 @@ def _build_assumptions_result(
         return {
             "verified": True,
             "verification_method": method,
-            "assumptions": "Closed under the global context",
+            "assumptions": [],
             **({"note": note_suffix.rstrip()} if note_suffix else {}),
         }
     elif verdict == "standard_only":
@@ -749,39 +757,8 @@ async def run_verify(
 
 
 # ---------------------------------------------------------------------------
-# Tool: rocq_auto_solve (helpers + core implementation)
+# Rocq sentence utilities
 # ---------------------------------------------------------------------------
-
-# Theorem-like keywords — derived from verify._THEOREM_DETAILS (single source of truth).
-_THEOREM_KEYWORDS: tuple[str, ...] = tuple(sorted(_THEOREM_DETAILS))
-
-_THEOREM_KW_RE = re.compile(
-    r"^(" + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS) + r")\s+",
-    re.MULTILINE,
-)
-
-# Tactics tried in order from cheapest to most expensive.
-_AUTO_SOLVE_TACTICS: list[str] = [
-    "trivial",
-    "reflexivity",
-    "assumption",
-    "exact I",
-    "auto",
-    "eauto",
-    "tauto",
-    "intuition",
-    "lia",
-    "lra",
-    "nia",
-    "nra",
-    "ring",
-    "field",
-    "decide equality",
-    "firstorder",
-]
-
-# Extra imports needed to make decision procedures available.
-_AUTO_SOLVE_IMPORTS = "From Stdlib Require Import Lia Lra Ring Field.\n"
 
 
 def _rocq_comment_ranges(text: str) -> list[tuple[int, int]]:
@@ -872,264 +849,3 @@ def _split_rocq_sentences(source: str) -> list[str]:
             sentences.append(sentence)
         remaining = remaining[dot + 1 :]
     return sentences
-
-
-def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:
-    """Parse *source* and return info about the LAST theorem declaration.
-
-    Returns ``(preamble, keyword, name, full_statement)`` where:
-    - *preamble* is everything before the theorem keyword
-    - *keyword* is the Rocq keyword (``Theorem``, ``Lemma``, ...)
-    - *name* is the theorem identifier
-    - *full_statement* is the complete declaration from keyword to the
-      terminating ``.`` (inclusive), e.g.
-      ``Theorem foo : forall n, n = n.``
-
-    The function handles:
-    - Multi-line statements (``Theorem foo :\\n  forall n, ...``)
-    - ``Proof. ... Admitted.`` / ``Proof. Admitted.`` / bare ``Admitted.``
-      after the statement -- these are stripped from the returned values so
-      the caller can substitute its own proof.
-
-    Returns ``None`` if no theorem-like declaration is found.
-    """
-    # Find all theorem-keyword positions.  We want the LAST one.
-    matches = list(_THEOREM_KW_RE.finditer(source))
-    if not matches:
-        return None
-
-    # Build list of comment ranges to filter out matches inside (* ... *)
-    comment_ranges = _rocq_comment_ranges(source)
-
-    def _in_comment(pos: int) -> bool:
-        return any(start <= pos < end for start, end in comment_ranges)
-
-    # Filter out matches that fall inside comments
-    matches = [m for m in matches if not _in_comment(m.start())]
-    if not matches:
-        return None
-
-    m = matches[-1]
-
-    preamble = source[: m.start()]
-    rest = source[m.start() :]
-
-    # The statement ends at the first ``.`` that is NOT inside a comment
-    # and is followed by whitespace / end-of-string.
-    dot_pos = _find_sentence_end(rest)
-
-    if dot_pos is None:
-        return None
-
-    full_statement = rest[: dot_pos + 1]
-
-    # Extract keyword and name from the statement.
-    header_match = re.match(
-        r"("
-        + "|".join(re.escape(k) for k in _THEOREM_KEYWORDS)
-        + r")\s+([A-Za-z_][A-Za-z0-9_']*)",
-        full_statement,
-    )
-    if not header_match:
-        return None
-    keyword = header_match.group(1)
-    name = header_match.group(2)
-
-    return preamble, keyword, name, full_statement
-
-
-def _build_auto_solve_source(
-    preamble: str,
-    full_statement: str,
-    preamble_tactics: str,
-    tactics: list[str],
-) -> str:
-    """Build a .v source that tries all *tactics* via ``first [...]``."""
-    parts: list[str] = []
-
-    # Original preamble (imports, definitions, opens, notations).
-    parts.append(preamble.rstrip())
-
-    # Always add decision procedure imports (duplicate imports are harmless).
-    parts.append("")
-    parts.append(_AUTO_SOLVE_IMPORTS.rstrip())
-
-    # The theorem statement.
-    parts.append("")
-    parts.append(full_statement)
-    parts.append("Proof.")
-
-    # Always intros first (safe no-op if nothing to introduce),
-    # then user-provided preamble tactics if any.
-    if preamble_tactics:
-        parts.append(f"  intros. {preamble_tactics}")
-    else:
-        parts.append("  intros.")
-
-    # The ``first`` combinator with all tactics.
-    # Each tactic is wrapped in ``solve [...]`` so that ``first``
-    # only commits when the tactic fully closes the goal.
-    alternatives = " | ".join(f"solve [{t}]" for t in tactics)
-    parts.append(f"  first [ {alternatives} ].")
-    parts.append("Qed.")
-
-    return "\n".join(parts) + "\n"
-
-
-def _build_single_tactic_source(
-    preamble: str,
-    full_statement: str,
-    preamble_tactics: str,
-    tactic: str,
-) -> str:
-    """Build a .v source that tries a single *tactic*."""
-    parts: list[str] = []
-
-    parts.append(preamble.rstrip())
-
-    parts.append("")
-    parts.append(_AUTO_SOLVE_IMPORTS.rstrip())
-
-    parts.append("")
-    parts.append(full_statement)
-    parts.append("Proof.")
-
-    if preamble_tactics:
-        parts.append(f"  intros. {preamble_tactics}")
-    else:
-        parts.append("  intros.")
-
-    parts.append(f"  {tactic}.")
-    parts.append("Qed.")
-
-    return "\n".join(parts) + "\n"
-
-
-def run_auto_solve(
-    problem: str,
-    preamble_tactics: str,
-    workspace: str,
-    timeout: int,
-    include_warnings: bool = True,
-) -> dict[str, Any]:
-    """Core implementation of rocq_auto_solve (testable without FastMCP Context).
-
-    Receives already-validated workspace and timeout.
-    """
-    start_time = time.monotonic()
-
-    if len(problem) > _server.ROCQ_MAX_SOURCE_SIZE:
-        return {
-            "solved": False,
-            "error": f"Problem exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
-        }
-
-    forbidden = _check_forbidden_commands(problem)
-    if forbidden:
-        return {"solved": False, "error": forbidden}
-
-    if preamble_tactics:
-        forbidden = _check_forbidden_commands(preamble_tactics)
-        if forbidden:
-            return {"solved": False, "error": forbidden}
-
-    # --- Parse the problem file ---
-    parsed = _parse_last_theorem(problem)
-    if parsed is None:
-        return {
-            "solved": False,
-            "error": (
-                "Could not find a Theorem/Lemma/Proposition/Corollary/"
-                "Example/Fact/Remark declaration in the problem."
-            ),
-        }
-    preamble, keyword, name, full_statement = parsed
-
-    # Normalise preamble_tactics: ensure it ends with "." if non-empty.
-    pt = preamble_tactics.strip()
-    if pt and not pt.endswith("."):
-        pt += "."
-
-    # --- Phase 1: Try all tactics via ``first [...]`` ---
-    combined_source = _build_auto_solve_source(
-        preamble, full_statement, pt, _AUTO_SOLVE_TACTICS
-    )
-
-    result = _server._run_coqc(combined_source, workspace, timeout)
-
-    if result["timed_out"]:
-        return {
-            "solved": False,
-            "error": f"Timed out after {timeout}s trying automation tactics.",
-        }
-
-    if result["returncode"] != 0:
-        details = _format_error(
-            result["stderr"],
-            combined_source,
-            include_warnings=include_warnings,
-        )
-        if not details:
-            # _format_error found no Error diagnostics (e.g. voluminous
-            # warnings hid the error).  Fall back to tail of raw stderr.
-            raw = result["stderr"].strip()
-            details = _TMP_PATH_RE.sub(
-                '"<proof>"',
-                raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
-            ).strip()
-        return {
-            "solved": False,
-            "error": "None of the standard automation tactics succeeded.",
-            "details": details or f"coqc exited with code {result['returncode']}.",
-        }
-
-    # --- Phase 2: Identify which specific tactic worked ---
-    # Use a shorter timeout per individual tactic since we already know
-    # the combined run succeeded within *timeout*.
-    per_tactic_timeout = max(timeout // 3, 10)
-
-    for tactic in _AUTO_SOLVE_TACTICS:
-        # Check if the overall timeout has been exceeded
-        if time.monotonic() - start_time > timeout:
-            # Timeout: we know it's solvable but can't identify which tactic
-            break
-
-        single_source = _build_single_tactic_source(
-            preamble, full_statement, pt, tactic
-        )
-        single_result = _server._run_coqc(single_source, workspace, per_tactic_timeout)
-
-        if single_result["returncode"] == 0:
-            # Build the human-readable proof text.
-            proof_lines = ["Proof."]
-            if pt:
-                proof_lines.append(f"  intros. {pt}")
-            else:
-                proof_lines.append("  intros.")
-            proof_lines.append(f"  {tactic}.")
-            proof_lines.append("Qed.")
-            proof_text = "\n".join(proof_lines)
-
-            return {
-                "solved": True,
-                "tactic": tactic,
-                "proof": proof_text,
-            }
-
-    # Edge case: the ``first [...]`` succeeded but no single tactic did
-    # (shouldn't happen in theory, but handle gracefully).
-    proof_lines = ["Proof."]
-    if pt:
-        proof_lines.append(f"  intros. {pt}")
-    else:
-        proof_lines.append("  intros.")
-    alternatives = " | ".join(f"solve [{t}]" for t in _AUTO_SOLVE_TACTICS)
-    proof_lines.append(f"  first [ {alternatives} ].")
-    proof_lines.append("Qed.")
-    proof_text = "\n".join(proof_lines)
-
-    return {
-        "solved": True,
-        "tactic": "first [...]",
-        "proof": proof_text,
-    }

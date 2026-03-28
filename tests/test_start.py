@@ -280,3 +280,174 @@ class TestStartEdgeCases:
         )
         assert result["success"] is False
         assert "forbidden" in result["error"].lower() or "Drop" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# TestStartProofFinished: proof_finished in rocq_start response (MCP-5)
+# ---------------------------------------------------------------------------
+
+
+class TestStartProofFinished:
+    """Test that rocq_start includes proof_finished in response.
+
+    This is a mock-based test that does not require pet, so we override
+    the module-level pytestmark skip.
+    """
+
+    # Override module-level skip — this class uses mocks, not real pet
+    pytestmark = []
+
+    @pytest.fixture(autouse=True)
+    def _reset_state_and_semaphore(self):
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+        yield
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        """Ensure pytanque is importable even if not installed."""
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        if "pytanque" in sys.modules:
+            yield
+            return
+
+        mock_module = SimpleNamespace(
+            PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+            Pytanque=MagicMock,
+            PytanqueMode=SimpleNamespace(STDIO="stdio"),
+        )
+        sys.modules["pytanque"] = mock_module
+        yield
+        sys.modules.pop("pytanque", None)
+
+    @pytest.mark.asyncio
+    async def test_start_theorem_includes_proof_finished(self):
+        """rocq_start in theorem mode should include proof_finished."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.start.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True. Proof. exact I. Qed.\n")
+
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                )
+
+        assert result["success"] is True
+        assert "proof_finished" in result
+        assert result["proof_finished"] is False
+
+    @pytest.mark.asyncio
+    async def test_start_position_includes_proof_finished(self):
+        """rocq_start in position mode should include proof_finished."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.get_state_at_pos.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True.\nProof. exact I. Qed.\n")
+
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    line=1,
+                    character=0,
+                )
+
+        assert result["success"] is True
+        assert "proof_finished" in result
+        assert result["proof_finished"] is False
+
+    @pytest.mark.asyncio
+    async def test_start_preamble_includes_proof_finished(self):
+        """rocq_start in preamble mode should include proof_finished."""
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.get_state_at_pos.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result = await _interactive.run_start(
+                    file="",
+                    theorem="",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    preamble="Require Import Lia.",
+                )
+
+        assert result["success"] is True
+        assert "proof_finished" in result
+        assert result["proof_finished"] is False

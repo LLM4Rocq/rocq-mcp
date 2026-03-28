@@ -3,7 +3,7 @@
 This is the main entry point.  It defines the MCP application, shared
 infrastructure (configuration, workspace validation, pet subprocess
 management), and thin ``@mcp.tool`` wrappers that delegate to
-implementation functions in :mod:`rocq_mcp.coqc_tools` and
+implementation functions in :mod:`rocq_mcp.compile` and
 :mod:`rocq_mcp.interactive`.
 """
 
@@ -52,6 +52,11 @@ async def app_lifespan(server: Any) -> Any:
         client = state.get("pet_client")
         if client:
             _kill_pet(client)
+        # Clean up cache file
+        ws = state.get("workspace")
+        if ws:
+            cache_file = Path(ws) / f"rocq_mcp_cache_{os.getpid()}_.v"
+            _cleanup_coqc_artifacts(str(cache_file))
 
 
 mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
@@ -103,7 +108,6 @@ _SAFE_COQC_ARGS: frozenset[str] = frozenset(
         "-noinit",
         "-indices-matter",
         "-impredicative-set",
-        "-type-in-type",
         "-allow-rewrite-rules",
         "-allow-sprop",
         "-cumulative-sprop",
@@ -255,8 +259,9 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
     pet = lifespan_state.get("pet_client")
     if pet is None or not _pet_alive(pet):
         if pet is not None:
-            # Clean up dead client
-            _try_close_pet(pet)
+            _kill_pet(pet)  # Full cleanup: kill + wait + close FDs
+            for hook in _pet_invalidation_hooks:
+                hook()
         pet = Pytanque(mode=PytanqueMode.STDIO)
         pet.connect()
         # Attempt process group setup for clean kill.
@@ -287,6 +292,11 @@ def _kill_pet(pet: Any) -> None:
     process.terminate()/kill() to avoid killing our own process group.
     """
     if pet is None or pet.process is None:
+        return
+    # If process already exited, just close FDs — no signals needed.
+    # This avoids PID-reuse races where os.killpg could kill an unrelated process.
+    if pet.process.poll() is not None:
+        _try_close_pet(pet)
         return
     try:
         if getattr(pet, "_own_pgrp", False):
@@ -456,6 +466,14 @@ async def _run_with_pet(
                 "error": (f"{description}: pet is busy (lock contention). Try again."),
             }
         except PetanqueError as e:
+            if not _pet_alive(lifespan_state.get("pet_client")):
+                _invalidate_pet(lifespan_state)
+                await _force_release_pet_lock()
+                return {
+                    "success": False,
+                    "error": f"Pet process died: {e.message}",
+                    "pet_restarted": True,
+                }
             return {"success": False, "error": e.message}
         except (BrokenPipeError, ConnectionError) as e:
             _invalidate_pet(lifespan_state)
@@ -472,7 +490,7 @@ async def _run_with_pet(
                 "success": False,
                 "error": "pet binary not found on PATH. Install coq-lsp.",
             }
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
             return {"success": False, "error": f"Unexpected error: {e}"}
 
 
@@ -480,14 +498,13 @@ async def _run_with_pet(
 # Import implementation functions from submodules
 # ---------------------------------------------------------------------------
 # NOTE: These imports MUST come after all shared infrastructure above is
-# defined, because coqc_tools and interactive import from this module.
+# defined, because compile and interactive import from this module.
 
-from rocq_mcp.coqc_tools import (  # noqa: E402
+from rocq_mcp.compile import (  # noqa: E402
     # Implementation functions for @mcp.tool wrappers
     run_compile,
     run_verify,
     # Backward-compatibility re-exports (used by tests)
-    run_auto_solve,  # noqa: F401
     _run_coqc,  # noqa: F401
     _format_error,  # noqa: F401
     _parse_coqc_error_positions,  # noqa: F401
@@ -498,10 +515,6 @@ from rocq_mcp.coqc_tools import (  # noqa: E402
     _rocq_comment_ranges,  # noqa: F401
     _find_sentence_end,  # noqa: F401
     _split_rocq_sentences,  # noqa: F401
-    _parse_last_theorem,  # noqa: F401
-    _build_auto_solve_source,  # noqa: F401
-    _build_single_tactic_source,  # noqa: F401
-    _AUTO_SOLVE_TACTICS,  # noqa: F401
 )
 
 from rocq_mcp.interactive import (  # noqa: E402
@@ -529,6 +542,10 @@ from rocq_mcp.interactive import (  # noqa: E402
     _state_current_id,  # noqa: F401
     _CachedImportContext,  # noqa: F401
     _StateEntry,  # noqa: F401
+    _reconstruct_tactic_path,  # noqa: F401
+    _MAX_GOALS_LENGTH,  # noqa: F401
+    _MAX_GOALS_SHOWN,  # noqa: F401
+    _MAX_STATES,  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
@@ -654,6 +671,9 @@ async def rocq_query(
     if err:
         return {"success": False, "error": err}
 
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+
     return await run_query(
         command=command,
         preamble=preamble,
@@ -690,6 +710,9 @@ async def rocq_toc(
     err = _validate_workspace(workspace)
     if err:
         return {"success": False, "error": err}
+
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
 
     return await run_toc(
         file=file,
@@ -731,6 +754,9 @@ async def rocq_notations(
     err = _validate_workspace(workspace)
     if err:
         return {"success": False, "error": err}
+
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
 
     return await run_notations(
         statement=statement,
@@ -779,6 +805,9 @@ async def rocq_start(
     if err:
         return {"success": False, "error": err}
 
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+
     return await run_start(
         file=file,
         theorem=theorem,
@@ -826,6 +855,9 @@ async def rocq_step_multi(
         tactics: List of tactics to try (max 20).
         from_state: Try from a specific state (default: current state).
     """
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+
     return await run_step_multi(
         tactics=tactics,
         lifespan_state=ctx.lifespan_context,
@@ -853,6 +885,10 @@ async def rocq_check(
     returns the last valid state for immediate interactive recovery
     via rocq_check(from_state=...) or rocq_step_multi(from_state=...).
 
+    When proof_finished=True, also returns proof_tactics (ordered list of
+    all tactics from root to current state) and proof_hint (instructions
+    for assembling the final .v file).
+
     Recommended workflow:
     1. rocq_start(file=..., theorem=...) to open the proof
     2. rocq_check(body="intros. simpl.") to advance
@@ -871,6 +907,9 @@ async def rocq_check(
     err = _validate_workspace(workspace)
     if err:
         return {"success": False, "error": err}
+
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
 
     return await run_check(
         body=body,

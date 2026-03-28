@@ -233,11 +233,11 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Forbidden command 'Drop' (escapes to OCaml toplevel)",
     ),
     (
-        re.compile(r"\bSeparate Extraction\b"),
+        re.compile(r"\bSeparate\s+Extraction\b"),
         "Forbidden command 'Separate Extraction' (writes .ml/.mli files)",
     ),
     (
-        re.compile(r"\bRecursive Extraction\b"),
+        re.compile(r"\bRecursive\s+Extraction\b"),
         "Forbidden command 'Recursive Extraction' (writes .ml files)",
     ),
     (
@@ -253,7 +253,7 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "Forbidden command 'Extraction Library' (writes .ml files)",
     ),
     (
-        re.compile(r"\bDeclare ML Module\b"),
+        re.compile(r"\bDeclare\s+ML\s+Module\b"),
         "Forbidden command 'Declare ML Module' (loads arbitrary OCaml plugins)",
     ),
     (
@@ -295,6 +295,18 @@ _FORBIDDEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"\bAdd\s+ML\s+Path\b"),
         "Forbidden command 'Add ML Path' (extends OCaml plugin search path)",
+    ),
+    (
+        re.compile(r'\bPrint\s+(?:Sorted\s+)?Universes\s+"'),
+        "Forbidden: 'Print [Sorted] Universes \"...\"' writes files",
+    ),
+    (
+        re.compile(r"\bExtraction\s+TestCompile\b"),
+        "Forbidden: 'Extraction TestCompile' invokes external compiler",
+    ),
+    (
+        re.compile(r"\bExtraction\s+Output\s+Directory\b"),
+        "Forbidden: 'Extraction Output Directory' directs extraction writes to arbitrary paths",
     ),
 ]
 
@@ -455,7 +467,8 @@ def build_verification_source(
         # Print Assumptions output matches our parser's expected format.
         f"Unset Printing All.\n"
         f"Unset Printing Universes.\n"
-        f"Set Printing Width 120.\n\n"
+        f"Set Printing Width 120.\n"
+        f"Set Printing Depth 1000000.\n\n"
         f"{clean_statement}\n"
         f"Proof.\n"
         f"exact M.{problem_name} || apply M.{problem_name} || eapply M.{problem_name}.\n"
@@ -565,6 +578,7 @@ def build_shared_defs_verification_source(
     parts.append("Unset Printing All.")
     parts.append("Unset Printing Universes.")
     parts.append("Set Printing Width 120.")
+    parts.append("Set Printing Depth 1000000.")
     parts.append("")
 
     # 4. Theorem re-statement and apply

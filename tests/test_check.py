@@ -644,3 +644,147 @@ class TestCheckProofTactics:
         tactics = cr_finish["proof_tactics"]
         assert tactics[0] == "intros n."
         assert "intro." not in tactics
+
+    @pytest.mark.asyncio
+    async def test_proof_tactics_completeness_flag(self, workspace, lifespan_state):
+        """When chain is complete, proof_tactics_complete should NOT be present.
+
+        proof_tactics_complete is only set to False when the chain is broken.
+        A complete proof with a full chain from root omits the key entirely.
+        """
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_pt_complete_flag.v"
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="exact I.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+        assert "proof_tactics" in cr
+        # proof_tactics_complete should NOT be present when chain is complete
+        # (it is only set to False when the chain is broken)
+        assert "proof_tactics_complete" not in cr
+
+
+# ---------------------------------------------------------------------------
+# TestCheckMultiCommandTimeout: per-command Rocq timeout (TL-2)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckMultiCommandTimeout:
+    """Test per-command Rocq timeout in multi-command run_check.
+
+    This is a mock-based test that does not require pet, so we override
+    the module-level pytestmark skip.
+    """
+
+    # Override module-level skip — this class uses mocks, not real pet
+    pytestmark = []
+
+    @pytest.fixture(autouse=True)
+    def _reset_state_and_semaphore(self):
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+        yield
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        """Ensure pytanque is importable even if not installed."""
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        if "pytanque" in sys.modules:
+            yield
+            return
+
+        mock_module = SimpleNamespace(
+            PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+            Pytanque=MagicMock,
+            PytanqueMode=SimpleNamespace(STDIO="stdio"),
+        )
+        sys.modules["pytanque"] = mock_module
+        yield
+        sys.modules.pop("pytanque", None)
+
+    @pytest.mark.asyncio
+    async def test_multi_command_divides_timeout(self):
+        """Multi-command run_check should divide timeout among commands."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        # Set up state
+        _interactive._state_table.clear()
+        _interactive._state_next_id = 1
+        _interactive._state_current_id = None
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        sid = _interactive._state_add(
+            state=mock_state,
+            file="test.v",
+            theorem="test",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+
+        # Track timeouts passed to pet.run()
+        recorded_timeouts = []
+
+        new_state = SimpleNamespace(st=43, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+
+        def fake_run(state, cmd, timeout=None):
+            recorded_timeouts.append(timeout)
+            return new_state
+
+        mock_pet.run = fake_run
+
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_check(
+                body="intros. simpl. reflexivity.",
+                workspace="/tmp",
+                timeout=30.0,
+                lifespan_state=lifespan_state,
+                from_state=sid,
+            )
+
+        assert result["success"] is True
+        # 3 commands with 30s timeout -> each gets max(1, 30/3) = 10s
+        assert len(recorded_timeouts) == 3
+        for t in recorded_timeouts:
+            assert t == 10, f"Expected per-command timeout of 10, got {t}"

@@ -1,11 +1,8 @@
-"""Tests for auto-solving via rocq_step_multi.
+"""Tests for Rocq sentence utilities and interactive auto-solving via step_multi.
 
 Part A: Unit tests for helper functions (NO coqc/pet needed)
     - TestRocqCommentRanges: _rocq_comment_ranges scanner
     - TestFindSentenceEnd: _find_sentence_end sentence splitting
-    - TestAutoSolveParsing: _parse_last_theorem with various input shapes
-    - TestBuildAutoSolveSource: generated `first [...]` source structure
-    - TestBuildSingleTacticSource: generated single-tactic source
 
 Part B: Integration tests (require pet)
     - Uses run_start + run_step_multi with standard automation tactics
@@ -20,16 +17,29 @@ import pytest
 
 from tests.conftest import PET_AVAILABLE
 from rocq_mcp.server import (
-    _parse_last_theorem,
-    _build_auto_solve_source,
-    _build_single_tactic_source,
-    _AUTO_SOLVE_TACTICS,
     _rocq_comment_ranges,
     _find_sentence_end,
 )
 
-# Standard automation tactics for step_multi (same list as auto_solve used)
-AUTO_TACTICS = list(_AUTO_SOLVE_TACTICS)
+# Standard automation tactics for step_multi
+AUTO_TACTICS = [
+    "trivial",
+    "reflexivity",
+    "assumption",
+    "exact I",
+    "auto",
+    "eauto",
+    "tauto",
+    "intuition",
+    "lia",
+    "lra",
+    "nia",
+    "nra",
+    "ring",
+    "field",
+    "decide equality",
+    "firstorder",
+]
 
 
 # =========================================================================
@@ -161,314 +171,6 @@ class TestFindSentenceEnd:
     def test_dot_inside_string_inside_comment(self):
         # Dot inside a string inside a comment is not a sentence end
         assert _find_sentence_end('(* "." *) x.') == 11
-
-
-# ---------------------------------------------------------------------------
-# _parse_last_theorem
-# ---------------------------------------------------------------------------
-
-
-class TestAutoSolveParsing:
-    """Test _parse_last_theorem with various input shapes."""
-
-    def test_simple_theorem(self):
-        source = (
-            "From Stdlib Require Import Arith.\n\n"
-            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
-            "Admitted.\n"
-        )
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, keyword, name, stmt = result
-        assert keyword == "Theorem"
-        assert name == "add_0_r"
-        assert "forall n : nat, n + 0 = n." in stmt
-        assert "Require Import Arith." in preamble
-
-    def test_multiline_statement(self):
-        source = (
-            "Require Import Reals.\n"
-            "Open Scope R_scope.\n\n"
-            "Theorem foo :\n"
-            "  forall x y : R,\n"
-            "    x + y = y + x.\n"
-            "Proof.\n"
-            "Admitted.\n"
-        )
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, keyword, name, stmt = result
-        assert keyword == "Theorem"
-        assert name == "foo"
-        assert stmt.endswith(".")
-
-    def test_lemma_keyword(self):
-        source = "Lemma trivial_lemma : True.\nAdmitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, keyword, name, _ = result
-        assert keyword == "Lemma"
-        assert name == "trivial_lemma"
-
-    def test_corollary_keyword(self):
-        source = "Corollary my_cor : 1 = 1.\nAdmitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, keyword, name, _ = result
-        assert keyword == "Corollary"
-        assert name == "my_cor"
-
-    def test_all_theorem_keywords(self):
-        """All theorem-like keywords should be recognized."""
-        for kw in (
-            "Theorem",
-            "Lemma",
-            "Proposition",
-            "Corollary",
-            "Example",
-            "Fact",
-            "Remark",
-        ):
-            source = f"{kw} test_kw : True.\nAdmitted.\n"
-            result = _parse_last_theorem(source)
-            assert result is not None, f"Failed to parse keyword: {kw}"
-            assert result[1] == kw
-            assert result[2] == "test_kw"
-
-    def test_last_theorem_used(self):
-        source = (
-            "Lemma helper : True.\nProof. exact I. Qed.\n\n"
-            "Theorem main : True.\nAdmitted.\n"
-        )
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, keyword, name, _ = result
-        assert keyword == "Theorem"
-        assert name == "main"
-        # The helper should be in the preamble
-        assert "Lemma helper" in preamble
-
-    def test_no_theorem(self):
-        source = "From Stdlib Require Import Arith.\nDefinition x := 42.\n"
-        result = _parse_last_theorem(source)
-        assert result is None
-
-    def test_empty_source(self):
-        result = _parse_last_theorem("")
-        assert result is None
-
-    def test_proof_admitted_stripped(self):
-        """Proof. Admitted. after the theorem should NOT appear in the statement."""
-        source = "Theorem foo : True.\n" "Proof.\n" "Admitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, _, _, stmt = result
-        assert "Admitted" not in stmt
-        assert "Proof" not in stmt
-
-    def test_statement_with_comment(self):
-        """Comments in the middle of a statement should not break parsing."""
-        source = "Theorem bar (* a comment *) : True.\n" "Admitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, _, name, _ = result
-        assert name == "bar"
-
-    def test_name_with_prime(self):
-        source = "Theorem foo' : True.\nAdmitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        assert result[2] == "foo'"
-
-    def test_name_with_underscores_and_digits(self):
-        source = "Lemma helper_123 : True.\nAdmitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        assert result[2] == "helper_123"
-
-    def test_parametric_theorem_nat(self):
-        """Theorem with explicit parameter: Theorem foo (n : nat) : n = n."""
-        source = "Theorem foo (n : nat) : n = n.\nAdmitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, keyword, name, stmt = result
-        assert keyword == "Theorem"
-        assert name == "foo"
-        assert "(n : nat)" in stmt
-        assert stmt.endswith(".")
-
-    def test_parametric_theorem_implicit(self):
-        """Theorem with implicit parameter: Theorem foo {A : Type} : ..."""
-        source = "Theorem foo {A : Type} (x : A) : x = x.\n" "Admitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, keyword, name, stmt = result
-        assert keyword == "Theorem"
-        assert name == "foo"
-        assert "{A : Type}" in stmt
-        assert "(x : A)" in stmt
-        assert stmt.endswith(".")
-
-    def test_parametric_lemma_multiple_params(self):
-        """Lemma with multiple parameters of different kinds."""
-        source = (
-            "Lemma bar (n m : nat) {P : Prop} (H : P) : n + m = m + n.\n" "Admitted.\n"
-        )
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, keyword, name, stmt = result
-        assert keyword == "Lemma"
-        assert name == "bar"
-        assert "(n m : nat)" in stmt
-        assert "{P : Prop}" in stmt
-
-    def test_commented_out_theorem_ignored(self):
-        """A theorem inside (* ... *) should be ignored; the real one is picked."""
-        source = "(* Theorem fake : False. *)\n" "Theorem real : True.\n" "Admitted.\n"
-        result = _parse_last_theorem(source)
-        assert result is not None
-        _, keyword, name, stmt = result
-        assert keyword == "Theorem"
-        assert name == "real"
-        assert "True" in stmt
-        # The fake theorem must NOT be picked
-        assert name != "fake"
-
-    def test_commented_out_theorem_only(self):
-        """If the only theorem keyword is inside a comment, return None."""
-        source = "(* Theorem fake : False. *)\nDefinition x := 42.\n"
-        result = _parse_last_theorem(source)
-        assert result is None
-
-    def test_commented_theorem_before_real_in_preamble(self):
-        """Commented theorem in preamble, real theorem after it."""
-        source = (
-            "From Stdlib Require Import Arith.\n"
-            "(* Theorem old_attempt : forall n, n = n. *)\n"
-            "Lemma actual : 1 = 1.\n"
-            "Admitted.\n"
-        )
-        result = _parse_last_theorem(source)
-        assert result is not None
-        preamble, keyword, name, _ = result
-        assert keyword == "Lemma"
-        assert name == "actual"
-        # The preamble should contain the comment but the parser should
-        # not have treated the commented keyword as a theorem.
-        assert "(* Theorem old_attempt" in preamble
-
-
-# ---------------------------------------------------------------------------
-# _build_auto_solve_source
-# ---------------------------------------------------------------------------
-
-
-class TestBuildAutoSolveSource:
-    """Test generation of the `first [tac1 | tac2 | ...]` source."""
-
-    def test_basic_structure(self):
-        source = _build_auto_solve_source(
-            preamble="Require Import Arith.",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactics=["trivial", "auto"],
-        )
-        assert "Theorem foo : True." in source
-        assert "Proof." in source
-        assert "first [ solve [trivial] | solve [auto] ]." in source
-        assert "Qed." in source
-        assert "Require Import Arith." in source
-
-    def test_with_preamble_tactics(self):
-        source = _build_auto_solve_source(
-            preamble="",
-            full_statement="Theorem foo : forall n, n = n.",
-            preamble_tactics="intros.",
-            tactics=["reflexivity"],
-        )
-        assert "intros." in source
-        assert "first [ solve [reflexivity] ]." in source
-
-    def test_adds_lia_import_when_missing(self):
-        """When Lia is not in preamble, it should be added."""
-        source = _build_auto_solve_source(
-            preamble="Require Import Arith.",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactics=["lia"],
-        )
-        assert "From Stdlib Require Import Lia Lra Ring Field." in source
-
-    def test_always_adds_stdlib_imports(self):
-        """Stdlib imports are always added (duplicates are harmless)."""
-        source = _build_auto_solve_source(
-            preamble="Require Import Lia.",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactics=["lia"],
-        )
-        assert "From Stdlib Require Import Lia Lra Ring Field." in source
-
-    def test_all_auto_solve_tactics_present(self):
-        """Verify the source includes all standard auto_solve tactics."""
-        source = _build_auto_solve_source(
-            preamble="",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactics=_AUTO_SOLVE_TACTICS,
-        )
-        for tactic in _AUTO_SOLVE_TACTICS:
-            assert tactic in source
-
-    def test_empty_preamble(self):
-        """Empty preamble should still produce valid source."""
-        source = _build_auto_solve_source(
-            preamble="",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactics=["trivial"],
-        )
-        assert "Theorem foo : True." in source
-        assert "Proof." in source
-
-
-# ---------------------------------------------------------------------------
-# _build_single_tactic_source
-# ---------------------------------------------------------------------------
-
-
-class TestBuildSingleTacticSource:
-    """Test generation of single-tactic verification source."""
-
-    def test_basic(self):
-        source = _build_single_tactic_source(
-            preamble="",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactic="exact I",
-        )
-        assert "exact I." in source
-        assert "Qed." in source
-        assert "first" not in source
-
-    def test_with_preamble_tactics(self):
-        source = _build_single_tactic_source(
-            preamble="",
-            full_statement="Theorem foo : forall n, n = n.",
-            preamble_tactics="intros.",
-            tactic="reflexivity",
-        )
-        assert "intros." in source
-        assert "reflexivity." in source
-
-    def test_adds_lia_import(self):
-        source = _build_single_tactic_source(
-            preamble="",
-            full_statement="Theorem foo : True.",
-            preamble_tactics="",
-            tactic="lia",
-        )
-        assert "From Stdlib Require Import Lia Lra Ring Field." in source
 
 
 # =========================================================================

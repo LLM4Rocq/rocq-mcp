@@ -323,8 +323,14 @@ def run_compile(
         if positions:
             result_dict["error_positions"] = positions
             result_dict["hint"] = (
-                "Use rocq_start with file, line, and character parameters "
-                "to start an interactive session at the error position."
+                "Use rocq_start(file=..., line=..., character=...) to start "
+                "an interactive session at the error position, then "
+                "rocq_check or rocq_step_multi to explore fixes."
+            )
+        else:
+            result_dict["hint"] = (
+                "Use rocq_check for faster iteration, "
+                "or rocq_step_multi to explore alternative tactics."
             )
         return result_dict
 

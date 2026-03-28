@@ -4,12 +4,12 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?style=for-the-badge)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=for-the-badge)](https://github.com/LLM4Rocq/rocq-mcp/blob/main/LICENSE)
 
-An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, automated proving, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
+An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
 
 ## Prerequisites
 
 - **Rocq / Coq** -- `coqc` must be on your `PATH` (needed by all tools). If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). Otherwise it defaults to `-Q <workspace> Test`.
-- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile, verify, and auto_solve tools still work.
+- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile and verify tools still work.
 - **Python 3.11+**
 
 ## Installation
@@ -17,10 +17,10 @@ An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover
 Using [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# Core (compile + verify + auto_solve tools only)
+# Core (compile + verify tools only)
 uv pip install -e .
 
-# With interactive pytanque support (all 9 tools)
+# With interactive pytanque support (all 8 tools)
 uv pip install -e ".[interactive]"
 ```
 
@@ -38,24 +38,23 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes nine MCP tools:
+The server exposes eight MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_compile`** | Compile Rocq source code and return structured errors. Use this as the first step for any proof -- 81% of proofs succeed via direct compilation. |
-| **`rocq_verify`** | Verify that a proof actually proves the original statement. Uses a conservative `Module M.` template to catch type redefinition cheating, `Admitted`/`Abort`, custom axioms, and statement mismatches. Standard mathematical axioms (classical logic, Reals, etc.) are accepted. |
-| **`rocq_auto_solve`** | Try to prove a theorem using standard automation tactics (`trivial`, `reflexivity`, `auto`, `lia`, `lra`, `ring`, `field`, `firstorder`, etc.). Useful as a quick check before manual proof construction. Optionally accepts preamble tactics (e.g., `intros. simpl.`). |
+| **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions for jumping to interactive mode. For iterative development, prefer `rocq_check`. |
+| **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` succeeds. |
 
 ### Interactive tools (pytanque-based, require `pet`)
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_query`** | Run a Rocq query command (`Search`, `Check`, `Print`, `About`) and return results. Does not modify any proof state. |
-| **`rocq_start`** | Open a proof context and return a `state_id`. Three modes: by theorem name (`file` + `theorem`), by position (`file` + `line` + `character`), or by preamble (imports only, for use with `rocq_check`). |
-| **`rocq_check`** | Execute commands sequentially from a state. One command = single tactic step. Multiple commands = batch execution. Supports `from_state` for tree-shaped exploration. On error, returns `last_valid_state_id` for recovery via `rocq_check` or `rocq_step_multi`. |
-| **`rocq_step_multi`** | Try multiple tactics against the current proof state and return all results without advancing the state. Useful for quickly testing which automation tactic works. The LLM then picks the winner and commits via `rocq_check`. Max 20 tactics per call. |
+| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Does not modify any proof state. |
+| **`rocq_start`** | Start an interactive proof session. Three modes: by theorem name, by error position, or from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. |
+| **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. |
+| **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
 | **`rocq_toc`** | Get the structure of a `.v` file: all definitions, lemmas, theorems, and sections as a hierarchical outline. Does not require an active session. |
 | **`rocq_notations`** | List all notations in a Rocq statement and how they resolve (which scope, which module). Helps debug notation ambiguity (e.g., is `+` in `nat_scope` or `Z_scope`?). |
 
@@ -64,7 +63,7 @@ The server exposes nine MCP tools:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ROCQ_WORKSPACE` | current directory | Working directory for Rocq compilation. When set, all workspace parameters are constrained to this directory or its subdirectories. |
-| `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` and `rocq_auto_solve` |
+| `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` |
 | `ROCQ_VERIFY_TIMEOUT` | `120` | Timeout (seconds) for `rocq_verify` |
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for pytanque-based tools |
 | `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
@@ -158,15 +157,15 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_
 ```
 src/rocq_mcp/
   __init__.py       Package init
-  server.py         MCP server, 9 tool definitions, pet subprocess management
-  coqc_tools.py     coqc-based tools: compile, verify, auto_solve
+  server.py         MCP server, 8 tool definitions, pet subprocess management
+  coqc_tools.py     coqc-based tools: compile, verify
   interactive.py    pytanque-based tools: start, check, step_multi, query, toc, notations
   verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
   conftest.py           Shared fixtures
   test_compile.py       Tests for rocq_compile
   test_verify.py        Tests for rocq_verify
-  test_auto_solve.py    Tests for rocq_auto_solve (unit + integration)
+  test_auto_solve.py    Tests for auto_solve internals
   test_server.py        Tests for server helpers (_format_error, _parse_project_flags, etc.)
   test_format_error.py  Tests for error formatting
   test_query.py         Tests for rocq_query (requires pet)

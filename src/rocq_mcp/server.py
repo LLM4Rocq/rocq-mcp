@@ -486,8 +486,8 @@ from rocq_mcp.coqc_tools import (  # noqa: E402
     # Implementation functions for @mcp.tool wrappers
     run_compile,
     run_verify,
-    run_auto_solve,
     # Backward-compatibility re-exports (used by tests)
+    run_auto_solve,  # noqa: F401
     _run_coqc,  # noqa: F401
     _format_error,  # noqa: F401
     _parse_coqc_error_positions,  # noqa: F401
@@ -545,8 +545,13 @@ def rocq_compile(
 ) -> dict[str, Any]:
     """Compile Rocq source code and return structured errors.
 
-    Use this as the first step for any proof. 81% of proofs succeed
-    via direct compilation. Pass the complete .v file content.
+    Batch-compiles a complete .v file via coqc. Best for checking a
+    finished proof. For iterative proof development, prefer
+    rocq_check (faster, cached imports, returns state for recovery)
+    or rocq_step_multi (try multiple tactics at once).
+
+    On error, returns error_positions for jumping to the failure via
+    rocq_start(file=..., line=..., character=...).
 
     Args:
         source: Complete Rocq (.v) file content to compile.
@@ -583,25 +588,12 @@ async def rocq_verify(
 ) -> dict[str, Any]:
     """Verify that a proof actually proves the original statement.
 
-    Uses conservative Module M. verification: wraps the proof in a module,
-    then checks that applying M.theorem_name proves the original statement.
-    Also runs Print Assumptions to detect axioms or admitted goals.
+    Wraps the proof in a Module M sandbox and checks that the theorem
+    matches the original problem_statement. Catches type redefinition,
+    Admitted/Abort, custom axioms, and statement mismatches. Standard
+    mathematical axioms (classical logic, Reals, etc.) are accepted.
 
-    This catches:
-    - Type redefinition cheating (e.g., redefining nat as bool)
-    - Admitted/Abort hidden in the proof
-    - Custom axiom declarations (e.g., Axiom cheat : False)
-    - Proofs that compile but prove a different statement
-
-    Standard mathematical axioms (classical logic, functional extensionality,
-    axiom of choice, Reals axiomatization) are accepted as valid.
-
-    Always run this after rocq_compile succeeds.
-
-    When the standard Module M. template fails due to type unification errors
-    (common when the problem defines local types/functions), automatically
-    falls back to a shared-definitions template that places type definitions
-    outside Module M for compatibility.
+    Run this after rocq_compile succeeds to confirm correctness.
 
     Args:
         proof: The complete proof file content (including imports).
@@ -631,52 +623,6 @@ async def rocq_verify(
 
 
 # ---------------------------------------------------------------------------
-# Tool: rocq_auto_solve
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool
-def rocq_auto_solve(
-    problem: str,
-    preamble_tactics: str = "",
-    workspace: str = "",
-    timeout: int = 0,
-    include_warnings: bool = True,
-) -> dict[str, Any]:
-    """Try to prove a theorem using standard automation tactics.
-
-    Attempts tactics in order: trivial, reflexivity, assumption, exact I,
-    auto, eauto, tauto, intuition, lia, lra, nia, nra, ring, field,
-    decide, firstorder.
-
-    Optionally run preamble tactics first (e.g., "intros." or "intros. simpl.").
-
-    Does NOT require pytanque — uses coqc directly.
-
-    Args:
-        problem: Complete .v file content with the theorem to prove
-                 (the theorem should end with Admitted. or Abort. or
-                  have Proof. Admitted.).
-        preamble_tactics: Optional tactics to run before automation
-                         (e.g., "intros." or "intros. simpl.").
-        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
-        timeout: Timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
-        include_warnings: If True (default), include deduplicated warnings
-            before the error in the output.  Set to False for compact errors.
-    """
-    workspace = workspace or ROCQ_WORKSPACE
-    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
-
-    err = _validate_workspace(workspace)
-    if err:
-        return {"solved": False, "error": err}
-
-    return run_auto_solve(
-        problem, preamble_tactics, workspace, timeout, include_warnings
-    )
-
-
-# ---------------------------------------------------------------------------
 # Tool: rocq_query
 # ---------------------------------------------------------------------------
 
@@ -688,15 +634,13 @@ async def rocq_query(
     workspace: str = "",
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Run a Rocq query (Search, Check, Print, About) and return results.
+    """Search the Rocq environment — find lemmas, check types, inspect definitions.
 
-    The query does NOT modify any proof state.
-
-    Examples:
-      command="Search (nat -> nat -> nat)."
-      command="Check Nat.add."
-      command="Print Assumptions my_lemma."
-      command="About plus."
+    Does NOT modify any proof state. Use this to explore before proving:
+      command="Search (nat -> nat -> nat)."  — find relevant lemmas
+      command="Check Nat.add."               — check a term's type
+      command="Print Nat.add."               — see a definition
+      command="About plus."                  — summary of a name
 
     Args:
         command: The Rocq query command to execute.
@@ -811,17 +755,15 @@ async def rocq_start(
     preamble: str = "",
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Open a proof context and return a state_id.
+    """Start an interactive proof session — see goals, explore tactics.
+
+    Returns a state_id for use with rocq_check and rocq_step_multi.
 
     Three start modes (precedence: theorem > position > preamble):
-    1. By theorem: file + theorem -> pet.start()
-    2. By position: file + line + character -> pet.get_state_at_pos()
-       Use this to start at a specific position in the file, e.g., at an
-       error position reported by rocq_compile's error_positions field.
-       Leave theorem empty when using position-based start.
-    3. From imports: preamble -> cached import state
-
-    If both theorem and line/character are provided, theorem takes precedence.
+    1. By theorem: file + theorem — start proving a specific theorem
+    2. By position: file + line + character — jump to an error position
+       (e.g., from rocq_compile's error_positions field)
+    3. From imports: preamble — set up import context only (for rocq_check)
 
     Args:
         file: Path to the .v file (relative to workspace).
@@ -859,21 +801,26 @@ async def rocq_step_multi(
     from_state: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Try multiple tactics against the current proof state and return all results.
+    """Try multiple tactics at once — find what works without guessing.
 
-    Does NOT advance the session — use rocq_check with the winning tactic to commit.
-    Requires an active state from rocq_start or rocq_check.
+    Tests each tactic against the current proof state and returns all
+    results. Does NOT advance the state — commit the winner with
+    rocq_check.
 
-    Useful for quickly testing which automation tactic works:
-      tactics=["auto", "lia", "lra", "ring", "omega", "tauto"]
+    Use this whenever you're unsure which tactic to apply:
+      tactics=["auto.", "lia.", "lra.", "ring.", "tauto.", "firstorder."]
 
-    To auto-solve the current subgoal, first run rocq_check with "intros."
-    then call this tool with the standard automation tactics:
-      ["trivial", "reflexivity", "assumption", "exact I", "auto", "eauto",
-       "tauto", "intuition", "lia", "lra", "nia", "nra", "ring", "field",
-       "decide equality", "firstorder"]
-    Pick the first successful tactic and commit it with rocq_check.
+    Or to auto-solve a subgoal, try the standard automation battery:
+      tactics=["trivial.", "reflexivity.", "assumption.", "exact I.",
+               "auto.", "eauto.", "tauto.", "intuition.", "lia.", "lra.",
+               "nia.", "nra.", "ring.", "field.", "decide equality.",
+               "firstorder."]
     Note: lia/lra/ring/field require the .v file to import Lia/Lra/Ring/Field.
+
+    Or to explore proof structure:
+      tactics=["destruct n.", "induction n.", "case_eq n."]
+
+    Requires an active state from rocq_start or rocq_check (or use from_state).
 
     Args:
         tactics: List of tactics to try (max 20).
@@ -899,14 +846,18 @@ async def rocq_check(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute commands sequentially from a state — fast iterative checking.
+    """Run proof commands from cached imports — fast iterative checking.
 
-    One command = single step. Multiple commands = batch execution.
-    Requires a prior rocq_start call to establish a state.
+    Much faster than rocq_compile for iterative proof development:
+    imports are cached (~0.2s first time, ~0ms after), and on error
+    returns the last valid state for immediate interactive recovery
+    via rocq_check(from_state=...) or rocq_step_multi(from_state=...).
 
-    On error mid-batch, returns last_valid_state_id for immediate
-    interactive recovery via rocq_check(from_state=...) or
-    rocq_step_multi(tactics=[...], from_state=...).
+    Recommended workflow:
+    1. rocq_start(file=..., theorem=...) to open the proof
+    2. rocq_check(body="intros. simpl.") to advance
+    3. If stuck: rocq_step_multi(tactics=[...]) to explore
+    4. rocq_check(body="winning_tactic.") to commit
 
     Args:
         body: Commands to execute (one or more Rocq sentences).

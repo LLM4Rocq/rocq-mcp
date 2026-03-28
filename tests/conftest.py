@@ -6,6 +6,10 @@ import shutil
 
 import pytest
 
+# Ensure the full module graph is loaded (resolves circular import between
+# server.py and interactive.py) before any test imports individual symbols.
+import rocq_mcp.server  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Availability flags
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ async def app_lifespan(server: Any) -> Any:
         "pet_client": None,
         "workspace": ROCQ_WORKSPACE,
         "pet_timeout": ROCQ_PET_TIMEOUT,
+        "current_workspace": None,
     }
     try:
         yield state
@@ -196,6 +197,11 @@ def _parse_project_flags(ws: Path) -> list[str]:
 # All _execute functions must capture a local reference before acquiring.
 _pet_lock = threading.Lock()
 
+# Callbacks invoked when pet is invalidated (crash, timeout).
+# interactive.py registers _invalidate_import_cache and _state_invalidate_all
+# here to break the circular dependency (server -> interactive -> server).
+_pet_invalidation_hooks: list[Callable[[], None]] = []
+
 
 class _PetLockTimeout(Exception):
     """Lock acquisition timed out (distinct from asyncio.TimeoutError).
@@ -337,31 +343,24 @@ def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
     if pet:
         _kill_pet(pet)
     lifespan_state["pet_client"] = None
+    lifespan_state["current_workspace"] = None
+    for hook in _pet_invalidation_hooks:
+        hook()
+
+
+def _set_workspace_if_needed(
+    pet: Any, workspace: str, lifespan_state: dict[str, Any]
+) -> None:
+    """Set pet workspace, skipping if already set to the same directory."""
+    ws = str(Path(workspace).resolve())
+    if lifespan_state.get("current_workspace") != ws:
+        pet.set_workspace(debug=False, dir=ws)
+        lifespan_state["current_workspace"] = ws
 
 
 # ---------------------------------------------------------------------------
-# Session state and semaphore (shared by interactive tools)
+# Semaphore (shared by interactive tools)
 # ---------------------------------------------------------------------------
-
-# Session state (single-client stdio model).
-#
-# THREAD SAFETY NOTE: _session is mutated from both the async event loop
-# (timeout handler) and background threads (via _execute() inside
-# asyncio.to_thread).  After a timeout, there is a logical race where
-# the orphaned thread may write to _session["state"] after the timeout
-# handler has reset it.  This is mitigated by:
-# 1. CPython's GIL ensures dict operations are atomic at the C level.
-# 2. _ensure_pet checks process liveness before using the pet object.
-# 3. The server is single-client (stdio), so concurrent requests
-#    don't occur.
-# 4. _force_release_pet_lock replaces the global lock after timeout,
-#    so subsequent operations are not blocked by the orphaned thread.
-_session: dict[str, Any] = {
-    "state": None,
-    "file": None,
-    "theorem": None,
-    "history": [],
-}
 
 # Async-level serialization to prevent deadlock on timeout.
 # Unlike threading.Lock, asyncio.Semaphore is released even when the
@@ -384,6 +383,7 @@ async def _run_with_pet(
     lifespan_state: dict[str, Any],
     description: str,
     on_timeout: Callable[[], None] | None = None,
+    timeout: float | None = None,
 ) -> Any:
     """Run *fn(pet)* with the pet client, handling lock/semaphore/timeout/errors.
 
@@ -395,11 +395,14 @@ async def _run_with_pet(
     2. _pet_lock acquisition with timeout
     3. _ensure_pet (lazy-init the pet subprocess)
     4. asyncio.Semaphore + asyncio.wait_for (async-level timeout)
-    5. All four standard exception handlers
+    5. All standard exception handlers
 
     *fn* receives the live pet client and must return the desired result.
     It runs inside a background thread with _pet_lock held; the lock is
     released automatically when *fn* returns or raises.
+
+    When pet crashes (timeout, broken pipe), the return dict includes
+    ``"pet_restarted": True`` so callers can decide whether to retry.
     """
     try:
         from pytanque import PetanqueError
@@ -412,12 +415,12 @@ async def _run_with_pet(
             ),
         }
 
-    timeout: float = lifespan_state["pet_timeout"]
+    _timeout: float = timeout if timeout is not None else lifespan_state["pet_timeout"]
     # Lock acquire uses a shorter timeout than wait_for so that
     # _PetLockTimeout fires before asyncio.TimeoutError on contention.
     # This avoids unnecessarily killing pet when the issue is just
     # lock contention, not a pet hang.
-    lock_timeout = timeout * 0.8
+    lock_timeout = _timeout * 0.8
 
     def _execute() -> Any:
         lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
@@ -434,7 +437,7 @@ async def _run_with_pet(
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(_execute),
-                timeout=timeout,
+                timeout=_timeout,
             )
             return result
         except asyncio.TimeoutError:
@@ -444,7 +447,8 @@ async def _run_with_pet(
                 on_timeout()
             return {
                 "success": False,
-                "error": f"{description} timed out after {timeout}s.",
+                "error": f"{description} timed out after {_timeout}s.",
+                "pet_restarted": True,
             }
         except _PetLockTimeout:
             return {
@@ -453,6 +457,16 @@ async def _run_with_pet(
             }
         except PetanqueError as e:
             return {"success": False, "error": e.message}
+        except (BrokenPipeError, ConnectionError) as e:
+            _invalidate_pet(lifespan_state)
+            await _force_release_pet_lock()
+            if on_timeout:
+                on_timeout()
+            return {
+                "success": False,
+                "error": f"Pet process died: {e}",
+                "pet_restarted": True,
+            }
         except FileNotFoundError:
             return {
                 "success": False,
@@ -483,6 +497,7 @@ from rocq_mcp.coqc_tools import (  # noqa: E402
     _extract_source_range,  # noqa: F401
     _rocq_comment_ranges,  # noqa: F401
     _find_sentence_end,  # noqa: F401
+    _split_rocq_sentences,  # noqa: F401
     _parse_last_theorem,  # noqa: F401
     _build_auto_solve_source,  # noqa: F401
     _build_single_tactic_source,  # noqa: F401
@@ -492,16 +507,28 @@ from rocq_mcp.coqc_tools import (  # noqa: E402
 from rocq_mcp.interactive import (  # noqa: E402
     # Implementation functions for @mcp.tool wrappers
     run_query,  # noqa: F401
-    run_step,  # noqa: F401
+    run_start,  # noqa: F401
+    run_check,  # noqa: F401
     run_step_multi,  # noqa: F401
     run_toc,  # noqa: F401
     run_notations,  # noqa: F401
-    # Backward-compatibility re-exports (used by tests)
+    # Re-exports (used by tests)
     _format_toc_elements,  # noqa: F401
     _format_goals,  # noqa: F401
     _is_timeout_eligible,  # noqa: F401
     _compute_hard_timeout,  # noqa: F401
     _PET_TIMEOUT_GRACE,  # noqa: F401
+    # Import cache and state table
+    _import_cache,  # noqa: F401
+    _invalidate_import_cache,  # noqa: F401
+    _state_table,  # noqa: F401
+    _state_add,  # noqa: F401
+    _state_get,  # noqa: F401
+    _state_get_or_error,  # noqa: F401
+    _state_invalidate_all,  # noqa: F401
+    _state_current_id,  # noqa: F401
+    _CachedImportContext,  # noqa: F401
+    _StateEntry,  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
@@ -708,7 +735,7 @@ async def rocq_toc(
     Useful for understanding a file before working with it, or finding
     the name of a theorem to prove.
 
-    Does NOT require an active rocq_step session.
+    Does NOT require a rocq_start session.
 
     Args:
         file: Path to the .v file (relative to workspace).
@@ -770,50 +797,39 @@ async def rocq_notations(
 
 
 # ---------------------------------------------------------------------------
-# Tool: rocq_step
+# Tool: rocq_start
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool
-async def rocq_step(
-    tactic: str,
+async def rocq_start(
     file: str = "",
     theorem: str = "",
     workspace: str = "",
     line: int | None = None,
     character: int | None = None,
+    preamble: str = "",
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Execute a tactic in an interactive proof session and return goals.
+    """Open a proof context and return a state_id.
 
-    Two ways to start a session:
-    1. By theorem name: provide file and theorem.
-    2. By position: provide file, line, and character (0-based).
+    Three start modes (precedence: theorem > position > preamble):
+    1. By theorem: file + theorem -> pet.start()
+    2. By position: file + line + character -> pet.get_state_at_pos()
        Use this to start at a specific position in the file, e.g., at an
        error position reported by rocq_compile's error_positions field.
        Leave theorem empty when using position-based start.
+    3. From imports: preamble -> cached import state
 
     If both theorem and line/character are provided, theorem takes precedence.
 
-    Subsequent calls only need the tactic.
-
-    If the session is lost (timeout, crash), you'll get an error.
-    Re-send file + theorem (or file + line + character) to start a new
-    session, then replay your tactics from your conversation history.
-
-    Send one tactic per call. Do NOT send Qed -- the proof is complete
-    when proof_finished is True.
-
-    This server supports one interactive session at a time (single-client
-    stdio model). Do not use with multi-client transports (HTTP/SSE).
-
     Args:
-        tactic: The tactic to execute (e.g., "intros", "simpl", "lia").
-        file: Path to the .v file (relative to workspace). Required for first call.
-        theorem: Name of the theorem to prove. Required for theorem-based start.
+        file: Path to the .v file (relative to workspace).
+        theorem: Name of the theorem to prove.
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
-        line: 0-based line number for position-based session start.
-        character: 0-based character offset for position-based session start.
+        line: 0-based line number for position-based start.
+        character: 0-based character offset for position-based start.
+        preamble: Import commands for preamble mode (e.g., "Require Import Lia.").
     """
     workspace = workspace or ROCQ_WORKSPACE
 
@@ -821,14 +837,14 @@ async def rocq_step(
     if err:
         return {"success": False, "error": err}
 
-    return await run_step(
-        tactic=tactic,
+    return await run_start(
         file=file,
         theorem=theorem,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
         line=line,
         character=character,
+        preamble=preamble,
     )
 
 
@@ -840,30 +856,77 @@ async def rocq_step(
 @mcp.tool
 async def rocq_step_multi(
     tactics: list[str],
+    from_state: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try multiple tactics against the current proof state and return all results.
 
-    Does NOT advance the session — use rocq_step with the winning tactic to commit.
-    Requires an active rocq_step session.
+    Does NOT advance the session — use rocq_check with the winning tactic to commit.
+    Requires an active state from rocq_start or rocq_check.
 
     Useful for quickly testing which automation tactic works:
       tactics=["auto", "lia", "lra", "ring", "omega", "tauto"]
 
-    To auto-solve the current subgoal, first run rocq_step with "intros."
+    To auto-solve the current subgoal, first run rocq_check with "intros."
     then call this tool with the standard automation tactics:
       ["trivial", "reflexivity", "assumption", "exact I", "auto", "eauto",
        "tauto", "intuition", "lia", "lra", "nia", "nra", "ring", "field",
        "decide equality", "firstorder"]
-    Pick the first successful tactic and commit it with rocq_step.
+    Pick the first successful tactic and commit it with rocq_check.
     Note: lia/lra/ring/field require the .v file to import Lia/Lra/Ring/Field.
 
     Args:
         tactics: List of tactics to try (max 20).
+        from_state: Try from a specific state (default: current state).
     """
     return await run_step_multi(
         tactics=tactics,
         lifespan_state=ctx.lifespan_context,
+        from_state=from_state,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_check
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def rocq_check(
+    body: str,
+    from_state: int | None = None,
+    workspace: str = "",
+    timeout: int = 0,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Execute commands sequentially from a state — fast iterative checking.
+
+    One command = single step. Multiple commands = batch execution.
+    Requires a prior rocq_start call to establish a state.
+
+    On error mid-batch, returns last_valid_state_id for immediate
+    interactive recovery via rocq_check(from_state=...) or
+    rocq_step_multi(tactics=[...], from_state=...).
+
+    Args:
+        body: Commands to execute (one or more Rocq sentences).
+        from_state: Execute from a specific state ID (default: current state).
+        workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
+        timeout: Timeout in seconds (default: ROCQ_PET_TIMEOUT env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_PET_TIMEOUT
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    return await run_check(
+        body=body,
+        workspace=workspace,
+        timeout=float(timeout),
+        lifespan_state=ctx.lifespan_context,
+        from_state=from_state,
     )
 
 

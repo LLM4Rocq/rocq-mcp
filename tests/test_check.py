@@ -1,0 +1,446 @@
+"""Tests for run_check() -- sequential tactic execution from a state.
+
+run_check() executes commands sequentially from a state established by
+a prior run_start() call.  It replaces the old run_step() for single-
+tactic execution and run_fast_check() for batch execution.
+
+Tests are grouped into:
+- TestCheckSingleTactic: one tactic at a time
+- TestCheckBatch: multiple commands in one body
+- TestCheckFromState: branching via from_state
+- TestCheckEdgeCases: edge cases (no state, empty body, auto-dot, timing)
+- TestCheckTimeout: timeout handling
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tests.conftest import PET_AVAILABLE
+
+pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
+
+
+def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
+    """Create a minimal lifespan_state dict for testing."""
+    return {
+        "pet_client": None,
+        "pet_timeout": pet_timeout,
+        "current_workspace": None,
+    }
+
+
+@pytest.fixture
+def lifespan_state():
+    """Provide a lifespan_state and clean up pet on teardown."""
+    from rocq_mcp.server import _invalidate_pet
+
+    state = _make_lifespan_state()
+    yield state
+    _invalidate_pet(state)
+
+
+@pytest.fixture(autouse=True)
+def reset_state_table():
+    """Reset the state table and current state before/after each test."""
+    from rocq_mcp.interactive import _state_invalidate_all
+
+    _state_invalidate_all()
+    yield
+    _state_invalidate_all()
+
+
+# ---------------------------------------------------------------------------
+# TestCheckSingleTactic
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSingleTactic:
+    """Single-tactic execution via run_check."""
+
+    @pytest.mark.asyncio
+    async def test_single_tactic(self, workspace, lifespan_state):
+        """Start a theorem, run one tactic, verify success and goals."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_single.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+        start_state_id = sr["state_id"]
+
+        cr = await run_check(
+            body="intros.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=start_state_id,
+        )
+        assert cr["success"] is True
+        assert "goals" in cr
+        # After intros, we should see the hypothesis n and goal n = n
+        assert "n" in cr["goals"]
+        assert "state_id" in cr
+        assert cr["commands_run"] == 1
+        assert cr["proof_finished"] is False
+
+    @pytest.mark.asyncio
+    async def test_proof_finished(self, workspace, lifespan_state):
+        """Run a tactic that finishes the proof, verify proof_finished=True."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_finished.v"
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="exact I.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+
+    @pytest.mark.asyncio
+    async def test_wrong_tactic(self, workspace, lifespan_state):
+        """Run an invalid tactic, verify error response."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_wrong.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="omega_nonexistent_tactic.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is False
+        assert "error" in cr
+
+
+# ---------------------------------------------------------------------------
+# TestCheckBatch
+# ---------------------------------------------------------------------------
+
+
+class TestCheckBatch:
+    """Batch (multi-command) execution via run_check."""
+
+    @pytest.mark.asyncio
+    async def test_batch_execution(self, workspace, lifespan_state):
+        """Run multiple tactics as one body, verify commands_run and proof_finished."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_batch.v"
+        vfile.write_text(
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Proof.\n"
+            "  intros n. induction n as [| n' IH].\n"
+            "  - reflexivity.\n"
+            "  - simpl. rewrite IH. reflexivity.\n"
+            "Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="add_0_r",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        body = (
+            "intros n. induction n as [| n' IH]. "
+            "- reflexivity. "
+            "- simpl. rewrite IH. reflexivity."
+        )
+        cr = await run_check(
+            body=body,
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+        # The body contains multiple sentences; commands_run should match
+        assert cr["commands_run"] >= 2
+
+    @pytest.mark.asyncio
+    async def test_batch_error_mid_proof(self, workspace, lifespan_state):
+        """Run a batch where the 2nd command fails, verify error details."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_batch_err.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        # First tactic (intros) should succeed, second (omega_bad) should fail
+        cr = await run_check(
+            body="intros. omega_bad_tactic.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is False
+        assert "error" in cr
+        assert "failed_command" in cr
+        assert cr["command_index"] == 1
+        assert cr["commands_run"] == 1
+        assert "last_valid_state_id" in cr
+        assert cr["last_valid_state_id"] is not None
+
+
+# ---------------------------------------------------------------------------
+# TestCheckFromState
+# ---------------------------------------------------------------------------
+
+
+class TestCheckFromState:
+    """Branching via from_state parameter."""
+
+    @pytest.mark.asyncio
+    async def test_from_state_branching(self, workspace, lifespan_state):
+        """Start a theorem, run tactic A, then run tactic B from the same start state."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_branch.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+        start_id = sr["state_id"]
+
+        # Branch A: run intros from start state
+        cr_a = await run_check(
+            body="intros.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=start_id,
+        )
+        assert cr_a["success"] is True
+        state_a = cr_a["state_id"]
+
+        # Branch B: run intros n from the SAME start state (not from state_a)
+        cr_b = await run_check(
+            body="intros n.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=start_id,
+        )
+        assert cr_b["success"] is True
+        state_b = cr_b["state_id"]
+
+        # The two branches should produce different state IDs
+        assert state_a != state_b
+
+        # Both should record the start state as their parent
+        assert cr_a["parent_state_id"] == start_id
+        assert cr_b["parent_state_id"] == start_id
+
+
+# ---------------------------------------------------------------------------
+# TestCheckEdgeCases
+# ---------------------------------------------------------------------------
+
+
+class TestCheckEdgeCases:
+    """Edge cases for run_check."""
+
+    @pytest.mark.asyncio
+    async def test_no_active_state(self, workspace, lifespan_state):
+        """Call run_check with no prior run_start and from_state=None, expect error."""
+        from rocq_mcp.server import run_check
+
+        cr = await run_check(
+            body="intros.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=None,
+        )
+        assert cr["success"] is False
+        assert "error" in cr
+        # Should indicate there is no active state
+        err_lower = cr["error"].lower()
+        assert "no active" in err_lower or "state" in err_lower
+
+    @pytest.mark.asyncio
+    async def test_empty_body(self, workspace, lifespan_state):
+        """Call run_check with empty body, verify success with commands_run=0."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_empty.v"
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert cr["commands_run"] == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_dot_append(self, workspace, lifespan_state):
+        """Run a tactic without trailing dot, verify it still works."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_autodot.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        # "intros" without trailing dot -- should still succeed
+        cr = await run_check(
+            body="intros",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_check_time_ms(self, workspace, lifespan_state):
+        """Verify check_time_ms is present and is a non-negative int on success."""
+        from rocq_mcp.server import run_start, run_check
+
+        vfile = workspace / "check_timing.v"
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="exact I.",
+            workspace=str(workspace),
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        assert "check_time_ms" in cr
+        assert isinstance(cr["check_time_ms"], int)
+        assert cr["check_time_ms"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# TestCheckTimeout
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTimeout:
+    """Timeout handling for run_check."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_single_tactic(self, workspace):
+        """Use a looping tactic with a short timeout, verify timeout error."""
+        from rocq_mcp.server import run_start, run_check, _invalidate_pet
+
+        vfile = workspace / "check_timeout.v"
+        # Define the looping tactic but use a non-diverging proof body.
+        # coq-lsp processes the full file during pet.start(), so the file
+        # itself must not diverge. The loop is tested via run_check.
+        vfile.write_text(
+            "Ltac loop := idtac; loop.\n" "Theorem t : True.\nProof. exact I. Qed.\n"
+        )
+
+        # Use a normal timeout for start (pet compilation takes time),
+        # then pass a short timeout explicitly to run_check.
+        state = _make_lifespan_state(pet_timeout=30.0)
+        try:
+            sr = await run_start(
+                file=str(vfile.relative_to(workspace)),
+                theorem="t",
+                workspace=str(workspace),
+                lifespan_state=state,
+            )
+            assert sr["success"] is True
+
+            cr = await run_check(
+                body="loop.",
+                workspace=str(workspace),
+                timeout=2.0,
+                lifespan_state=state,
+                from_state=sr["state_id"],
+            )
+            assert cr["success"] is False
+            assert "error" in cr
+            # The error should mention timeout
+            err_lower = cr["error"].lower()
+            assert "timed out" in err_lower or "timeout" in err_lower
+        finally:
+            _invalidate_pet(state)

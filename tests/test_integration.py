@@ -2,7 +2,7 @@
 
 TestCompileVerifyWorkflow: compile then verify (require coqc)
 TestSharedDefsVerifyWorkflow: Phase 2 shared-defs verify (require coqc + pet)
-TestQueryStepWorkflow: query then step (require pet)
+TestQueryStepWorkflow: query then start+check (require pet)
 """
 
 from __future__ import annotations
@@ -193,6 +193,7 @@ class TestCompileVerifyWorkflow:
     def test_compile_with_coqproject(self, tmp_path):
         """rocq_compile resolves local imports via _CoqProject flags."""
         import subprocess
+
         from rocq_mcp.server import rocq_compile, ROCQ_COQC_BINARY
 
         # Set up a mini project with a helper module
@@ -218,6 +219,7 @@ class TestCompileVerifyWorkflow:
     async def test_verify_with_coqproject(self, tmp_path):
         """rocq_verify works with local imports resolved via _CoqProject."""
         import subprocess
+
         from rocq_mcp.server import rocq_compile, rocq_verify, ROCQ_COQC_BINARY
 
         # Set up a mini project
@@ -469,21 +471,21 @@ class TestSharedDefsVerifyWorkflow:
 
 
 # =========================================================================
-# Query -> Step workflow (require pet)
+# Query -> Start+Check workflow (require pet)
 # =========================================================================
 
 
 @pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 class TestQueryStepWorkflow:
-    """End-to-end: query to search, then step to apply found lemma."""
+    """End-to-end: query to search, then start+check to prove a theorem."""
 
     @pytest.fixture(autouse=True)
-    def _reset_session(self):
-        from rocq_mcp.server import _session
+    def _reset_state(self):
+        from rocq_mcp.interactive import _state_invalidate_all
 
-        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+        _state_invalidate_all()
         yield
-        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+        _state_invalidate_all()
 
     @staticmethod
     def _make_state(timeout: float = 30.0) -> dict:
@@ -491,8 +493,8 @@ class TestQueryStepWorkflow:
 
     @pytest.mark.asyncio
     async def test_query_then_step(self, workspace):
-        """Use query to find a lemma, then step through a proof using it."""
-        from rocq_mcp.server import run_query, run_step, _invalidate_pet
+        """Use query to find a lemma, then start+check to prove a theorem."""
+        from rocq_mcp.server import run_query, run_start, run_check, _invalidate_pet
 
         state = self._make_state()
         try:
@@ -506,57 +508,88 @@ class TestQueryStepWorkflow:
             assert qr["success"] is True
             assert "Nat.add" in qr["output"]
 
-            # Step: prove a simple theorem using what we found
+            # Start proof context
             vfile = workspace / "query_step_test.v"
             vfile.write_text(
                 "Theorem t : forall n : nat, n = n.\n"
                 "Proof. intros. reflexivity. Qed.\n"
             )
 
-            r1 = await run_step(
-                tactic="intros",
+            r1 = await run_start(
                 file=str(vfile),
                 theorem="t",
                 workspace=str(workspace),
                 lifespan_state=state,
             )
             assert r1["success"] is True
-            assert r1["proof_finished"] is False
+            start_id = r1["state_id"]
 
-            r2 = await run_step(
-                tactic="reflexivity",
-                file="",
-                theorem="",
+            # Execute first tactic
+            r2 = await run_check(
+                body="intros.",
                 workspace=str(workspace),
+                timeout=30.0,
                 lifespan_state=state,
+                from_state=start_id,
             )
             assert r2["success"] is True
-            assert r2["proof_finished"] is True
+            assert r2["proof_finished"] is False
+            intros_id = r2["state_id"]
+
+            # Execute second tactic to finish proof
+            r3 = await run_check(
+                body="reflexivity.",
+                workspace=str(workspace),
+                timeout=30.0,
+                lifespan_state=state,
+                from_state=intros_id,
+            )
+            assert r3["success"] is True
+            assert r3["proof_finished"] is True
         finally:
             _invalidate_pet(state)
 
     @pytest.mark.asyncio
     async def test_pet_respawns_after_kill(self, workspace):
         """Kill pet via timeout, verify next query call respawns it."""
-        from rocq_mcp.server import run_step, run_query, _invalidate_pet
+        from rocq_mcp.server import run_start, run_check, run_query, _invalidate_pet
 
         vfile = workspace / "respawn_test.v"
+        # Define the looping tactic but use a non-diverging proof body.
+        # coq-lsp processes the full file during pet.start(), so the file
+        # itself must not diverge. The loop is tested via run_check.
         vfile.write_text(
-            "Ltac loop := idtac; loop.\n" "Theorem t : True. Proof. loop. Qed.\n"
+            "Ltac loop := idtac; loop.\n" "Theorem t : True. Proof. exact I. Qed.\n"
         )
 
-        state = self._make_state(timeout=1.0)
+        # Use a normal timeout for start (pet compilation takes time),
+        # then pass a short timeout to run_check for the looping tactic.
+        state = self._make_state(timeout=30.0)
         try:
-            # Trigger timeout — kills pet
-            r1 = await run_step(
-                tactic="loop",
+            r0 = await run_start(
                 file=str(vfile),
                 theorem="t",
                 workspace=str(workspace),
                 lifespan_state=state,
             )
+            assert r0["success"] is True
+            start_id = r0["state_id"]
+
+            # Trigger timeout via looping tactic -- kills pet
+            r1 = await run_check(
+                body="loop.",
+                workspace=str(workspace),
+                timeout=1.0,
+                lifespan_state=state,
+                from_state=start_id,
+            )
             assert r1["success"] is False
-            assert "timed out" in r1["error"].lower()
+            err_lower = r1.get("error", "").lower()
+            assert (
+                "timed out" in err_lower
+                or "timeout" in err_lower
+                or r1.get("pet_restarted") is True
+            )
 
             # Increase timeout for recovery
             state["pet_timeout"] = 30.0

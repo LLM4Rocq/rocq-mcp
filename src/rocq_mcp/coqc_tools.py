@@ -323,7 +323,7 @@ def run_compile(
         if positions:
             result_dict["error_positions"] = positions
             result_dict["hint"] = (
-                "Use rocq_step with file, line, and character parameters "
+                "Use rocq_start with file, line, and character parameters "
                 "to start an interactive session at the error position."
             )
         return result_dict
@@ -847,6 +847,25 @@ def _find_sentence_end(text: str) -> int | None:
             if idx + 1 >= len(text) or text[idx + 1] in (" ", "\t", "\n", "\r"):
                 return idx
     return None
+
+
+def _split_rocq_sentences(source: str) -> list[str]:
+    """Split Rocq source into individual sentences.
+
+    Uses :func:`_find_sentence_end` repeatedly to split on
+    sentence-terminating dots (handling comments and strings correctly).
+    """
+    sentences: list[str] = []
+    remaining = source
+    while remaining.strip():
+        dot = _find_sentence_end(remaining)
+        if dot is None:
+            break
+        sentence = remaining[: dot + 1].strip()
+        if sentence:
+            sentences.append(sentence)
+        remaining = remaining[dot + 1 :]
+    return sentences
 
 
 def _parse_last_theorem(source: str) -> tuple[str, str, str, str] | None:

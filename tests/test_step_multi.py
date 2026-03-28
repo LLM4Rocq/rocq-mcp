@@ -1,8 +1,8 @@
 """Tests for the rocq_step_multi tool.
 
 rocq_step_multi tries N tactics against the current proof state and returns
-all results WITHOUT advancing the session. Since it requires pytanque, most
-tests use mocks.
+all results WITHOUT advancing the state table. Since it requires pytanque,
+most tests use mocks.
 
 Tests are grouped into:
 - TestStepMultiForbidden: tactic with forbidden command rejected (calls _check_forbidden_commands)
@@ -135,17 +135,14 @@ class TestStepMultiReal:
     """Tests that call the actual run_step_multi function (with mocked pet)."""
 
     @pytest.fixture(autouse=True)
-    def _reset_session_and_semaphore(self):
+    def _reset_state_and_semaphore(self):
         import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all
 
-        srv._session.update(
-            {"state": None, "file": None, "theorem": None, "history": []}
-        )
+        _state_invalidate_all()
         srv._pet_semaphore = None  # reset so each asyncio.run() gets a fresh one
         yield
-        srv._session.update(
-            {"state": None, "file": None, "theorem": None, "history": []}
-        )
+        _state_invalidate_all()
         srv._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
@@ -183,11 +180,20 @@ class TestStepMultiReal:
 
     def test_valid_tactics_with_mocked_pet(self):
         """run_step_multi with valid tactics returns structured results."""
-        from rocq_mcp.server import run_step_multi, _session
+        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import _state_add, _state_current_id
 
-        # Set up a mock session state (simulating an active session)
+        # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
-        _session["state"] = parent_state
+        injected_id = _state_add(
+            state=parent_state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
 
         # Build a mock pet that returns structured goals
         mock_pet = MagicMock()
@@ -204,7 +210,11 @@ class TestStepMultiReal:
             )
         )
 
-        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -226,11 +236,70 @@ class TestStepMultiReal:
             assert "goals" in entry
             assert "proof_finished" in entry
 
-        # Session state should NOT have been advanced
-        assert _session["state"] is parent_state
+        # State table current_id should NOT have changed
+        # (step_multi is read-only exploration)
+        from rocq_mcp.interactive import _state_current_id as cur_id
 
-    def test_no_session_error(self):
-        """run_step_multi with no active session returns error."""
+        assert cur_id == injected_id
+
+    def test_valid_tactics_with_from_state(self):
+        """run_step_multi with from_state uses the specified state."""
+        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import _state_add
+
+        # Inject two states into the state table
+        state_a = _make_mock_state(proof_finished=False)
+        id_a = _state_add(
+            state=state_a,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+        state_b = _make_mock_state(proof_finished=False)
+        _state_add(
+            state=state_b,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=id_a,
+            tactic="intros.",
+            step=1,
+        )
+
+        # Build a mock pet
+        mock_pet = MagicMock()
+        new_state = _make_mock_state(proof_finished=True)
+        mock_pet.run = MagicMock(return_value=new_state)
+        mock_pet.complete_goals = MagicMock(return_value=_make_complete_goals(goals=[]))
+
+        lifespan_state = {
+            "pet_client": None,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+            result = asyncio.run(
+                run_step_multi(
+                    tactics=["reflexivity"],
+                    lifespan_state=lifespan_state,
+                    from_state=id_a,
+                )
+            )
+
+        assert result["success"] is True
+        assert result["from_state_id"] == id_a
+
+        # Verify pet.run was called with state_a (not state_b which is current)
+        mock_pet.run.assert_called()
+        call_args = mock_pet.run.call_args
+        assert call_args[0][0] is state_a
+
+    def test_no_state_error(self):
+        """run_step_multi with no active state returns error."""
         from rocq_mcp.server import run_step_multi
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
@@ -242,7 +311,7 @@ class TestStepMultiReal:
             )
 
         assert result["success"] is False
-        assert "no active session" in result["error"].lower()
+        assert "no active" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +324,12 @@ class TestStepMultiIntegration:
     """Integration tests for rocq_step_multi (require pet subprocess)."""
 
     @pytest.fixture(autouse=True)
-    def _reset_session(self):
-        from rocq_mcp.server import _session
+    def _reset_state(self):
+        from rocq_mcp.interactive import _state_invalidate_all
 
-        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+        _state_invalidate_all()
         yield
-        _session.update({"state": None, "file": None, "theorem": None, "history": []})
+        _state_invalidate_all()
 
     @staticmethod
     def _make_state(timeout: float = 30.0) -> dict:
@@ -268,13 +337,19 @@ class TestStepMultiIntegration:
 
     @pytest.mark.asyncio
     async def test_step_multi_concept(self, workspace):
-        """Verify the concept: try tactics, session state unchanged.
+        """Verify the concept: try tactics via step_multi, state unchanged.
 
-        This test starts a session with rocq_step, then manually tries
-        multiple tactics against the same state (simulating step_multi
-        behavior) and verifies the session state is not corrupted.
+        This test starts a proof context with run_start, executes a tactic
+        with run_check, then tries multiple tactics via run_step_multi
+        and verifies the state table is not corrupted.
         """
-        from rocq_mcp.server import run_step, _session, _invalidate_pet
+        from rocq_mcp.server import (
+            run_start,
+            run_check,
+            run_step_multi,
+            _invalidate_pet,
+        )
+        from rocq_mcp.interactive import _state_current_id
 
         vfile = workspace / "step_multi_test.v"
         vfile.write_text(
@@ -283,42 +358,57 @@ class TestStepMultiIntegration:
 
         state = self._make_state()
         try:
-            # Start session
-            r1 = await run_step(
-                tactic="intros",
+            # Start proof context
+            r1 = await run_start(
                 file=str(vfile),
                 theorem="t",
                 workspace=str(workspace),
                 lifespan_state=state,
             )
             assert r1["success"] is True
+            start_state_id = r1["state_id"]
 
-            # Record the session state before exploration
-            saved_state = _session["state"]
-            saved_history_len = len(_session["history"])
-
-            # Now try a wrong tactic (simulating step_multi exploration)
-            r2 = await run_step(
-                tactic="omega_nonexistent",
-                file="",
-                theorem="",
+            # Execute intros to get a state with a goal
+            r2 = await run_check(
+                body="intros.",
                 workspace=str(workspace),
+                timeout=30.0,
                 lifespan_state=state,
+                from_state=start_state_id,
             )
-            assert r2["success"] is False
+            assert r2["success"] is True
+            intros_state_id = r2["state_id"]
 
-            # Session state should NOT have advanced (failed tactic)
-            assert len(_session["history"]) == saved_history_len
+            # Record the current state id before exploration
+            from rocq_mcp.interactive import _state_current_id as saved_current
 
-            # Now try the correct tactic
-            r3 = await run_step(
-                tactic="reflexivity",
-                file="",
-                theorem="",
-                workspace=str(workspace),
+            # Try multiple tactics via run_step_multi (read-only exploration)
+            r3 = await run_step_multi(
+                tactics=["reflexivity", "auto", "omega_nonexistent"],
                 lifespan_state=state,
+                from_state=intros_state_id,
             )
             assert r3["success"] is True
-            assert r3["proof_finished"] is True
+            assert len(r3["results"]) == 3
+
+            # reflexivity should succeed
+            assert r3["results"][0]["success"] is True
+            assert r3["results"][0]["proof_finished"] is True
+
+            # State table current_id should NOT have changed
+            from rocq_mcp.interactive import _state_current_id as after_current
+
+            assert after_current == saved_current
+
+            # Commit the winning tactic via run_check
+            r4 = await run_check(
+                body="reflexivity.",
+                workspace=str(workspace),
+                timeout=30.0,
+                lifespan_state=state,
+                from_state=intros_state_id,
+            )
+            assert r4["success"] is True
+            assert r4["proof_finished"] is True
         finally:
             _invalidate_pet(state)

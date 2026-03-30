@@ -155,7 +155,7 @@ class TestStepMultiReal:
 
     def test_too_many_tactics_rejected(self):
         """run_step_multi rejects >20 tactics with success:False."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
         result = asyncio.run(
@@ -167,7 +167,7 @@ class TestStepMultiReal:
 
     def test_forbidden_command_rejected(self):
         """run_step_multi rejects tactics with forbidden commands."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
         result = asyncio.run(
@@ -181,7 +181,7 @@ class TestStepMultiReal:
 
     def test_valid_tactics_with_mocked_pet(self):
         """run_step_multi with valid tactics returns structured results."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add, _state_current_id
 
         # Inject a mock state into the state table
@@ -245,7 +245,7 @@ class TestStepMultiReal:
 
     def test_valid_tactics_with_from_state(self):
         """run_step_multi with from_state uses the specified state."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject two states into the state table
@@ -301,7 +301,7 @@ class TestStepMultiReal:
 
     def test_no_state_error(self):
         """run_step_multi with no active state returns error."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
 
@@ -316,7 +316,7 @@ class TestStepMultiReal:
 
     def test_broken_pipe_returns_pet_restarted(self):
         """run_step_multi returns pet_restarted=True on BrokenPipeError."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject a mock state into the state table
@@ -355,7 +355,7 @@ class TestStepMultiReal:
 
     def test_connection_error_returns_pet_restarted(self):
         """run_step_multi returns pet_restarted=True on ConnectionError."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject a mock state into the state table
@@ -400,7 +400,7 @@ class TestStepMultiReal:
         """
         from pytanque import PetanqueError
 
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject a mock state into the state table
@@ -451,7 +451,7 @@ class TestStepMultiReal:
         """
         from pytanque import PetanqueError
 
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject a mock state into the state table
@@ -523,12 +523,12 @@ class TestStepMultiIntegration:
         with run_check, then tries multiple tactics via run_step_multi
         and verifies the state table is not corrupted.
         """
-        from rocq_mcp.server import (
+        from rocq_mcp.interactive import (
             run_start,
             run_check,
             run_step_multi,
-            _invalidate_pet,
         )
+        from rocq_mcp.server import _invalidate_pet
         from rocq_mcp.interactive import _state_current_id
 
         vfile = workspace / "step_multi_test.v"
@@ -622,7 +622,7 @@ class TestStepMultiTimeoutBudget:
 
     def test_per_tactic_timeout_is_divided(self):
         """Each tactic gets timeout/len(tactics) as its Rocq timeout."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Track what timeout was passed to pet.run
@@ -688,7 +688,7 @@ class TestStepMultiTimeoutBudget:
 
     def test_per_tactic_timeout_minimum_is_one(self):
         """Per-tactic budget is at least 1 even with many tactics."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         recorded_timeouts = []
@@ -744,7 +744,7 @@ class TestStepMultiTimeoutBudget:
 
     def test_non_eligible_tactics_get_none_timeout(self):
         """Tactics that are not timeout-eligible (e.g., bullets) get timeout=None."""
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         recorded_calls = []
@@ -839,7 +839,7 @@ class TestStepMultiDeadPetDetection:
         """
         from pytanque import PetanqueError
 
-        from rocq_mcp.server import run_step_multi
+        from rocq_mcp.interactive import run_step_multi
         from rocq_mcp.interactive import _state_add
 
         # Inject a mock state into the state table

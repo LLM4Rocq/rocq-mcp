@@ -500,52 +500,14 @@ async def _run_with_pet(
 # NOTE: These imports MUST come after all shared infrastructure above is
 # defined, because compile and interactive import from this module.
 
-from rocq_mcp.compile import (  # noqa: E402
-    # Implementation functions for @mcp.tool wrappers
-    run_compile,
-    run_verify,
-    # Backward-compatibility re-exports (used by tests)
-    _run_coqc,  # noqa: F401
-    _format_error,  # noqa: F401
-    _parse_coqc_error_positions,  # noqa: F401
-    _MAX_ERROR_LENGTH,  # noqa: F401
-    _MAX_FORMAT_WARNINGS,  # noqa: F401
-    _TMP_PATH_RE,  # noqa: F401
-    _extract_source_range,  # noqa: F401
-    _rocq_comment_ranges,  # noqa: F401
-    _find_sentence_end,  # noqa: F401
-    _split_rocq_sentences,  # noqa: F401
-)
-
+from rocq_mcp.compile import run_compile, run_verify  # noqa: E402
 from rocq_mcp.interactive import (  # noqa: E402
-    # Implementation functions for @mcp.tool wrappers
-    run_query,  # noqa: F401
-    run_start,  # noqa: F401
-    run_check,  # noqa: F401
-    run_step_multi,  # noqa: F401
-    run_toc,  # noqa: F401
-    run_notations,  # noqa: F401
-    # Re-exports (used by tests)
-    _format_toc_elements,  # noqa: F401
-    _format_goals,  # noqa: F401
-    _is_timeout_eligible,  # noqa: F401
-    _compute_hard_timeout,  # noqa: F401
-    _PET_TIMEOUT_GRACE,  # noqa: F401
-    # Import cache and state table
-    _import_cache,  # noqa: F401
-    _invalidate_import_cache,  # noqa: F401
-    _state_table,  # noqa: F401
-    _state_add,  # noqa: F401
-    _state_get,  # noqa: F401
-    _state_get_or_error,  # noqa: F401
-    _state_invalidate_all,  # noqa: F401
-    _state_current_id,  # noqa: F401
-    _CachedImportContext,  # noqa: F401
-    _StateEntry,  # noqa: F401
-    _reconstruct_tactic_path,  # noqa: F401
-    _MAX_GOALS_LENGTH,  # noqa: F401
-    _MAX_GOALS_SHOWN,  # noqa: F401
-    _MAX_STATES,  # noqa: F401
+    run_query,
+    run_start,
+    run_check,
+    run_step_multi,
+    run_toc,
+    run_notations,
 )
 
 # ---------------------------------------------------------------------------

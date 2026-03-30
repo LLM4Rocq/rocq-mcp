@@ -29,13 +29,15 @@ from unittest import mock
 import pytest
 
 from rocq_mcp.server import (
-    _format_error,
     _force_release_pet_lock,
-    _parse_coqc_error_positions,
     _parse_project_flags,
     _PetLockTimeout,
     _run_with_pet,
     _validate_workspace,
+)
+from rocq_mcp.compile import (
+    _format_error,
+    _parse_coqc_error_positions,
     _MAX_ERROR_LENGTH,
     _MAX_FORMAT_WARNINGS,
 )

@@ -39,7 +39,7 @@ class TestQuerySuccess:
 
     @pytest.mark.asyncio
     async def test_search_nat(self, workspace, lifespan_state):
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="Search nat.",
@@ -52,7 +52,7 @@ class TestQuerySuccess:
 
     @pytest.mark.asyncio
     async def test_check_type(self, workspace, lifespan_state):
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="Check Nat.add.",
@@ -66,7 +66,7 @@ class TestQuerySuccess:
     @pytest.mark.asyncio
     async def test_with_preamble(self, workspace, lifespan_state):
         """Query with preamble for imports."""
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="Check Rplus.",
@@ -89,7 +89,7 @@ class TestQueryEdgeCases:
     @pytest.mark.asyncio
     async def test_auto_append_dot(self, workspace, lifespan_state):
         """Command without trailing dot should get one appended automatically."""
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="Check Nat.add",
@@ -102,7 +102,7 @@ class TestQueryEdgeCases:
     @pytest.mark.asyncio
     async def test_no_double_dot(self, workspace, lifespan_state):
         """Command already ending with dot should not get another one."""
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="Check Nat.add.",
@@ -124,7 +124,7 @@ class TestQueryErrors:
     @pytest.mark.asyncio
     async def test_timeout(self, workspace):
         """A query that exceeds the timeout should return a timeout error."""
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         # Use an extremely short timeout to trigger it
         state = _make_lifespan_state(pet_timeout=0.001)
@@ -140,7 +140,7 @@ class TestQueryErrors:
     @pytest.mark.asyncio
     async def test_invalid_command(self, workspace, lifespan_state):
         """An invalid Rocq command should return an error."""
-        from rocq_mcp.server import run_query
+        from rocq_mcp.interactive import run_query
 
         result = await run_query(
             command="InvalidXYZCommand.",

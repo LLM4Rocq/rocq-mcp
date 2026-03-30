@@ -494,7 +494,8 @@ class TestQueryStepWorkflow:
     @pytest.mark.asyncio
     async def test_query_then_step(self, workspace):
         """Use query to find a lemma, then start+check to prove a theorem."""
-        from rocq_mcp.server import run_query, run_start, run_check, _invalidate_pet
+        from rocq_mcp.interactive import run_query, run_start, run_check
+        from rocq_mcp.server import _invalidate_pet
 
         state = self._make_state()
         try:
@@ -552,7 +553,8 @@ class TestQueryStepWorkflow:
     @pytest.mark.asyncio
     async def test_pet_respawns_after_kill(self, workspace):
         """Kill pet via timeout, verify next query call respawns it."""
-        from rocq_mcp.server import run_start, run_check, run_query, _invalidate_pet
+        from rocq_mcp.interactive import run_start, run_check, run_query
+        from rocq_mcp.server import _invalidate_pet
 
         vfile = workspace / "respawn_test.v"
         # Define the looping tactic but use a non-diverging proof body.

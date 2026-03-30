@@ -71,18 +71,26 @@ The server exposes eight MCP tools:
 
 ## Security Model
 
-The verification tool (`rocq_verify`) uses defense in depth with three layers:
+The verification tool (`rocq_verify`) uses defense in depth with three verification phases and multiple security layers.
 
-### Layer 1: Module M sandbox
+### Verification phases
 
-The submitted proof is wrapped inside `Module M. ... End M.`. The theorem is re-stated outside the module and proved via `exact M.<name>`. This prevents:
+`rocq_verify` tries up to three phases in sequence, falling back to the next if the previous one times out:
+
+1. **Phase 1 -- Module M sandbox.** The proof is wrapped inside `Module M. ... End M.`. The theorem is re-stated outside and proved via `exact M.<name>`. This is the strongest sandbox but can time out on compute-heavy proofs.
+
+2. **Phase 2 -- Shared-defs template.** For problems with Inductive/Record/Definition types, type definitions are placed outside Module M to avoid nominal typing mismatches, while the proof stays inside the sandbox. Uses pytanque's `toc` to extract problem structure. Falls back from Phase 1 when type incompatibilities are detected.
+
+3. **Phase 3 -- Direct verification.** When Phase 1 times out, the proof is compiled standalone (no Module M), and correctness is verified by comparing `Check <name>.` output against the problem statement's expected type after normalization. Additional security checks compensate for the lack of a sandbox (see below).
+
+### Layer 1: Module M sandbox (Phases 1 & 2)
+
+The Module M sandbox prevents:
 
 - **Type redefinition cheating** -- Inductive/Record types are generative in Rocq, so redefining `nat` as `bool` inside Module M creates an incompatible type that cannot unify with the real `nat` outside.
 - **Axiom spoofing** -- User-declared axioms receive an `M.` prefix in `Print Assumptions` output, which the stdlib whitelist rejects.
 - **`Admitted`/`Abort` usage** -- Caught by `Print Assumptions`.
 - **Module escape** -- `End M.` and `Reset`/`Back`/`Undo` are forbidden commands (see Layer 2).
-
-For problems containing Inductive/Record/Definition types, a **Phase 2 fallback** (shared-defs template) automatically places type definitions outside Module M to avoid nominal typing mismatches, while keeping the proof inside the sandbox. This uses pytanque's `toc` to extract problem structure.
 
 ### Layer 2: Forbidden command scanning
 
@@ -103,6 +111,23 @@ Forbidden commands:
 After compilation, `Print Assumptions` is checked against a whitelist of standard library axioms (classical logic, functional extensionality, Reals axioms, etc.). Axioms with qualified names must have a recognized stdlib prefix (`Coq.*`, `Rocq.*`, `Stdlib.*`, or known module prefixes like `ClassicalDedekindReals.*`). The `M.` prefix on user-declared axioms ensures they are always rejected.
 
 Printing flags (`Set Printing All`, `Set Printing Universes`, `Set Printing Width`) are reset after `End M.` to prevent corruption of `Print Assumptions` output format.
+
+### Phase 3 security checks
+
+Without the Module M sandbox, Phase 3 applies additional static checks to the proof source:
+
+- **Core type shadowing** -- Redefining core types (`nat`, `bool`, `Prop`, `eq`, etc.) is rejected.
+- **Module name shadowing** -- Defining modules with stdlib-like names (e.g., `Module ClassicalDedekindReals`) is rejected.
+- **User axiom extraction** -- `Axiom`, `Parameter`, `Conjecture`, `Hypothesis`, `Variable`, and `Context` declarations are parsed; their names are cross-checked against `Print Assumptions` output to detect axiom spoofing.
+- **Problem definition comparison** -- The problem's definition sentence is extracted and compared to the proof's to detect redefinition attacks.
+- **Type comparison** -- The proven type (via `Check`) is normalized and compared to the expected type from the problem statement.
+
+**Known limitations of Phase 3:**
+
+- Notation/scope redefinition before identically-texted definitions can change kernel semantics without being detected by text comparison.
+- Stdlib function shadowing (redefining functions called by the problem's definition) is not fully covered.
+
+The `verification_method` field in the result indicates which phase was used (`"module_m"`, `"shared_defs"`, or `"direct"`).
 
 ### Trusted anchor
 

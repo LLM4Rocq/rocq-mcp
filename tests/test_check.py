@@ -61,7 +61,7 @@ class TestCheckSingleTactic:
     @pytest.mark.asyncio
     async def test_single_tactic(self, workspace, lifespan_state):
         """Start a theorem, run one tactic, verify success and goals."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_single.v"
         vfile.write_text(
@@ -95,7 +95,7 @@ class TestCheckSingleTactic:
     @pytest.mark.asyncio
     async def test_proof_finished(self, workspace, lifespan_state):
         """Run a tactic that finishes the proof, verify proof_finished=True."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_finished.v"
         vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
@@ -121,7 +121,7 @@ class TestCheckSingleTactic:
     @pytest.mark.asyncio
     async def test_wrong_tactic(self, workspace, lifespan_state):
         """Run an invalid tactic, verify error response."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_wrong.v"
         vfile.write_text(
@@ -158,7 +158,7 @@ class TestCheckBatch:
     @pytest.mark.asyncio
     async def test_batch_execution(self, workspace, lifespan_state):
         """Run multiple tactics as one body, verify commands_run and proof_finished."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_batch.v"
         vfile.write_text(
@@ -199,7 +199,7 @@ class TestCheckBatch:
     @pytest.mark.asyncio
     async def test_batch_error_mid_proof(self, workspace, lifespan_state):
         """Run a batch where the 2nd command fails, verify error details."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_batch_err.v"
         vfile.write_text(
@@ -242,7 +242,7 @@ class TestCheckFromState:
     @pytest.mark.asyncio
     async def test_from_state_branching(self, workspace, lifespan_state):
         """Start a theorem, run tactic A, then run tactic B from the same start state."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_branch.v"
         vfile.write_text(
@@ -299,7 +299,7 @@ class TestCheckEdgeCases:
     @pytest.mark.asyncio
     async def test_no_active_state(self, workspace, lifespan_state):
         """Call run_check with no prior run_start and from_state=None, expect error."""
-        from rocq_mcp.server import run_check
+        from rocq_mcp.interactive import run_check
 
         cr = await run_check(
             body="intros.",
@@ -317,7 +317,7 @@ class TestCheckEdgeCases:
     @pytest.mark.asyncio
     async def test_empty_body(self, workspace, lifespan_state):
         """Call run_check with empty body, verify success with commands_run=0."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_empty.v"
         vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
@@ -343,7 +343,7 @@ class TestCheckEdgeCases:
     @pytest.mark.asyncio
     async def test_auto_dot_append(self, workspace, lifespan_state):
         """Run a tactic without trailing dot, verify it still works."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_autodot.v"
         vfile.write_text(
@@ -371,7 +371,7 @@ class TestCheckEdgeCases:
     @pytest.mark.asyncio
     async def test_check_time_ms(self, workspace, lifespan_state):
         """Verify check_time_ms is present and is a non-negative int on success."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_timing.v"
         vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
@@ -408,7 +408,8 @@ class TestCheckTimeout:
     @pytest.mark.asyncio
     async def test_timeout_single_tactic(self, workspace):
         """Use a looping tactic with a short timeout, verify timeout error."""
-        from rocq_mcp.server import run_start, run_check, _invalidate_pet
+        from rocq_mcp.interactive import run_start, run_check
+        from rocq_mcp.server import _invalidate_pet
 
         vfile = workspace / "check_timeout.v"
         # Define the looping tactic but use a non-diverging proof body.
@@ -457,7 +458,7 @@ class TestCheckProofTactics:
     @pytest.mark.asyncio
     async def test_single_tactic_proof(self, workspace, lifespan_state):
         """A one-tactic proof returns proof_tactics with that tactic."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_single.v"
         vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
@@ -487,7 +488,7 @@ class TestCheckProofTactics:
     @pytest.mark.asyncio
     async def test_multi_step_proof(self, workspace, lifespan_state):
         """A multi-step proof returns all tactics in order."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_multi.v"
         vfile.write_text(
@@ -529,7 +530,7 @@ class TestCheckProofTactics:
     @pytest.mark.asyncio
     async def test_batch_proof(self, workspace, lifespan_state):
         """A batch body that finishes the proof returns all tactics."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_batch.v"
         vfile.write_text(
@@ -558,7 +559,7 @@ class TestCheckProofTactics:
     @pytest.mark.asyncio
     async def test_no_proof_tactics_when_not_finished(self, workspace, lifespan_state):
         """proof_tactics and proof_hint are absent when proof is not finished."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_notfinished.v"
         vfile.write_text(
@@ -588,7 +589,7 @@ class TestCheckProofTactics:
     @pytest.mark.asyncio
     async def test_branching_returns_committed_path(self, workspace, lifespan_state):
         """After branching, proof_tactics reflects only the committed path."""
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_branch.v"
         vfile.write_text(
@@ -652,7 +653,7 @@ class TestCheckProofTactics:
         proof_tactics_complete is only set to False when the chain is broken.
         A complete proof with a full chain from root omits the key entirely.
         """
-        from rocq_mcp.server import run_start, run_check
+        from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_pt_complete_flag.v"
         vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")

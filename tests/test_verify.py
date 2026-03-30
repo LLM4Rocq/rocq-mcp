@@ -955,31 +955,31 @@ class TestExtractSourceRange:
     """Test _extract_source_range bounds checking."""
 
     def test_single_line(self):
-        from rocq_mcp.server import _extract_source_range
+        from rocq_mcp.compile import _extract_source_range
 
         lines = ["hello world", "second line"]
         assert _extract_source_range(lines, 0, 0, 0, 5) == "hello"
 
     def test_multi_line(self):
-        from rocq_mcp.server import _extract_source_range
+        from rocq_mcp.compile import _extract_source_range
 
         lines = ["first", "second", "third"]
         assert _extract_source_range(lines, 0, 0, 2, 5) == "first\nsecond\nthird"
 
     def test_negative_start_raises(self):
-        from rocq_mcp.server import _extract_source_range
+        from rocq_mcp.compile import _extract_source_range
 
         with pytest.raises(IndexError):
             _extract_source_range(["hello"], -1, 0, 0, 5)
 
     def test_end_beyond_lines_raises(self):
-        from rocq_mcp.server import _extract_source_range
+        from rocq_mcp.compile import _extract_source_range
 
         with pytest.raises(IndexError):
             _extract_source_range(["hello"], 0, 0, 5, 0)
 
     def test_start_after_end_raises(self):
-        from rocq_mcp.server import _extract_source_range
+        from rocq_mcp.compile import _extract_source_range
 
         with pytest.raises(IndexError):
             _extract_source_range(["first", "second"], 1, 0, 0, 5)
@@ -1724,7 +1724,7 @@ class TestVerifyInputSanitization:
     def test_scanners_agree_on_comment_ranges(self):
         """Cross-validate _rocq_scan (via _rocq_comment_ranges) and _strip_rocq_comments."""
         from rocq_mcp.verify import _rocq_scan, _strip_rocq_comments
-        from rocq_mcp.server import _rocq_comment_ranges
+        from rocq_mcp.compile import _rocq_comment_ranges
 
         cases = [
             '(* " (* " *) End M.',
@@ -3080,7 +3080,7 @@ class TestSharedDefsIntegration:
         )
         source = build_shared_defs_verification_source(proof, "foo", structure)
         # Actually compile it with coqc
-        from rocq_mcp.server import _run_coqc
+        from rocq_mcp.compile import _run_coqc
 
         result = _run_coqc(source, "/tmp", 60)
         assert result["returncode"] == 0, f"coqc failed: {result['stderr']}"
@@ -3317,9 +3317,9 @@ class TestTimeoutFallbackToPhase3:
 
     async def test_phase1_timeout_triggers_phase3(self, workspace, monkeypatch):
         """When Phase 1 times out, Phase 3 should run and succeed."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3336,7 +3336,7 @@ class TestTimeoutFallbackToPhase3:
             # Phase 3 calls — delegate to real coqc
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "From Coq Require Import Arith.\n\n"
@@ -3369,9 +3369,9 @@ class TestTimeoutFallbackToPhase3:
         Uses monkeypatch to force Phase 1 timeout deterministically,
         then verifies Phase 3 catches the cheating proof via real coqc.
         """
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3387,7 +3387,7 @@ class TestTimeoutFallbackToPhase3:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Axiom cheat : False.\n"
@@ -3406,7 +3406,7 @@ class TestTimeoutFallbackToPhase3:
 
     async def test_phase1_timeout_phase3_also_times_out(self, workspace, monkeypatch):
         """When Phase 1 and Phase 3 both timeout, return Phase 1 timeout error."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
         def mock_run_coqc(source, ws, timeout):
             return {
@@ -3416,7 +3416,7 @@ class TestTimeoutFallbackToPhase3:
                 "timed_out": True,
             }
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         result = await rocq_verify(
             proof="Theorem t : True. Proof. exact I. Qed.",
@@ -3429,9 +3429,9 @@ class TestTimeoutFallbackToPhase3:
 
     async def test_phase1_timeout_phase3_type_mismatch(self, workspace, monkeypatch):
         """Phase 1 times out, Phase 3 catches type mismatch (wrong statement)."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3447,7 +3447,7 @@ class TestTimeoutFallbackToPhase3:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         # Proof proves 0 + n = n but problem expects n + 0 = n
         proof = (
@@ -3482,9 +3482,9 @@ class TestPhase3SecurityHardening:
         Previously, _TYPE_DEF_KEYWORDS only had Inductive/Record/etc. so
         'Definition eq' was not caught, allowing a trivial Phase 3 bypass.
         """
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3500,7 +3500,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Definition eq {A : Type} (x y : A) := True.\n"
@@ -3520,9 +3520,9 @@ class TestPhase3SecurityHardening:
 
     async def test_definition_nat_bypass_blocked(self, workspace, monkeypatch):
         """Definition nat := unit must be caught by _check_type_shadowing."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3537,7 +3537,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Definition nat := unit.\n"
@@ -3563,9 +3563,9 @@ class TestPhase3SecurityHardening:
         and passed Phase 3 axiom check.  With require_qualified=True, it's
         correctly rejected.
         """
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3581,7 +3581,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Axiom add : False.\n" "Theorem t : 1 = 2.\n" "Proof. destruct add. Qed.\n"
@@ -3623,9 +3623,9 @@ class TestPhase3SecurityHardening:
         self, workspace, monkeypatch
     ):
         """Phase 3 ValueError (e.g. Export ban) returns specific error, not None."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3641,7 +3641,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Module Inner. Definition x := 0. End Inner.\n"
@@ -3664,9 +3664,9 @@ class TestPhase3SecurityHardening:
         self, workspace, monkeypatch
     ):
         """Suspicious verdict should include verification_method field."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3682,7 +3682,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Axiom cheat : False.\n"
@@ -3701,9 +3701,9 @@ class TestPhase3SecurityHardening:
 
     async def test_module_spoofing_blocked_in_phase3(self, workspace, monkeypatch):
         """CRITICAL: Module ClassicalDedekindReals axiom spoofing must be caught."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3718,7 +3718,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Module ClassicalDedekindReals.\n"
@@ -3739,9 +3739,9 @@ class TestPhase3SecurityHardening:
 
     async def test_user_axiom_classic_caught_in_phase3(self, workspace, monkeypatch):
         """User Axiom classic : False must be caught via user_axiom_names."""
-        import rocq_mcp.server as srv
+        import rocq_mcp.compile as _cpl
 
-        real_run_coqc = srv._run_coqc
+        real_run_coqc = _cpl._run_coqc
         call_count = 0
 
         def mock_run_coqc(source, ws, timeout):
@@ -3756,7 +3756,7 @@ class TestPhase3SecurityHardening:
                 }
             return real_run_coqc(source, ws, timeout)
 
-        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
 
         proof = (
             "Axiom classic : False.\n"

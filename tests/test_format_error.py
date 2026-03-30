@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rocq_mcp.server import _format_error
+from rocq_mcp.compile import _format_error
 
 
 class TestFormatError:
@@ -188,7 +188,7 @@ class TestFormatError:
 
     def test_excess_unique_warnings_capped(self):
         """At most _MAX_FORMAT_WARNINGS unique warnings are included."""
-        from rocq_mcp.server import _MAX_FORMAT_WARNINGS
+        from rocq_mcp.compile import _MAX_FORMAT_WARNINGS
 
         proof = "\n".join(f"line {i}" for i in range(20))
         # Generate more unique warnings than the cap
@@ -208,7 +208,7 @@ class TestFormatError:
 
     def test_structured_output_bounded(self):
         """Structured diagnostics output must be bounded to _MAX_ERROR_LENGTH."""
-        from rocq_mcp.server import _MAX_ERROR_LENGTH
+        from rocq_mcp.compile import _MAX_ERROR_LENGTH
 
         proof = "\n".join(f"line {i}" for i in range(200))
         # Even with warnings within the count cap, a huge error body
@@ -220,7 +220,7 @@ class TestFormatError:
 
     def test_no_diagnostics_output_capped(self):
         """Unstructured stderr must be capped to avoid drowning LLM context."""
-        from rocq_mcp.server import _MAX_ERROR_LENGTH
+        from rocq_mcp.compile import _MAX_ERROR_LENGTH
 
         huge = "x" * (_MAX_ERROR_LENGTH * 3)
         result = _format_error(huge, "proof")

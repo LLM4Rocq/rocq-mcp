@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import PET_AVAILABLE
-from rocq_mcp.server import (
+from rocq_mcp.compile import (
     _rocq_comment_ranges,
     _find_sentence_end,
 )
@@ -190,7 +190,7 @@ async def _auto_solve(workspace, source, theorem, preamble_tactics=None, state=N
     Returns dict with 'solved', 'tactic' (on success), 'error' (on failure),
     and 'results' (full step_multi results).
     """
-    from rocq_mcp.server import run_start, run_check, run_step_multi
+    from rocq_mcp.interactive import run_start, run_check, run_step_multi
 
     if state is None:
         state = _make_state()

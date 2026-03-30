@@ -304,7 +304,7 @@ def run_compile(
     if forbidden:
         return {"success": False, "error": forbidden}
 
-    result = _server._run_coqc(source, workspace, timeout)
+    result = _run_coqc(source, workspace, timeout)
 
     if result["timed_out"]:
         return {
@@ -675,7 +675,7 @@ def _try_direct_verification(
 
     t_start = time.monotonic()
     run_a_timeout = max(5, timeout // 2)
-    result_a = _server._run_coqc(proof_source, workspace, run_a_timeout)
+    result_a = _run_coqc(proof_source, workspace, run_a_timeout)
 
     if result_a["timed_out"] or result_a["returncode"] != 0:
         # Proof doesn't compile — Phase 3 can't apply
@@ -707,7 +707,7 @@ def _try_direct_verification(
         return None
 
     run_b_timeout = max(5, timeout - int(time.monotonic() - t_start))
-    result_b = _server._run_coqc(problem_source, workspace, run_b_timeout)
+    result_b = _run_coqc(problem_source, workspace, run_b_timeout)
 
     if result_b["timed_out"] or result_b["returncode"] != 0:
         # Problem doesn't compile — can't verify
@@ -822,7 +822,7 @@ async def run_verify(
     except ValueError as e:
         return {"verified": False, "error": str(e)}
 
-    result = _server._run_coqc(verification_source, workspace, timeout)
+    result = _run_coqc(verification_source, workspace, timeout)
 
     if result["timed_out"]:
         # Phase 1 timed out (common for compute-heavy proofs where Module M
@@ -920,9 +920,7 @@ async def run_verify(
     except ValueError as e:
         return {"verified": False, "error": str(e)}
 
-    result2 = _server._run_coqc(
-        shared_source, workspace, _remaining_timeout(t0, timeout)
-    )
+    result2 = _run_coqc(shared_source, workspace, _remaining_timeout(t0, timeout))
 
     if result2["timed_out"]:
         # Phase 2 timed out — try Phase 3 (no Module M) before giving up

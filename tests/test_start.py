@@ -91,7 +91,7 @@ class TestStartByTheorem:
         self, workspace, lifespan_state, simple_vfile
     ):
         """Start by theorem returns success=True and an integer state_id."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file=simple_vfile,
@@ -107,7 +107,7 @@ class TestStartByTheorem:
     @pytest.mark.asyncio
     async def test_start_returns_goals(self, workspace, lifespan_state, true_vfile):
         """Start a theorem that has goals -- goals field should be non-empty."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file=true_vfile,
@@ -123,7 +123,7 @@ class TestStartByTheorem:
         self, workspace, lifespan_state, simple_vfile
     ):
         """Starting with a nonexistent theorem returns success=False."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file=simple_vfile,
@@ -136,7 +136,7 @@ class TestStartByTheorem:
     @pytest.mark.asyncio
     async def test_start_nonexistent_file(self, workspace, lifespan_state):
         """Starting with a nonexistent file returns success=False."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file=str(workspace / "does_not_exist.v"),
@@ -158,7 +158,7 @@ class TestStartByPosition:
     @pytest.mark.asyncio
     async def test_start_by_position(self, workspace, lifespan_state):
         """Start at a position inside a proof, verify success and state_id."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         vfile = workspace / "pos_start.v"
         vfile.write_text(
@@ -184,7 +184,7 @@ class TestStartByPosition:
     @pytest.mark.asyncio
     async def test_start_position_bounds(self, workspace, lifespan_state):
         """Out-of-range line/character returns an error."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         vfile = workspace / "bounds_start.v"
         vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
@@ -211,7 +211,7 @@ class TestStartByPreamble:
     @pytest.mark.asyncio
     async def test_start_preamble(self, workspace, lifespan_state):
         """Start with a preamble returns success=True, state_id, and empty goals."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file="",
@@ -230,7 +230,7 @@ class TestStartByPreamble:
     @pytest.mark.asyncio
     async def test_start_empty_preamble(self, workspace, lifespan_state):
         """Start with empty preamble and no file/theorem returns an error."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file="",
@@ -253,7 +253,7 @@ class TestStartEdgeCases:
     @pytest.mark.asyncio
     async def test_path_traversal(self, workspace, lifespan_state):
         """File path escaping workspace returns success=False with path error."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file="../../../etc/passwd",
@@ -269,7 +269,7 @@ class TestStartEdgeCases:
     @pytest.mark.asyncio
     async def test_forbidden_preamble(self, workspace, lifespan_state):
         """Preamble containing a forbidden command (e.g., Drop) is rejected."""
-        from rocq_mcp.server import run_start
+        from rocq_mcp.interactive import run_start
 
         result = await run_start(
             file="",

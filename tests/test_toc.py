@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rocq_mcp.server import _format_toc_elements, run_toc
+from rocq_mcp.interactive import _format_toc_elements, run_toc
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock TocElement-like objects

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rocq_mcp.server import (
+from rocq_mcp.interactive import (
     _is_timeout_eligible,
     _compute_hard_timeout,
     _PET_TIMEOUT_GRACE,

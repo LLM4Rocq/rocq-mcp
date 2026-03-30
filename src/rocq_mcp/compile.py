@@ -13,14 +13,20 @@ import re
 import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from rocq_mcp.verify import (
     _check_forbidden_commands,
+    _extract_user_axiom_names,
     _rocq_scan,
     build_verification_source,
     build_shared_defs_verification_source,
+    build_direct_verification_source,
+    build_direct_type_check_source,
+    parse_check_type,
+    normalize_type_for_comparison,
     classify_toc_detail,
     DefCategory,
     DefinitionInfo,
@@ -585,13 +591,21 @@ def _build_assumptions_result(
     Args:
         verdict: One of "closed", "standard_only", "suspicious".
         details: The details dict from parse_and_classify_assumptions.
-        method: Verification method label (e.g. "module_m" or "shared_defs").
+        method: Verification method label ("module_m", "shared_defs", or "direct").
     """
     note_suffix = ""
     if method == "shared_defs":
         note_suffix = (
             "Verified using shared-definitions template "
             "(definitions placed outside Module M for type compatibility). "
+        )
+    elif method == "direct":
+        note_suffix = (
+            "Verified via direct compilation (no Module M sandbox). "
+            "Notation/scope redefinition before identically-texted definitions, "
+            "redefinition of non-core types with identical names, "
+            "and shadowing of stdlib functions called by problem definitions, "
+            "are not fully covered. "
         )
 
     if verdict == "closed":
@@ -614,6 +628,7 @@ def _build_assumptions_result(
     else:  # "suspicious"
         return {
             "verified": False,
+            "verification_method": method,
             "error": (
                 "Proof depends on unproved assumptions: "
                 f"{', '.join(details['suspicious_names'])}"
@@ -627,8 +642,129 @@ def _build_assumptions_result(
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: Direct verification (no Module M)
+# ---------------------------------------------------------------------------
+
+
+def _try_direct_verification(
+    proof: str,
+    problem_name: str,
+    problem_statement: str,
+    workspace: str,
+    timeout: int,
+) -> dict[str, Any] | None:
+    """Attempt Phase 3 direct verification (no Module M sandbox).
+
+    Compiles the proof as-is, then verifies via Print Assumptions and
+    Check type comparison against the problem statement.
+
+    Returns:
+        - A result dict (verified=True/False) if Phase 3 can determine a verdict.
+        - None if Phase 3 cannot apply (compilation failure, parse error, etc.),
+          signaling the caller to fall back to the Phase 1 error.
+    """
+    # --- Build and compile proof source (Run A) ---
+    try:
+        proof_source = build_direct_verification_source(
+            proof, problem_name, problem_statement=problem_statement
+        )
+    except ValueError as e:
+        # Phase 3-specific rejection (Export/Include ban, type shadowing).
+        # Return a proper error so the user sees the specific reason.
+        return {"verified": False, "error": str(e), "verification_method": "direct"}
+
+    t_start = time.monotonic()
+    run_a_timeout = max(5, timeout // 2)
+    result_a = _server._run_coqc(proof_source, workspace, run_a_timeout)
+
+    if result_a["timed_out"] or result_a["returncode"] != 0:
+        # Proof doesn't compile — Phase 3 can't apply
+        return None
+
+    # --- Parse Check type from proof (Run A stdout) ---
+    proof_type = parse_check_type(result_a["stdout"], problem_name)
+    if proof_type is None:
+        return None
+
+    # --- Parse Print Assumptions from proof (Run A stdout) ---
+    # Phase 3 has no Module M, so user axioms appear unqualified.
+    # Defense-in-depth: user_axiom_names catches explicit Axiom/Parameter
+    # declarations, require_qualified catches ambiguous short names (add,
+    # sub, etc.) from Admitted lemmas.
+    user_axioms = _extract_user_axiom_names(proof)
+    verdict, details = parse_and_classify_assumptions(
+        result_a["stdout"],
+        require_qualified=True,
+        user_axiom_names=user_axioms,
+    )
+    if verdict == "suspicious":
+        return _build_assumptions_result(verdict, details, "direct")
+
+    # --- Build and compile problem source (Run B) ---
+    try:
+        problem_source = build_direct_type_check_source(problem_statement, problem_name)
+    except ValueError:
+        return None
+
+    run_b_timeout = max(5, timeout - int(time.monotonic() - t_start))
+    result_b = _server._run_coqc(problem_source, workspace, run_b_timeout)
+
+    if result_b["timed_out"] or result_b["returncode"] != 0:
+        # Problem doesn't compile — can't verify
+        return None
+
+    # --- Parse Check type from problem (Run B stdout) ---
+    problem_type = parse_check_type(result_b["stdout"], problem_name)
+    if problem_type is None:
+        return None
+
+    # --- Compare normalized types ---
+    norm_proof = normalize_type_for_comparison(proof_type)
+    norm_problem = normalize_type_for_comparison(problem_type)
+
+    if norm_proof != norm_problem:
+        return {
+            "verified": False,
+            "error": (
+                "Type mismatch: proof type differs from problem type. "
+                f"Proof: {proof_type}  Expected: {problem_type}"
+            ),
+            "verification_method": "direct",
+        }
+
+    # Types match — return success with assumptions info
+    return _build_assumptions_result(verdict, details, "direct")
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_verify (core implementation)
 # ---------------------------------------------------------------------------
+
+
+def _remaining_timeout(t0: float, timeout: int, minimum: int = 10) -> int:
+    """Compute remaining timeout budget from wall-clock start time.
+
+    Returns at least *minimum* seconds so Phase 3 always gets a fair chance.
+    """
+    elapsed = time.monotonic() - t0
+    return max(minimum, timeout - int(elapsed))
+
+
+def _phase3_or_fallback(
+    proof: str,
+    problem_name: str,
+    problem_statement: str,
+    workspace: str,
+    timeout: int,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Try Phase 3 direct verification; return *fallback* if Phase 3 cannot apply."""
+    phase3_result = _try_direct_verification(
+        proof, problem_name, problem_statement, workspace, timeout
+    )
+    if phase3_result is not None:
+        return phase3_result
+    return fallback
 
 
 async def run_verify(
@@ -643,6 +779,15 @@ async def run_verify(
     """Core implementation of rocq_verify (testable without FastMCP Context).
 
     Receives already-validated workspace and timeout.
+
+    Verification phases:
+      Phase 1 — Module M sandbox (strongest security).
+      Phase 2 — Shared-defs Module M (for problems with custom types).
+      Phase 3 — Direct compilation + Print Assumptions + Check type comparison
+                (weaker, but handles compute-heavy proofs and Section/Variable).
+
+    A wall-clock budget is tracked so the total time across all phases
+    stays within approximately ``2 * timeout`` in the worst case.
     """
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", problem_name):
         return {
@@ -665,6 +810,8 @@ async def run_verify(
             "error": f"Problem statement exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
+    t0 = time.monotonic()
+
     # --- Phase 1: Standard Module M. template ---
     try:
         verification_source = build_verification_source(
@@ -678,10 +825,21 @@ async def run_verify(
     result = _server._run_coqc(verification_source, workspace, timeout)
 
     if result["timed_out"]:
-        return {
-            "verified": False,
-            "error": f"Verification timed out after {timeout}s.",
-        }
+        # Phase 1 timed out (common for compute-heavy proofs where Module M
+        # requires compiling the problem statement twice).  Skip Phase 2
+        # (also uses Module M) and try Phase 3 (direct, no Module M) which
+        # avoids the double compilation.
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            fallback={
+                "verified": False,
+                "error": f"Verification timed out after {timeout}s.",
+            },
+        )
 
     if result["returncode"] == 0:
         # Phase 1 succeeded — parse Print Assumptions
@@ -716,21 +874,44 @@ async def run_verify(
     # it either succeeds (correct) or fails (we return the Phase 1 error).
 
     # --- Phase 2: Shared-defs template via pytanque toc ---
+    p3_timeout = _remaining_timeout(t0, timeout)
+
     if lifespan_state is None:
-        # No lifespan context (e.g., testing) — cannot use pytanque
-        return phase1_failure
+        # No lifespan context (e.g., testing) — cannot use pytanque.
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            p3_timeout,
+            phase1_failure,
+        )
 
     structure = await _extract_problem_structure(
         problem_statement, problem_name, workspace, lifespan_state
     )
 
     if structure is None:
-        # Could not extract structure — return Phase 1 error
-        return phase1_failure
+        # Could not extract structure — try Phase 3 before giving up
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
 
     if not structure.has_shared_defs and not structure.preamble_source.strip():
-        # No shared defs and no preamble to extract — Phase 2 won't help
-        return phase1_failure
+        # No shared defs and no preamble to extract — Phase 2 won't help.
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
 
     try:
         shared_source = build_shared_defs_verification_source(
@@ -739,17 +920,34 @@ async def run_verify(
     except ValueError as e:
         return {"verified": False, "error": str(e)}
 
-    result2 = _server._run_coqc(shared_source, workspace, timeout)
+    result2 = _server._run_coqc(
+        shared_source, workspace, _remaining_timeout(t0, timeout)
+    )
 
     if result2["timed_out"]:
-        return {
-            "verified": False,
-            "error": f"Verification (shared-defs) timed out after {timeout}s.",
-        }
+        # Phase 2 timed out — try Phase 3 (no Module M) before giving up
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            fallback={
+                "verified": False,
+                "error": f"Verification (shared-defs) timed out after {timeout}s.",
+            },
+        )
 
     if result2["returncode"] != 0:
-        # Phase 2 also failed — return the Phase 1 error (more informative)
-        return phase1_failure
+        # Phase 2 also failed — try Phase 3 before giving up
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
 
     # Phase 2 succeeded — parse Print Assumptions
     verdict2, details2 = parse_and_classify_assumptions(result2["stdout"])

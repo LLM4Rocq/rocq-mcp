@@ -3,6 +3,7 @@
 Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestCleanProblemStatement
     - TestAxiomClassification
+    - TestParseAssumptionsUserAxiomNames
     - TestParseAssumptions
     - TestBuildVerificationSource
     - TestClassifyTocDetail
@@ -11,6 +12,13 @@ Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestBuildSharedDefsVerificationSource
     - TestVerifyInputSanitization
     - TestCheckForbiddenCommands
+    - TestCheckTypeShadowing
+    - TestCheckModuleNameShadowing
+    - TestExtractUserAxiomNames
+    - TestBuildDirectVerificationSource
+    - TestBuildDirectTypeCheckSource
+    - TestParseCheckType
+    - TestNormalizeTypeForComparison
 
 Part B: Integration tests for rocq_verify (require coqc)
     - TestVerifySuccess
@@ -18,6 +26,8 @@ Part B: Integration tests for rocq_verify (require coqc)
     - TestVerifyInputValidation
     - TestVerifyCleanup
     - TestSharedDefsIntegration
+    - TestDirectVerification
+    - TestTimeoutFallbackToPhase3
 """
 
 from __future__ import annotations
@@ -29,17 +39,28 @@ import pytest
 from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.verify import (
     _check_forbidden_commands,
+    _check_module_name_shadowing,
+    _check_type_shadowing,
     _clean_problem_statement,
+    _extract_definition_names,
+    _extract_definition_sentence,
+    _extract_user_axiom_names,
     _is_standard_axiom,
     _axiom_short_name,
+    _AMBIGUOUS_AXIOM_NAMES,
     _parse_assumptions_raw,
+    _PROTECTED_MODULE_NAMES,
     _SHARED_DEF_DETAILS,
     _strip_shared_defs,
+    build_direct_type_check_source,
+    build_direct_verification_source,
     build_shared_defs_verification_source,
     classify_toc_detail,
     DefCategory,
     DefinitionInfo,
+    normalize_type_for_comparison,
     parse_and_classify_assumptions,
+    parse_check_type,
     ProblemStructure,
     build_verification_source,
     verification_hint,
@@ -270,6 +291,31 @@ class TestAxiomClassification:
     def test_axiom_short_name_unqualified(self):
         assert _axiom_short_name("classic") == "classic"
 
+    # --- require_qualified mode (Phase 3) ---
+
+    def test_unqualified_add_rejected_when_require_qualified(self):
+        """In Phase 3, unqualified 'add' must be rejected (could be user axiom)."""
+        assert _is_standard_axiom("add", require_qualified=True) is False
+
+    def test_unqualified_classic_accepted_when_require_qualified(self):
+        """In Phase 3, unqualified 'classic' is accepted (unique stdlib name)."""
+        assert _is_standard_axiom("classic", require_qualified=True) is True
+
+    def test_qualified_stdlib_accepted_when_require_qualified(self):
+        """In Phase 3, fully qualified stdlib axioms are still accepted."""
+        assert (
+            _is_standard_axiom(
+                "Coq.Logic.Classical_Prop.classic", require_qualified=True
+            )
+            is True
+        )
+
+    def test_module_qualified_accepted_when_require_qualified(self):
+        """In Phase 3, module-qualified stdlib axioms are still accepted."""
+        assert (
+            _is_standard_axiom("Classical_Prop.classic", require_qualified=True) is True
+        )
+
     def test_axiom_short_name_single_dot(self):
         assert _axiom_short_name("M.classic") == "classic"
 
@@ -287,6 +333,220 @@ class TestAxiomClassification:
     def test_user_extensionality_ensembles_rejected(self):
         """User-qualified Ensembles axiom should be rejected."""
         assert _is_standard_axiom("M.Extensionality_Ensembles") is False
+
+    # --- Primitive integers (PrimInt63 / Uint63Axioms): should be ACCEPTED ---
+
+    def test_int_unqualified(self):
+        assert _is_standard_axiom("int") is True
+
+    def test_int_primint63_qualified(self):
+        assert _is_standard_axiom("PrimInt63.int") is True
+
+    def test_int_corelib_qualified(self):
+        assert _is_standard_axiom("Corelib.Numbers.Cyclic.Int63.PrimInt63.int") is True
+
+    def test_add_unqualified(self):
+        assert _is_standard_axiom("add") is True
+
+    def test_sub_unqualified(self):
+        assert _is_standard_axiom("sub") is True
+
+    def test_eqb_unqualified(self):
+        assert _is_standard_axiom("eqb") is True
+
+    def test_eqb_correct_unqualified(self):
+        assert _is_standard_axiom("eqb_correct") is True
+
+    def test_eqb_refl_unqualified(self):
+        assert _is_standard_axiom("eqb_refl") is True
+
+    def test_of_to_Z_unqualified(self):
+        assert _is_standard_axiom("of_to_Z") is True
+
+    def test_add_spec_unqualified(self):
+        assert _is_standard_axiom("add_spec") is True
+
+    def test_uint63_axioms_module_qualified(self):
+        assert _is_standard_axiom("Uint63Axioms.add_spec") is True
+
+    def test_land_unqualified(self):
+        assert _is_standard_axiom("land") is True
+
+    def test_lsr_unqualified(self):
+        assert _is_standard_axiom("lsr") is True
+
+    def test_user_int_rejected(self):
+        """User-qualified 'int' must be rejected."""
+        assert _is_standard_axiom("M.int") is False
+
+    def test_user_add_rejected(self):
+        """User-qualified 'add' must be rejected."""
+        assert _is_standard_axiom("M.add") is False
+
+    # --- Primitive floats (PrimFloat): should be ACCEPTED ---
+
+    def test_float_unqualified(self):
+        assert _is_standard_axiom("float") is True
+
+    def test_float_primfloat_qualified(self):
+        assert _is_standard_axiom("PrimFloat.sqrt") is True
+
+    def test_float_corelib_qualified(self):
+        assert _is_standard_axiom("Corelib.Floats.PrimFloat.float") is True
+
+    def test_classify_unqualified(self):
+        assert _is_standard_axiom("classify") is True
+
+    def test_normfr_mantissa_unqualified(self):
+        assert _is_standard_axiom("normfr_mantissa") is True
+
+    def test_next_up_unqualified(self):
+        assert _is_standard_axiom("next_up") is True
+
+    def test_user_float_rejected(self):
+        assert _is_standard_axiom("M.float") is False
+
+    # --- Primitive arrays (PrimArray): should be ACCEPTED ---
+
+    def test_array_unqualified(self):
+        assert _is_standard_axiom("array") is True
+
+    def test_get_primarray_qualified(self):
+        assert _is_standard_axiom("PrimArray.get") is True
+
+    def test_make_primarray_qualified(self):
+        assert _is_standard_axiom("PrimArray.make") is True
+
+    def test_copy_unqualified(self):
+        assert _is_standard_axiom("copy") is True
+
+    def test_user_array_rejected(self):
+        assert _is_standard_axiom("M.array") is False
+
+    # --- Primitive strings (PrimString): should be ACCEPTED ---
+
+    def test_string_unqualified(self):
+        assert _is_standard_axiom("string") is True
+
+    def test_cat_unqualified(self):
+        assert _is_standard_axiom("cat") is True
+
+    def test_primstring_qualified(self):
+        assert _is_standard_axiom("PrimString.cat") is True
+
+    def test_user_string_rejected(self):
+        assert _is_standard_axiom("M.string") is False
+
+    # --- Refined require_qualified: ambiguous vs unique ---
+
+    def test_ambiguous_add_rejected_require_qualified(self):
+        """'add' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("add", require_qualified=True) is False
+
+    def test_ambiguous_compare_rejected_require_qualified(self):
+        """'compare' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("compare", require_qualified=True) is False
+
+    def test_ambiguous_length_rejected_require_qualified(self):
+        """'length' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("length", require_qualified=True) is False
+
+    def test_ambiguous_epsilon_rejected_require_qualified(self):
+        """'epsilon' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("epsilon", require_qualified=True) is False
+
+    def test_unique_funcext_accepted_require_qualified(self):
+        """'functional_extensionality_dep' is unique — accepted in Phase 3."""
+        assert (
+            _is_standard_axiom("functional_extensionality_dep", require_qualified=True)
+            is True
+        )
+
+    def test_unique_proof_irrelevance_accepted_require_qualified(self):
+        """'proof_irrelevance' is unique — accepted in Phase 3."""
+        assert _is_standard_axiom("proof_irrelevance", require_qualified=True) is True
+
+    def test_ambiguous_completeness_rejected_require_qualified(self):
+        """'completeness' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("completeness", require_qualified=True) is False
+
+    def test_unique_Rplus_comm_accepted_require_qualified(self):
+        """'Rplus_comm' is unique — accepted in Phase 3."""
+        assert _is_standard_axiom("Rplus_comm", require_qualified=True) is True
+
+    def test_ambiguous_R_rejected_require_qualified(self):
+        """'R' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("R", require_qualified=True) is False
+
+    def test_ambiguous_R0_rejected_require_qualified(self):
+        """'R0' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("R0", require_qualified=True) is False
+
+    def test_ambiguous_R1_rejected_require_qualified(self):
+        """'R1' is ambiguous — must be rejected in Phase 3."""
+        assert _is_standard_axiom("R1", require_qualified=True) is False
+
+    def test_qualified_R_accepted_require_qualified(self):
+        """Qualified 'Raxioms.R' should still be accepted."""
+        assert _is_standard_axiom("Raxioms.R", require_qualified=True) is True
+
+    def test_ambiguous_names_coverage(self):
+        """All _AMBIGUOUS_AXIOM_NAMES must be rejected when require_qualified."""
+        for name in _AMBIGUOUS_AXIOM_NAMES:
+            assert (
+                _is_standard_axiom(name, require_qualified=True) is False
+            ), f"Ambiguous name '{name}' should be rejected with require_qualified"
+
+
+# ---------------------------------------------------------------------------
+# parse_and_classify_assumptions with user_axiom_names
+# ---------------------------------------------------------------------------
+
+
+class TestParseAssumptionsUserAxiomNames:
+    """Test user_axiom_names parameter in parse_and_classify_assumptions."""
+
+    def test_user_axiom_overrides_whitelist(self):
+        """User-declared 'classic' must be suspicious even though it's in whitelist."""
+        stdout = "Axioms:\nclassic : False\n"
+        verdict, details = parse_and_classify_assumptions(
+            stdout, user_axiom_names={"classic"}
+        )
+        assert verdict == "suspicious"
+        assert "classic" in details["suspicious_names"]
+
+    def test_user_axiom_add_caught(self):
+        """User-declared 'add' must be suspicious."""
+        stdout = "Axioms:\nadd : False\n"
+        verdict, details = parse_and_classify_assumptions(
+            stdout, user_axiom_names={"add"}
+        )
+        assert verdict == "suspicious"
+
+    def test_stdlib_axiom_not_in_user_set_accepted(self):
+        """Stdlib axiom not in user set should be accepted."""
+        stdout = "Axioms:\nclassic : forall P : Prop, P \\/ ~ P\n"
+        verdict, _details = parse_and_classify_assumptions(
+            stdout, user_axiom_names=set()
+        )
+        assert verdict == "standard_only"
+
+    def test_mixed_user_and_stdlib(self):
+        """Mix of user axiom and stdlib axiom."""
+        stdout = "Axioms:\nclassic : forall P : Prop, P \\/ ~ P\nmy_cheat : False\n"
+        verdict, details = parse_and_classify_assumptions(
+            stdout, user_axiom_names={"my_cheat"}
+        )
+        assert verdict == "suspicious"
+        assert "my_cheat" in details["suspicious_names"]
+
+    def test_qualified_user_axiom_caught_by_short_name(self):
+        """Module-qualified user axiom caught by short name match."""
+        stdout = "Axioms:\nMyMod.add : False\n"
+        verdict, details = parse_and_classify_assumptions(
+            stdout, user_axiom_names={"add"}
+        )
+        assert verdict == "suspicious"
 
 
 # ---------------------------------------------------------------------------
@@ -1716,6 +1976,753 @@ class TestForbiddenWhitespaceBypasses:
         assert result is None
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: _check_type_shadowing
+# ---------------------------------------------------------------------------
+
+
+class TestCheckTypeShadowing:
+    """Test the core type redefinition scanner."""
+
+    def test_inductive_nat_detected(self):
+        assert _check_type_shadowing("Inductive nat := O | S (n : nat).") is not None
+
+    def test_inductive_bool_detected(self):
+        assert _check_type_shadowing("Inductive bool := true | false.") is not None
+
+    def test_coinductive_list_detected(self):
+        assert _check_type_shadowing("CoInductive list := nil | cons.") is not None
+
+    def test_record_eq_detected(self):
+        assert _check_type_shadowing("Record eq := {}.") is not None
+
+    def test_variant_Z_detected(self):
+        assert _check_type_shadowing("Variant Z := Zpos | Zneg | Z0.") is not None
+
+    def test_noncore_type_allowed(self):
+        assert _check_type_shadowing("Inductive color := Red | Green.") is None
+
+    def test_definition_of_core_name_detected(self):
+        """Definition of core name is now caught (prevents Phase 3 bypass)."""
+        assert _check_type_shadowing("Definition nat := bool.") is not None
+
+    def test_fixpoint_of_core_name_detected(self):
+        """Fixpoint of core name is caught."""
+        assert (
+            _check_type_shadowing("Fixpoint nat (x : unit) : Type := bool.") is not None
+        )
+
+    def test_let_of_core_name_detected(self):
+        """Let of core name is caught."""
+        assert _check_type_shadowing("Let eq := True.") is not None
+
+    def test_primitive_of_core_name_detected(self):
+        """Primitive of core name is caught."""
+        assert _check_type_shadowing("Primitive nat := #int63_type.") is not None
+
+    def test_definition_of_noncore_name_allowed(self):
+        """Definition of non-core names should still be allowed."""
+        assert _check_type_shadowing("Definition my_helper := 42.") is None
+
+    def test_inside_comment_ignored(self):
+        assert _check_type_shadowing("(* Inductive nat := O. *)") is None
+
+    def test_inside_string_ignored(self):
+        assert _check_type_shadowing('"Inductive nat := O."') is None
+
+    def test_clean_proof_returns_none(self):
+        proof = "Require Import Arith.\n" "Theorem t : True. Proof. exact I. Qed.\n"
+        assert _check_type_shadowing(proof) is None
+
+    def test_multiple_core_types(self):
+        """If multiple core types are redefined, at least one is caught."""
+        proof = "Inductive nat := O.\nInductive bool := B.\n"
+        result = _check_type_shadowing(proof)
+        assert result is not None
+
+    def test_structure_prod_detected(self):
+        """Structure is a synonym for Record — must catch core type redefinition."""
+        assert (
+            _check_type_shadowing("Structure prod (A B : Type) := pair { fst : A }.")
+            is not None
+        )
+
+    def test_class_eq_detected(self):
+        """Class creates a Record-based type — must catch core type redefinition."""
+        assert _check_type_shadowing("Class eq := { }.") is not None
+
+    def test_new_core_types_detected(self):
+        """Newly added core types (comparison, sumbool, Q, string) are caught."""
+        assert _check_type_shadowing("Inductive comparison := Eq.") is not None
+        assert _check_type_shadowing("Inductive sumbool := left | right.") is not None
+        assert _check_type_shadowing("Record Q := { Qnum : Z }.") is not None
+        assert _check_type_shadowing("Inductive string := EmptyString.") is not None
+
+    def test_function_of_core_name_detected(self):
+        """Function keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Function nat (x : unit) := x.") is not None
+
+    def test_axiom_of_core_name_detected(self):
+        """Axiom keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Axiom nat : Type.") is not None
+
+    def test_parameter_of_core_name_detected(self):
+        """Parameter keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Parameter bool : Type.") is not None
+
+    def test_conjecture_of_core_name_detected(self):
+        """Conjecture keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Conjecture eq : False.") is not None
+
+    def test_hypothesis_of_core_name_detected(self):
+        """Hypothesis keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Hypothesis eq : False.") is not None
+
+    def test_variable_of_core_name_detected(self):
+        """Variable keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Variable nat : Type.") is not None
+
+    def test_le_lt_ge_gt_in_core_names(self):
+        """le/lt/ge/gt are core names — redefinition must be caught."""
+        assert _check_type_shadowing("Definition le (x y : nat) := True.") is not None
+        assert (
+            _check_type_shadowing("Definition lt := fun x y : nat => True.") is not None
+        )
+        assert (
+            _check_type_shadowing("Definition ge := fun x y : nat => True.") is not None
+        )
+        assert (
+            _check_type_shadowing("Definition gt := fun x y : nat => True.") is not None
+        )
+
+    def test_theorem_of_core_name_detected(self):
+        """Theorem keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Theorem nat : True.") is not None
+
+    def test_lemma_of_core_name_detected(self):
+        """Lemma keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Lemma eq : True.") is not None
+
+    def test_proposition_of_core_name_detected(self):
+        """Proposition keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Proposition bool : True.") is not None
+
+    def test_corollary_of_core_name_detected(self):
+        """Corollary keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Corollary False : True.") is not None
+
+    def test_example_of_core_name_detected(self):
+        """Example keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Example nat : True.") is not None
+
+    def test_fact_of_core_name_detected(self):
+        """Fact keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Fact eq : True.") is not None
+
+    def test_remark_of_core_name_detected(self):
+        """Remark keyword must catch core name redefinition."""
+        assert _check_type_shadowing("Remark bool : True.") is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: _check_module_name_shadowing
+# ---------------------------------------------------------------------------
+
+
+class TestCheckModuleNameShadowing:
+    """Test module name shadowing detection for Phase 3."""
+
+    def test_catches_classicaldedekindreals(self):
+        """Module ClassicalDedekindReals must be caught (spoofs axiom prefix)."""
+        proof = "Module ClassicalDedekindReals.\nAxiom sig_forall_dec : False.\nEnd ClassicalDedekindReals."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+        assert "ClassicalDedekindReals" in result
+
+    def test_catches_primint63(self):
+        """Module PrimInt63 must be caught."""
+        proof = "Module PrimInt63.\nAxiom add : False.\nEnd PrimInt63."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+        assert "PrimInt63" in result
+
+    def test_catches_raxioms(self):
+        """Module Raxioms must be caught."""
+        proof = "Module Raxioms.\nEnd Raxioms."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+
+    def test_allows_custom_module(self):
+        """Module MyHelper should not be caught (not a protected name)."""
+        proof = "Module MyHelper.\nDefinition x := 0.\nEnd MyHelper."
+        assert _check_module_name_shadowing(proof) is None
+
+    def test_module_in_comment_ignored(self):
+        """Module declaration inside a comment should be ignored."""
+        proof = "(* Module ClassicalDedekindReals. End ClassicalDedekindReals. *)"
+        assert _check_module_name_shadowing(proof) is None
+
+    def test_module_type_caught(self):
+        """Module Type with protected name IS caught (defense-in-depth).
+
+        Although Module Type alone doesn't create axioms, it could be used
+        with Declare Module to create axioms with stdlib-matching prefixes.
+        """
+        proof = "Module Type ClassicalDedekindReals.\nEnd ClassicalDedekindReals."
+        assert _check_module_name_shadowing(proof) is not None
+
+    def test_catches_module_coq(self):
+        """Module Coq must be caught (spoofs Coq.Logic.* axiom prefix)."""
+        proof = "Module Coq.\nEnd Coq."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+        assert "Coq" in result
+
+    def test_catches_module_rocq(self):
+        """Module Rocq must be caught."""
+        proof = "Module Rocq.\nEnd Rocq."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+
+    def test_catches_module_stdlib(self):
+        """Module Stdlib must be caught."""
+        proof = "Module Stdlib.\nEnd Stdlib."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+
+    def test_catches_module_corelib(self):
+        """Module Corelib must be caught."""
+        proof = "Module Corelib.\nEnd Corelib."
+        result = _check_module_name_shadowing(proof)
+        assert result is not None
+
+    def test_protected_names_cover_stdlib_prefixes(self):
+        """All stdlib module prefixes should have their first component protected."""
+        from rocq_mcp.verify import _STDLIB_MODULE_PREFIXES
+
+        for prefix in _STDLIB_MODULE_PREFIXES:
+            first_component = prefix.split(".")[0]
+            assert first_component in _PROTECTED_MODULE_NAMES
+
+    def test_protected_names_cover_stdlib_top_level(self):
+        """Top-level stdlib namespace prefixes (Coq, Rocq, etc.) must be protected."""
+        from rocq_mcp.verify import _STDLIB_PREFIXES
+
+        for prefix in _STDLIB_PREFIXES:
+            name = prefix.rstrip(".")
+            assert (
+                name in _PROTECTED_MODULE_NAMES
+            ), f"'{name}' from _STDLIB_PREFIXES should be in _PROTECTED_MODULE_NAMES"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: _extract_user_axiom_names
+# ---------------------------------------------------------------------------
+
+
+class TestExtractUserAxiomNames:
+    """Test extraction of user-declared axiom names."""
+
+    def test_axiom(self):
+        assert _extract_user_axiom_names("Axiom foo : nat.") == {"foo"}
+
+    def test_parameter(self):
+        assert _extract_user_axiom_names("Parameter bar : Type.") == {"bar"}
+
+    def test_conjecture(self):
+        assert _extract_user_axiom_names("Conjecture baz : False.") == {"baz"}
+
+    def test_hypothesis(self):
+        assert _extract_user_axiom_names("Hypothesis h : True.") == {"h"}
+
+    def test_variable(self):
+        assert _extract_user_axiom_names("Variable x : nat.") == {"x"}
+
+    def test_multiple(self):
+        proof = "Axiom a : nat.\nParameter b : Type.\nConjecture c : False."
+        names = _extract_user_axiom_names(proof)
+        assert names == {"a", "b", "c"}
+
+    def test_inside_comment_ignored(self):
+        assert _extract_user_axiom_names("(* Axiom foo : False. *)") == set()
+
+    def test_inside_string_ignored(self):
+        assert _extract_user_axiom_names('"Axiom foo : False."') == set()
+
+    def test_no_axioms_no_theorems_no_defs(self):
+        proof = "Require Import Arith."
+        assert _extract_user_axiom_names(proof) == set()
+
+    def test_axiom_inside_module(self):
+        """Axiom inside a Module should still be extracted."""
+        proof = "Module M.\nAxiom classic : False.\nEnd M."
+        assert _extract_user_axiom_names(proof) == {"classic"}
+
+    def test_multi_name_axiom(self):
+        """Axiom a b c : T. should extract all three names."""
+        assert _extract_user_axiom_names("Axiom a b c : nat.") == {"a", "b", "c"}
+
+    def test_multi_name_parameter(self):
+        """Parameter x y : T. should extract both names."""
+        assert _extract_user_axiom_names("Parameter x y : Type.") == {"x", "y"}
+
+    def test_multi_name_variable(self):
+        """Variable a b : T. should extract both names."""
+        assert _extract_user_axiom_names("Variable a b : nat.") == {"a", "b"}
+
+    def test_theorem_name_extracted(self):
+        """Theorem name should be extracted (defense-in-depth for Admitted)."""
+        proof = "Theorem classic : False. Admitted."
+        assert "classic" in _extract_user_axiom_names(proof)
+
+    def test_lemma_name_extracted(self):
+        """Lemma name should be extracted."""
+        proof = "Lemma helper : forall n, n = n. Admitted."
+        assert "helper" in _extract_user_axiom_names(proof)
+
+    def test_proposition_name_extracted(self):
+        """Proposition name should be extracted."""
+        proof = "Proposition foo : True. Proof. exact I. Qed."
+        assert "foo" in _extract_user_axiom_names(proof)
+
+    def test_corollary_name_extracted(self):
+        """Corollary name should be extracted."""
+        proof = "Corollary bar : True. Proof. exact I. Qed."
+        assert "bar" in _extract_user_axiom_names(proof)
+
+    def test_mixed_axiom_and_lemma(self):
+        """Both axiom-like and theorem-like declarations should be extracted."""
+        proof = (
+            "Axiom cheat : False.\n"
+            "Lemma helper : True. Admitted.\n"
+            "Theorem main : True. Proof. exact I. Qed."
+        )
+        names = _extract_user_axiom_names(proof)
+        assert "cheat" in names
+        assert "helper" in names
+        assert "main" in names
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: build_direct_verification_source
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDirectVerificationSource:
+    """Test the Phase 3 direct verification template builder."""
+
+    def test_contains_check_and_print_assumptions(self):
+        source = build_direct_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+        assert "Print Assumptions t." in source
+
+    def test_contains_set_printing_all(self):
+        source = build_direct_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Set Printing All." in source
+
+    def test_proof_preserved(self):
+        proof = "Require Import Arith.\nTheorem t : True. Proof. exact I. Qed."
+        source = build_direct_verification_source(proof=proof, problem_name="t")
+        assert proof in source
+
+    def test_rejects_forbidden_command(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_direct_verification_source(
+                proof="Drop.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_core_type_redefinition(self):
+        with pytest.raises(ValueError, match="core name"):
+            build_direct_verification_source(
+                proof="Inductive nat := O | S (n : nat).\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_export(self):
+        with pytest.raises(ValueError, match="Export"):
+            build_direct_verification_source(
+                proof="Module Inner. End Inner. Export Inner.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_export_in_comment_allowed(self):
+        """Export inside a comment should not trigger rejection."""
+        source = build_direct_verification_source(
+            proof="(* Export M. *)\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_rejects_include(self):
+        """Include can shadow names — must be rejected in Phase 3."""
+        with pytest.raises(ValueError, match="Include"):
+            build_direct_verification_source(
+                proof="Module Inner. Definition x := 0. End Inner.\nInclude Inner.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_bare_import(self):
+        """Bare Import (without Require) can shadow names — must be rejected."""
+        with pytest.raises(ValueError, match="Import"):
+            build_direct_verification_source(
+                proof="Module Inner. Definition x := 0. End Inner.\nImport Inner.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_require_import_allowed(self):
+        """Require Import is safe and must NOT be rejected."""
+        source = build_direct_verification_source(
+            proof="Require Import Arith.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_from_require_import_allowed(self):
+        """From ... Require Import is safe and must NOT be rejected."""
+        source = build_direct_verification_source(
+            proof="From Coq Require Import Arith.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_require_export_allowed(self):
+        """Require Export is safe (equivalent to Require Import for this file)."""
+        source = build_direct_verification_source(
+            proof="Require Export Arith.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_from_require_export_allowed(self):
+        """From ... Require Export is safe and must NOT be rejected."""
+        source = build_direct_verification_source(
+            proof="From Coq Require Export Arith.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_rejects_bare_export(self):
+        """Bare Export (without Require) must be rejected."""
+        with pytest.raises(ValueError, match="Export"):
+            build_direct_verification_source(
+                proof="Module Inner. End Inner. Export Inner.\nTheorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_definition_of_core_name(self):
+        """Definition of core name (e.g. 'Definition eq') must be rejected."""
+        with pytest.raises(ValueError, match="core"):
+            build_direct_verification_source(
+                proof="Definition eq {A : Type} (x y : A) := True.\n"
+                "Theorem t : eq 0 0. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_long_from_require_import_allowed(self):
+        """Require Import with long From path must NOT be falsely rejected."""
+        source = build_direct_verification_source(
+            proof="From Coq.Init.Datatypes Require Import Arith.\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_rejects_invalid_name(self):
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_direct_verification_source(
+                proof="Theorem t : True. Proof. exact I. Qed.",
+                problem_name="bad name",
+            )
+
+    def test_printing_depth_reset_before_check(self):
+        """Printing Depth/Width must be reset BEFORE Check to prevent truncation."""
+        source = build_direct_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        # Printing flags must appear before Check
+        depth_pos = source.index("Set Printing Depth 1000000.")
+        check_pos = source.index("Check @t.")
+        assert depth_pos < check_pos
+
+    def test_printing_depth_also_before_print_assumptions(self):
+        """Printing flags must also be reset before Print Assumptions."""
+        source = build_direct_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        pa_pos = source.index("Print Assumptions t.")
+        # There should be a second Set Printing Depth before Print Assumptions
+        last_depth_pos = source.rindex("Set Printing Depth 1000000.")
+        assert last_depth_pos < pa_pos
+
+    def test_rejects_module_classicaldedekindreals(self):
+        """Module that shadows stdlib module name must be rejected."""
+        with pytest.raises(ValueError, match="ClassicalDedekindReals"):
+            build_direct_verification_source(
+                proof="Module ClassicalDedekindReals.\nAxiom sig_forall_dec : False.\nEnd ClassicalDedekindReals.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_module_primint63(self):
+        """Module PrimInt63 must be rejected (spoofs primitive int axioms)."""
+        with pytest.raises(ValueError, match="PrimInt63"):
+            build_direct_verification_source(
+                proof="Module PrimInt63.\nAxiom add : False.\nEnd PrimInt63.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_allows_custom_module(self):
+        """Module MyHelper should not be rejected."""
+        source = build_direct_verification_source(
+            proof="Module MyHelper.\nDefinition x := 0.\nEnd MyHelper.\n"
+            "Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_rejects_theorem_of_core_name(self):
+        """Theorem nat : ... must be caught by _check_type_shadowing."""
+        with pytest.raises(ValueError, match="core name"):
+            build_direct_verification_source(
+                proof="Theorem nat : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_lemma_of_core_name(self):
+        """Lemma eq : ... must be caught by _check_type_shadowing."""
+        with pytest.raises(ValueError, match="core name"):
+            build_direct_verification_source(
+                proof="Lemma eq : True. Proof. exact I. Qed.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_module_coq(self):
+        """Module Coq must be rejected (spoofs Coq.* axiom prefix)."""
+        with pytest.raises(ValueError, match="Coq"):
+            build_direct_verification_source(
+                proof="Module Coq.\nEnd Coq.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_rejects_le_redefinition(self):
+        """Redefining le must be caught (re-added to core names)."""
+        with pytest.raises(ValueError, match="core name"):
+            build_direct_verification_source(
+                proof="Definition le (x y : nat) := True.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: build_direct_type_check_source
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDirectTypeCheckSource:
+    """Test the Phase 3 type check source builder for problem statements."""
+
+    def test_contains_check(self):
+        source = build_direct_type_check_source(
+            problem_statement="Theorem t : True.\nAdmitted.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+        assert "Set Printing All." in source
+
+    def test_preserves_problem_as_is(self):
+        source = build_direct_type_check_source(
+            problem_statement="Theorem t : True.\nAdmitted.",
+            problem_name="t",
+        )
+        # The problem statement is included as-is (with Admitted.)
+        assert "Theorem t : True." in source
+        assert "Admitted." in source
+
+    def test_rejects_forbidden_in_problem(self):
+        with pytest.raises(ValueError, match="[Ff]orbidden"):
+            build_direct_type_check_source(
+                problem_statement='Redirect "/tmp/evil".\nTheorem t : True.\nAdmitted.',
+                problem_name="t",
+            )
+
+    def test_rejects_invalid_name(self):
+        with pytest.raises(ValueError, match="valid Rocq identifier"):
+            build_direct_type_check_source(
+                problem_statement="Theorem t : True.\nAdmitted.",
+                problem_name="bad\nname",
+            )
+
+    def test_printing_depth_reset_before_check(self):
+        """Printing Depth must be reset before Check to prevent truncation."""
+        source = build_direct_type_check_source(
+            problem_statement="Theorem t : True.\nAdmitted.",
+            problem_name="t",
+        )
+        depth_pos = source.index("Set Printing Depth 1000000.")
+        check_pos = source.index("Check @t.")
+        assert depth_pos < check_pos
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: parse_check_type
+# ---------------------------------------------------------------------------
+
+
+class TestParseCheckType:
+    """Test parsing Check output from coqc stdout."""
+
+    def test_single_line(self):
+        stdout = "@t : True\n"
+        result = parse_check_type(stdout, "t")
+        assert result is not None
+        assert "True" in result
+
+    def test_multiline_type(self):
+        stdout = "@add_0_r\n" "     : forall n : nat,\n" "       n + 0 = n\n"
+        result = parse_check_type(stdout, "add_0_r")
+        assert result is not None
+        assert "forall" in result
+        assert "nat" in result
+
+    def test_missing_name_returns_none(self):
+        stdout = "Some unrelated output\n"
+        assert parse_check_type(stdout, "nonexistent") is None
+
+    def test_empty_stdout_returns_none(self):
+        assert parse_check_type("", "t") is None
+
+    def test_colon_on_next_line(self):
+        stdout = "@foo\n" "     : nat -> nat\n"
+        result = parse_check_type(stdout, "foo")
+        assert result is not None
+        assert "nat -> nat" in result
+
+    def test_with_other_output_before(self):
+        """Check output appears after other compilation output."""
+        stdout = "some warning here\n" "@t\n" "     : True\n"
+        result = parse_check_type(stdout, "t")
+        assert result is not None
+        assert "True" in result
+
+    def test_last_match_wins(self):
+        """If @name appears twice, the LAST match is used (prevents stdout injection)."""
+        stdout = "@t : nat\n\n@t : True\n"
+        result = parse_check_type(stdout, "t")
+        assert result is not None
+        assert "True" in result
+        assert "nat" not in result
+
+    def test_no_prefix_collision(self):
+        """@foobar must not match when searching for @foo."""
+        stdout = "@foobar : nat\n\n@foo : True\n"
+        result = parse_check_type(stdout, "foo")
+        assert result is not None
+        assert "True" in result
+        assert "nat" not in result
+
+    def test_prefix_name_no_match_when_only_prefix_exists(self):
+        """If only @foobar exists, searching for @foo returns None."""
+        stdout = "@foobar : nat\n"
+        result = parse_check_type(stdout, "foo")
+        assert result is None
+
+    def test_bare_name_without_at_prefix(self):
+        """Check output without @ prefix should still be parsed."""
+        stdout = "t\n     : True\n"
+        result = parse_check_type(stdout, "t")
+        assert result is not None
+        assert result == "True"
+
+    def test_single_line_exact_type(self):
+        """Verify exact type extraction, not just substring."""
+        stdout = "@t : True\n"
+        result = parse_check_type(stdout, "t")
+        assert result == "True"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: _remaining_timeout
+# ---------------------------------------------------------------------------
+
+
+class TestRemainingTimeout:
+    """Test the timeout budget tracking helper."""
+
+    def test_returns_remaining_when_budget_available(self):
+        import time
+
+        from rocq_mcp.compile import _remaining_timeout
+
+        t0 = time.monotonic()
+        result = _remaining_timeout(t0, timeout=60, minimum=10)
+        assert result >= 59  # just started, nearly full budget
+
+    def test_returns_minimum_when_budget_exceeded(self):
+        import time
+
+        from rocq_mcp.compile import _remaining_timeout
+
+        t0 = time.monotonic() - 100  # 100 seconds ago
+        result = _remaining_timeout(t0, timeout=60, minimum=10)
+        assert result == 10
+
+    def test_returns_minimum_when_exactly_expired(self):
+        import time
+
+        from rocq_mcp.compile import _remaining_timeout
+
+        t0 = time.monotonic() - 60
+        result = _remaining_timeout(t0, timeout=60, minimum=10)
+        assert result == 10
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: normalize_type_for_comparison
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeTypeForComparison:
+    """Test type string normalization for comparison."""
+
+    def test_collapses_whitespace(self):
+        assert normalize_type_for_comparison("forall  n :  nat,  n = n") == (
+            "forall n : nat, n = n"
+        )
+
+    def test_collapses_newlines(self):
+        result = normalize_type_for_comparison("forall n : nat,\n  n + 0 = n")
+        assert "\n" not in result
+        assert "forall n : nat, n + 0 = n" == result
+
+    def test_strips_universe_annotations(self):
+        assert normalize_type_for_comparison("Type@{Set}") == "Type"
+        assert normalize_type_for_comparison("eq@{u v}") == "eq"
+
+    def test_strips_complex_universe(self):
+        result = normalize_type_for_comparison("forall (A : Type@{u+1}), A -> A")
+        assert "@{" not in result
+        assert "forall (A : Type), A -> A" == result
+
+    def test_identity_for_clean_type(self):
+        t = "forall n : nat, n + 0 = n"
+        assert normalize_type_for_comparison(t) == t
+
+    def test_strips_leading_trailing(self):
+        assert normalize_type_for_comparison("  True  ") == "True"
+
+
 # =========================================================================
 # PART B: Integration tests (require coqc)
 # =========================================================================
@@ -2082,8 +3089,8 @@ class TestSharedDefsIntegration:
             or "Axioms" not in result["stdout"]
         )
 
-    async def test_module_m_fails_with_inductive(self, workspace):
-        """Standard Module M should fail when proof has Inductive types."""
+    async def test_module_m_fails_with_inductive_phase3_succeeds(self, workspace):
+        """Standard Module M fails with Inductive types, but Phase 3 catches it."""
         proof = (
             "Inductive color := Red | Green | Blue.\n"
             "Theorem foo : forall c : color, c = c.\n"
@@ -2100,6 +3107,1036 @@ class TestSharedDefsIntegration:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        # Without pytanque ctx, Phase 2 cannot run, so this falls back to
-        # Phase 1 which should fail due to type unification across Module M.
+        # Without pytanque ctx, Phase 2 cannot run.  Phase 1 fails due to
+        # type unification across Module M.  Phase 3 succeeds (direct compilation).
+        assert result["verified"] is True
+        assert result["verification_method"] == "direct"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Direct verification integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestDirectVerification:
+    """Test Phase 3 direct verification against real coqc.
+
+    Phase 3 compiles the proof as-is (no Module M), then verifies via
+    Print Assumptions + Check type comparison.
+    """
+
+    async def test_simple_proof_phase3(self, workspace):
+        """A simple valid proof should pass Phase 3 when Phase 1 fails."""
+        # Use Section/Variable which Module M can't handle
+        proof = (
+            "Section Foo.\n"
+            "Variable A : Type.\n"
+            "Theorem foo_id : A -> A.\n"
+            "Proof. intro x. exact x. Qed.\n"
+            "End Foo.\n"
+        )
+        problem = (
+            "Section Foo.\n"
+            "Variable A : Type.\n"
+            "Theorem foo_id : A -> A.\n"
+            "Admitted.\n"
+            "End Foo.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="foo_id",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        # Phase 1 will fail (Section inside Module M causes issues),
+        # Phase 3 should succeed
+        assert result["verified"] is True
+        assert result["verification_method"] == "direct"
+
+    async def test_cheating_axiom_caught(self, workspace):
+        """Phase 3 must catch proofs that use custom axioms."""
+        proof = (
+            "Axiom cheat : False.\n"
+            "Theorem anything : 1 = 2.\n"
+            "Proof. destruct cheat. Qed.\n"
+        )
+        problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="anything",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
         assert result["verified"] is False
+
+    async def test_admitted_helper_caught(self, workspace):
+        """Phase 3 must catch proofs with Admitted helper lemmas."""
+        proof = (
+            "Require Import Arith.\n"
+            "Lemma helper : forall n : nat, n + 0 = n. Admitted.\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Proof. apply helper. Qed.\n"
+        )
+        problem = (
+            "Require Import Arith.\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="add_0_r",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
+    async def test_type_mismatch_caught(self, workspace):
+        """Phase 3 must catch proofs that prove the wrong statement."""
+        proof = (
+            "Require Import Arith.\n"
+            "Theorem wrong : forall n : nat, n + 0 = n.\n"
+            "Proof. intros. lia. Qed.\n"
+        )
+        # Problem asks for a different theorem
+        problem = (
+            "Require Import Arith.\n"
+            "Theorem wrong : forall n m : nat, n + m = m + n.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="wrong",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
+    async def test_core_type_redefinition_caught(self, workspace):
+        """Phase 3 must reject proofs that redefine core types like nat."""
+        proof = (
+            "Inductive nat := O | S (n : nat).\n"
+            "Theorem t : forall n : nat, n = n.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        problem = "Theorem t : forall n : nat, n = n.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        # Phase 1 catches this via Module M.  If Phase 1 somehow passed,
+        # Phase 3's _check_type_shadowing would catch it.
+        assert result["verified"] is False
+
+    async def test_export_in_proof_caught(self, workspace):
+        """Phase 3 must reject proofs that use Export."""
+        proof = (
+            "Module Inner. Definition x := 0. End Inner.\n"
+            "Export Inner.\n"
+            "Theorem t : x = 0.\n"
+            "Proof. reflexivity. Qed.\n"
+        )
+        problem = "Theorem t : x = 0.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        # Phase 1 should catch this via Module M compilation error,
+        # and Phase 3 rejects Export
+        assert result["verified"] is False
+
+    async def test_full_fallback_chain(self, workspace):
+        """Phase 1 fails → Phase 2 skipped (no ctx) → Phase 3 succeeds."""
+        # A proof with Inductive types that Module M can't handle
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        problem = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="color_eq",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+        assert result["verification_method"] == "direct"
+
+    async def test_direct_method_has_note(self, workspace):
+        """Phase 3 results should include a note about reduced security."""
+        proof = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        problem = (
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="color_eq",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+        assert "direct" in result.get("note", "").lower()
+
+    async def test_valid_proof_still_uses_phase1(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
+        """A normal proof that works with Phase 1 should NOT use Phase 3."""
+        result = await rocq_verify(
+            proof=simple_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+        assert result["verification_method"] == "module_m"
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestTimeoutFallbackToPhase3:
+    """Phase 1/2 timeout should fall through to Phase 3.
+
+    Uses monkeypatch to deterministically force Phase 1 timeout (the
+    real-world scenario is compute-heavy proofs where Module M doubles
+    the work, e.g. mathd_numbertheory_543).  Phase 3 calls use real coqc.
+    """
+
+    async def test_phase1_timeout_triggers_phase3(self, workspace, monkeypatch):
+        """When Phase 1 times out, Phase 3 should run and succeed."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — simulate timeout
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            # Phase 3 calls — delegate to real coqc
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Proof.\n"
+            "  intros n. induction n as [| n' IH].\n"
+            "  - reflexivity.\n"
+            "  - simpl. rewrite IH. reflexivity.\n"
+            "Qed.\n"
+        )
+        problem = (
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="add_0_r",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+        assert result["verification_method"] == "direct"
+        # Phase 1 (1 call) + Phase 3 Run A + Run B = 3 calls
+        assert call_count == 3
+
+    async def test_phase1_timeout_phase3_catches_axiom(self, workspace, monkeypatch):
+        """Phase 1 times out, Phase 3 runs and catches cheating (custom axiom).
+
+        Uses monkeypatch to force Phase 1 timeout deterministically,
+        then verifies Phase 3 catches the cheating proof via real coqc.
+        """
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — simulate timeout
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Axiom cheat : False.\n"
+            "Theorem anything : 1 = 2.\n"
+            "Proof. destruct cheat. Qed.\n"
+        )
+        problem = "Theorem anything : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="anything",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "cheat" in result.get("error", "").lower()
+
+    async def test_phase1_timeout_phase3_also_times_out(self, workspace, monkeypatch):
+        """When Phase 1 and Phase 3 both timeout, return Phase 1 timeout error."""
+        import rocq_mcp.server as srv
+
+        def mock_run_coqc(source, ws, timeout):
+            return {
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": True,
+            }
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        result = await rocq_verify(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+            problem_statement="Theorem t : True.\nAdmitted.\n",
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "timed out" in result["error"].lower()
+
+    async def test_phase1_timeout_phase3_type_mismatch(self, workspace, monkeypatch):
+        """Phase 1 times out, Phase 3 catches type mismatch (wrong statement)."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — simulate timeout
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        # Proof proves 0 + n = n but problem expects n + 0 = n
+        proof = (
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, 0 + n = n.\n"
+            "Proof.\n"
+            "  intros n. reflexivity.\n"
+            "Qed.\n"
+        )
+        problem = (
+            "From Coq Require Import Arith.\n\n"
+            "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="add_0_r",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "type mismatch" in result.get("error", "").lower()
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestPhase3SecurityHardening:
+    """Tests for fixes to Phase 3 security vulnerabilities found in review."""
+
+    async def test_definition_eq_bypass_blocked(self, workspace, monkeypatch):
+        """CRITICAL: Definition eq := True must be caught by _check_type_shadowing.
+
+        Previously, _TYPE_DEF_KEYWORDS only had Inductive/Record/etc. so
+        'Definition eq' was not caught, allowing a trivial Phase 3 bypass.
+        """
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — simulate failure
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Error: unable to unify",
+                    "timed_out": False,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Definition eq {A : Type} (x y : A) := True.\n"
+            "Theorem t : @eq nat 0 1.\n"
+            "Proof. exact I. Qed.\n"
+        )
+        problem = "Theorem t : @eq nat 0 1.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        # Phase 3 catches it via _check_type_shadowing (Definition eq)
+        assert "core" in result.get("error", "").lower() or result["verified"] is False
+
+    async def test_definition_nat_bypass_blocked(self, workspace, monkeypatch):
+        """Definition nat := unit must be caught by _check_type_shadowing."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Error",
+                    "timed_out": False,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Definition nat := unit.\n"
+            "Definition O : nat := tt.\n"
+            "Theorem t : forall n : nat, @eq nat n O.\n"
+            "Proof. intro n. destruct n. reflexivity. Qed.\n"
+        )
+        problem = "Theorem t : forall n : nat, @eq nat n O.\n" "Admitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+
+    async def test_unqualified_axiom_add_rejected_in_phase3(
+        self, workspace, monkeypatch
+    ):
+        """CRITICAL: Axiom add : False must be caught in Phase 3.
+
+        Previously, unqualified 'add' matched _KNOWN_SAFE_AXIOMS (PrimInt63)
+        and passed Phase 3 axiom check.  With require_qualified=True, it's
+        correctly rejected.
+        """
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — simulate timeout
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Axiom add : False.\n" "Theorem t : 1 = 2.\n" "Proof. destruct add. Qed.\n"
+        )
+        problem = "Theorem t : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        # Should mention the axiom name in the error
+        assert "add" in result.get("error", "").lower()
+
+    async def test_require_export_proof_accepted(self, workspace):
+        """Require Export in a proof must NOT be falsely rejected."""
+        proof = (
+            "From Coq Require Export Arith.\n\n"
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Proof. destruct c; reflexivity. Qed.\n"
+        )
+        problem = (
+            "From Coq Require Export Arith.\n\n"
+            "Inductive color := Red | Green | Blue.\n"
+            "Theorem color_eq : forall c : color, c = c.\n"
+            "Admitted.\n"
+        )
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="color_eq",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is True
+
+    async def test_phase3_valueerror_returns_specific_error(
+        self, workspace, monkeypatch
+    ):
+        """Phase 3 ValueError (e.g. Export ban) returns specific error, not None."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — failure
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Error: unable to unify",
+                    "timed_out": False,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Module Inner. Definition x := 0. End Inner.\n"
+            "Export Inner.\n"
+            "Theorem t : x = 0. Proof. reflexivity. Qed.\n"
+        )
+        problem = "Theorem t : x = 0.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        # Should see the Phase 3 Export error, not a generic Phase 1 error
+        assert "export" in result.get("error", "").lower()
+        assert result.get("verification_method") == "direct"
+
+    async def test_verification_method_on_suspicious_verdict(
+        self, workspace, monkeypatch
+    ):
+        """Suspicious verdict should include verification_method field."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Phase 1 — timeout to force Phase 3
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Axiom cheat : False.\n"
+            "Theorem t : 1 = 2.\n"
+            "Proof. destruct cheat. Qed.\n"
+        )
+        problem = "Theorem t : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "verification_method" in result
+
+    async def test_module_spoofing_blocked_in_phase3(self, workspace, monkeypatch):
+        """CRITICAL: Module ClassicalDedekindReals axiom spoofing must be caught."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Error: unable to unify",
+                    "timed_out": False,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Module ClassicalDedekindReals.\n"
+            "Axiom sig_forall_dec : False.\n"
+            "End ClassicalDedekindReals.\n"
+            "Theorem t : 1 = 2.\n"
+            "Proof. destruct ClassicalDedekindReals.sig_forall_dec. Qed.\n"
+        )
+        problem = "Theorem t : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        assert "ClassicalDedekindReals" in result.get("error", "")
+
+    async def test_user_axiom_classic_caught_in_phase3(self, workspace, monkeypatch):
+        """User Axiom classic : False must be caught via user_axiom_names."""
+        import rocq_mcp.server as srv
+
+        real_run_coqc = srv._run_coqc
+        call_count = 0
+
+        def mock_run_coqc(source, ws, timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "",
+                    "timed_out": True,
+                }
+            return real_run_coqc(source, ws, timeout)
+
+        monkeypatch.setattr(srv, "_run_coqc", mock_run_coqc)
+
+        proof = (
+            "Axiom classic : False.\n"
+            "Theorem t : 1 = 2.\n"
+            "Proof. destruct classic. Qed.\n"
+        )
+        problem = "Theorem t : 1 = 2.\nAdmitted.\n"
+        result = await rocq_verify(
+            proof=proof,
+            problem_name="t",
+            problem_statement=problem,
+            workspace=str(workspace),
+        )
+        assert result["verified"] is False
+        # 'classic' should be caught by user_axiom_names extraction
+        assert "classic" in result.get("error", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Admitted/admit ban in direct verification
+# ---------------------------------------------------------------------------
+
+
+class TestAdmittedBanInDirectVerification:
+    """Test that Admitted, admit, and give_up are banned in Phase 3."""
+
+    def test_admitted_rejected(self):
+        """Proof containing Admitted must be rejected."""
+        with pytest.raises(ValueError, match="Admitted"):
+            build_direct_verification_source(
+                proof="Lemma helper : False. Admitted.\n"
+                "Theorem t : True. Proof. exact I. Qed.",
+                problem_name="t",
+            )
+
+    def test_admit_tactic_rejected(self):
+        """Proof containing admit tactic must be rejected."""
+        with pytest.raises(ValueError, match="admit"):
+            build_direct_verification_source(
+                proof="Theorem t : True. Proof. admit. Qed.",
+                problem_name="t",
+            )
+
+    def test_admitted_in_comment_allowed(self):
+        """Admitted inside a comment must NOT trigger the ban."""
+        source = build_direct_verification_source(
+            proof="(* Admitted *)\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+    def test_clean_proof_allowed(self):
+        """A clean proof without Admitted/admit must pass."""
+        source = build_direct_verification_source(
+            proof="Theorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+        assert "Print Assumptions t." in source
+
+    def test_give_up_rejected(self):
+        """Proof containing give_up should be rejected."""
+        with pytest.raises(ValueError, match="give_up"):
+            build_direct_verification_source(
+                proof="Theorem t : True.\nProof. give_up. Qed.",
+                problem_name="t",
+            )
+
+    def test_give_up_in_comment_ok(self):
+        """give_up inside comment should not trigger."""
+        source = build_direct_verification_source(
+            proof="(* give_up *)\nTheorem t : True. Proof. exact I. Qed.",
+            problem_name="t",
+        )
+        assert "Check @t." in source
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: _extract_user_axiom_names expanded coverage (Definition/Fixpoint/etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractUserAxiomNamesExpanded:
+    """Test _extract_user_axiom_names with Definition-like keywords."""
+
+    def test_definition_name_extracted(self):
+        assert "foo" in _extract_user_axiom_names("Definition foo := 0.")
+
+    def test_fixpoint_name_extracted(self):
+        assert "f" in _extract_user_axiom_names(
+            "Fixpoint f (n : nat) : nat := match n with | O => O | S m => f m end."
+        )
+
+    def test_cofixpoint_name_extracted(self):
+        assert "g" in _extract_user_axiom_names("CoFixpoint g := g.")
+
+    def test_function_name_extracted(self):
+        assert "h" in _extract_user_axiom_names("Function h (x : nat) := x.")
+
+    def test_let_name_extracted(self):
+        assert "x" in _extract_user_axiom_names("Let x := 0.")
+
+    def test_instance_name_extracted(self):
+        assert "myInst" in _extract_user_axiom_names("Instance myInst : True.")
+
+    def test_context_parenthetical_extracted(self):
+        """Context (classic : P). should extract classic."""
+        names = _extract_user_axiom_names("Context (classic : False).")
+        assert "classic" in names
+
+    def test_context_multi_name_extracted(self):
+        """Context (a b : nat) (c : bool). should extract all names."""
+        names = _extract_user_axiom_names("Context (a b : nat) (c : bool).")
+        assert {"a", "b", "c"} <= names
+
+    def test_context_in_comment_ignored(self):
+        """Context inside comment should not extract names."""
+        names = _extract_user_axiom_names("(* Context (classic : False). *)")
+        assert "classic" not in names
+
+
+# ---------------------------------------------------------------------------
+# C-1: Problem definition redefinition ban
+# ---------------------------------------------------------------------------
+
+
+class TestExtractDefinitionNames:
+    """Tests for _extract_definition_names."""
+
+    def test_definition(self):
+        assert "foo" in _extract_definition_names("Definition foo := 0.")
+
+    def test_fixpoint(self):
+        assert "f" in _extract_definition_names("Fixpoint f (n : nat) := n.")
+
+    def test_inductive(self):
+        assert "mytype" in _extract_definition_names("Inductive mytype := A | B.")
+
+    def test_record(self):
+        assert "myrec" in _extract_definition_names("Record myrec := { field : nat }.")
+
+    def test_theorem(self):
+        assert "thm" in _extract_definition_names(
+            "Theorem thm : True. Proof. exact I. Qed."
+        )
+
+    def test_class(self):
+        assert "MyClass" in _extract_definition_names(
+            "Class MyClass := { meth : nat }."
+        )
+
+    def test_cofixpoint(self):
+        assert "g" in _extract_definition_names("CoFixpoint g := g.")
+
+    def test_comment_ignored(self):
+        assert _extract_definition_names("(* Definition foo := 0. *)") == set()
+
+    def test_multiple_definitions(self):
+        src = "Definition a := 0.\nInductive b := C.\nFixpoint c n := n."
+        names = _extract_definition_names(src)
+        assert {"a", "b", "c"} <= names
+
+    def test_no_definitions(self):
+        assert _extract_definition_names("Require Import Arith.") == set()
+
+
+class TestExtractDefinitionSentence:
+    """Tests for _extract_definition_sentence."""
+
+    def test_simple_definition(self):
+        result = _extract_definition_sentence("Definition foo := 0.", "foo")
+        assert result is not None
+        assert "Definition foo" in result
+        assert "0" in result
+
+    def test_inductive(self):
+        result = _extract_definition_sentence(
+            "Inductive color := Red | Green | Blue.", "color"
+        )
+        assert result is not None
+        assert "Inductive color" in result
+
+    def test_not_found(self):
+        assert _extract_definition_sentence("Definition bar := 0.", "foo") is None
+
+    def test_whitespace_normalized(self):
+        """Multiple whitespace variants produce the same result."""
+        s1 = _extract_definition_sentence("Definition foo := 0.", "foo")
+        s2 = _extract_definition_sentence("Definition  foo  :=  0.", "foo")
+        assert s1 == s2
+
+    def test_comment_content_blanked(self):
+        """Comments inside definition are blanked but don't affect match."""
+        result = _extract_definition_sentence(
+            "Definition foo (* a comment *) := 0.", "foo"
+        )
+        assert result is not None
+        # Comment content should be blanked (spaces)
+        assert "comment" not in result
+
+    def test_fixpoint(self):
+        result = _extract_definition_sentence("Fixpoint f (n : nat) := n.", "f")
+        assert result is not None
+        assert "Fixpoint f" in result
+
+
+class TestProblemRedefinitionBan:
+    """Tests for the C-1 fix: ban redefinition of problem names in Phase 3.
+
+    The check compares definition text between proof and problem.
+    Same definition text = allowed (legitimate reproduction).
+    Different definition text = rejected (attack).
+    """
+
+    def test_redefining_problem_definition_with_different_body_rejected(self):
+        """Proof that redefines a Definition with different body is rejected."""
+        problem = "Definition is_even n := exists k, n = 2 * k.\nTheorem thm : is_even 3.\nProof. Admitted."
+        proof = "Definition is_even n := True.\nTheorem thm : is_even 3.\nProof. exact I. Qed."
+        with pytest.raises(ValueError, match="redefines name.*is_even"):
+            build_direct_verification_source(proof, "thm", problem_statement=problem)
+
+    def test_redefining_problem_inductive_with_different_body_rejected(self):
+        """Proof that redefines an Inductive with different constructors is rejected."""
+        problem = "Inductive mylist := Nil | Cons (h : nat) (t : mylist).\nTheorem thm : True.\nProof. Admitted."
+        proof = "Inductive mylist := Nil.\nTheorem thm : True.\nProof. exact I. Qed."
+        with pytest.raises(ValueError, match="redefines name.*mylist"):
+            build_direct_verification_source(proof, "thm", problem_statement=problem)
+
+    def test_same_definition_allowed(self):
+        """Proof that reproduces the exact same definition is allowed."""
+        problem = "Inductive color := Red | Green | Blue.\nTheorem thm : True.\nProof. Admitted."
+        proof = "Inductive color := Red | Green | Blue.\nTheorem thm : True.\nProof. exact I. Qed."
+        result = build_direct_verification_source(
+            proof, "thm", problem_statement=problem
+        )
+        assert "Check @thm" in result
+
+    def test_same_definition_different_whitespace_allowed(self):
+        """Same definition with different whitespace is still allowed."""
+        problem = "Definition foo := 0.\nTheorem thm : True.\nProof. Admitted."
+        proof = "Definition  foo  :=  0.\nTheorem thm : True.\nProof. exact I. Qed."
+        result = build_direct_verification_source(
+            proof, "thm", problem_statement=problem
+        )
+        assert "Check @thm" in result
+
+    def test_theorem_name_not_banned(self):
+        """The theorem name itself must NOT be banned (proof must define it)."""
+        problem = "Theorem thm : True.\nProof. Admitted."
+        proof = "Theorem thm : True.\nProof. exact I. Qed."
+        result = build_direct_verification_source(
+            proof, "thm", problem_statement=problem
+        )
+        assert "Check @thm" in result
+
+    def test_no_problem_statement_allows_anything(self):
+        """Without problem_statement, no redefinition check is applied."""
+        proof = (
+            "Definition is_even n := True.\nTheorem thm : True.\nProof. exact I. Qed."
+        )
+        result = build_direct_verification_source(proof, "thm")
+        assert "Check @thm" in result
+
+    def test_different_names_pass(self):
+        """Proof with different definition names from problem passes."""
+        problem = "Definition foo := 0.\nTheorem thm : True.\nProof. Admitted."
+        proof = "Definition bar := 1.\nTheorem thm : True.\nProof. exact I. Qed."
+        result = build_direct_verification_source(
+            proof, "thm", problem_statement=problem
+        )
+        assert "Check @thm" in result
+
+    def test_axiom_spoofing_problem_name_different_kind(self):
+        """Proof using Axiom for a problem Definition name is caught (different sentence)."""
+        problem = "Definition is_even n := exists k, n = 2 * k.\nTheorem thm : True.\nProof. Admitted."
+        proof = (
+            "Axiom is_even : nat -> Prop.\nTheorem thm : True.\nProof. exact I. Qed."
+        )
+        with pytest.raises(ValueError, match="redefines name.*is_even"):
+            build_direct_verification_source(proof, "thm", problem_statement=problem)
+
+    def test_redefinition_in_comment_ignored(self):
+        """Definition name inside comment doesn't count as redefinition."""
+        problem = "Definition foo := 0.\nTheorem thm : True.\nProof. Admitted."
+        proof = (
+            "(* Definition foo := 999. *)\nTheorem thm : True.\nProof. exact I. Qed."
+        )
+        result = build_direct_verification_source(
+            proof, "thm", problem_statement=problem
+        )
+        assert "Check @thm" in result
+
+
+# ---------------------------------------------------------------------------
+# C-2 / H-2: Multi-name parenthetical regex
+# ---------------------------------------------------------------------------
+
+
+class TestMultiNameParenthetical:
+    """Tests for multi-name and multi-group parenthetical axiom extraction."""
+
+    def test_multi_name_single_group(self):
+        """Parameter (a b c : nat). captures all three."""
+        names = _extract_user_axiom_names("Parameter (a b c : nat).")
+        assert {"a", "b", "c"} <= names
+
+    def test_multi_name_multi_group(self):
+        """Parameter (a b : nat) (c d : bool). captures all four."""
+        names = _extract_user_axiom_names("Parameter (a b : nat) (c d : bool).")
+        assert {"a", "b", "c", "d"} <= names
+
+    def test_type_name_not_captured(self):
+        """Type names after ':' should NOT be captured."""
+        names = _extract_user_axiom_names("Parameter (a : nat).")
+        assert "nat" not in names
+
+    def test_multi_group_different_keywords(self):
+        """Parameter (a : nat) (b : bool). captures both groups."""
+        names = _extract_user_axiom_names("Parameter (a : nat) (b : bool).")
+        assert {"a", "b"} <= names
+
+
+# ---------------------------------------------------------------------------
+# H-1: Declare Module ban
+# ---------------------------------------------------------------------------
+
+
+class TestDeclareModuleBan:
+    """Tests for Declare Module ban in Phase 3."""
+
+    def test_declare_module_rejected(self):
+        """Declare Module should be rejected in Phase 3."""
+        proof = (
+            "Module Type SIG.\n"
+            "  Parameter t : Type.\n"
+            "End SIG.\n"
+            "Declare Module M : SIG.\n"
+            "Theorem thm : True.\nProof. exact I. Qed."
+        )
+        with pytest.raises(ValueError, match="Declare Module"):
+            build_direct_verification_source(proof, "thm")
+
+    def test_declare_module_type_allowed(self):
+        """Declare Module Type should NOT be rejected (harmless)."""
+        # Note: "Declare Module Type" is not standard Rocq, but the check
+        # should not trigger for "Module Type" preceded by any context.
+        proof = "Module Type SIG.\nEnd SIG.\nTheorem thm : True.\nProof. exact I. Qed."
+        result = build_direct_verification_source(proof, "thm")
+        assert "Check @thm" in result
+
+    def test_declare_module_in_comment_ok(self):
+        """Declare Module inside comment should not trigger."""
+        proof = (
+            "(* Declare Module M : SIG. *)\nTheorem thm : True.\nProof. exact I. Qed."
+        )
+        result = build_direct_verification_source(proof, "thm")
+        assert "Check @thm" in result
+
+
+# ---------------------------------------------------------------------------
+# H-4: Module Import/Export bypass fix
+# ---------------------------------------------------------------------------
+
+
+class TestModuleImportExportShadowing:
+    """Tests for Module Import/Export bypass in _check_module_name_shadowing."""
+
+    def test_module_import_nat_caught(self):
+        """Module Import Nat. should be caught."""
+        result = _check_module_name_shadowing("Module Import Nat.")
+        assert result is not None
+        assert "Nat" in result
+
+    def test_module_export_nat_caught(self):
+        """Module Export Nat. should be caught."""
+        result = _check_module_name_shadowing("Module Export Nat.")
+        assert result is not None
+        assert "Nat" in result
+
+    def test_declare_module_nat_caught(self):
+        """Declare Module Nat. should be caught (Module regex matches)."""
+        result = _check_module_name_shadowing("Declare Module Nat : SIG.")
+        assert result is not None

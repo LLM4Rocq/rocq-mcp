@@ -38,22 +38,24 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes eight MCP tools:
+The server exposes ten MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
 | Tool | Description |
 |------|-------------|
 | **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions for jumping to interactive mode. For iterative development, prefer `rocq_check`. |
+| **`rocq_compile_file`** | Like `rocq_compile` but takes a file path instead of source string. More efficient for large files (avoids transmitting full source over MCP). Cleans up compilation artifacts but preserves the source file. |
 | **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` succeeds. |
 
 ### Interactive tools (pytanque-based, require `pet`)
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Does not modify any proof state. |
+| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Supports `Print Assumptions` for axiom checking. Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
+| **`rocq_assumptions`** | Check what axioms a theorem depends on. Wraps `Print Assumptions` with classification: returns `"closed"` (no axioms), `"standard_only"` (classical logic, Reals, etc.), or `"suspicious"` (unproved assumptions). |
 | **`rocq_start`** | Start an interactive proof session. Three modes: by theorem name, by error position, or from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. |
-| **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. |
+| **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. Includes `stale_warning` if the source file was modified since session start. |
 | **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
 | **`rocq_toc`** | Get the structure of a `.v` file: all definitions, lemmas, theorems, and sections as a hierarchical outline. Does not require an active session. |
 | **`rocq_notations`** | List all notations in a Rocq statement and how they resolve (which scope, which module). Helps debug notation ambiguity (e.g., is `+` in `nat_scope` or `Z_scope`?). |
@@ -182,14 +184,16 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_
 ```
 src/rocq_mcp/
   __init__.py       Package init
-  server.py         MCP server, 8 tool definitions, pet subprocess management
-  compile.py        coqc-based tools: compile, verify
-  interactive.py    pytanque-based tools: start, check, step_multi, query, toc, notations
+  server.py         MCP server, 10 tool definitions, pet subprocess management
+  compile.py        coqc-based tools: compile, compile_file, verify
+  interactive.py    pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
   verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
   conftest.py           Shared fixtures
   test_compile.py       Tests for rocq_compile
+  test_compile_file.py  Tests for rocq_compile_file
   test_verify.py        Tests for rocq_verify
+  test_assumptions.py   Tests for rocq_assumptions
   test_auto_solve.py    Tests for sentence utilities and step_multi auto-solving
   test_server.py        Tests for server helpers (_format_error, _parse_project_flags, etc.)
   test_format_error.py  Tests for error formatting

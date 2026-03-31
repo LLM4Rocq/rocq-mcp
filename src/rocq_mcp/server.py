@@ -500,8 +500,9 @@ async def _run_with_pet(
 # NOTE: These imports MUST come after all shared infrastructure above is
 # defined, because compile and interactive import from this module.
 
-from rocq_mcp.compile import run_compile, run_verify  # noqa: E402
+from rocq_mcp.compile import run_compile, run_compile_file, run_verify  # noqa: E402
 from rocq_mcp.interactive import (  # noqa: E402
+    run_assumptions,
     run_query,
     run_start,
     run_check,
@@ -548,6 +549,45 @@ def rocq_compile(
         return {"success": False, "error": err}
 
     return run_compile(source, workspace, timeout, include_warnings)
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_compile_file
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+def rocq_compile_file(
+    file: str,
+    workspace: str = "",
+    timeout: int = 0,
+    include_warnings: bool = True,
+) -> dict[str, Any]:
+    """Compile a Rocq (.v) file on disk and return structured errors.
+
+    Like rocq_compile but takes a file path instead of source string.
+    More efficient for large files (avoids transmitting full source).
+    The file must already exist within the workspace.
+
+    On error, returns error_positions for jumping to the failure via
+    rocq_start(file=..., line=..., character=...).
+
+    Args:
+        file: Path to the .v file (relative to workspace).
+        workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
+        timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+        include_warnings: If True (default), include deduplicated warnings
+            before the error in the output.  Set to False to get only the
+            error diagnostic, which keeps context compact.
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    return run_compile_file(file, workspace, timeout, include_warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +651,7 @@ async def rocq_query(
     command: str,
     preamble: str = "",
     workspace: str = "",
+    max_results: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Search the Rocq environment — find lemmas, check types, inspect definitions.
@@ -620,12 +661,16 @@ async def rocq_query(
       command="Check Nat.add."               — check a term's type
       command="Print Nat.add."               — see a definition
       command="About plus."                  — summary of a name
+      command="Print Assumptions my_thm."    — check axiom dependencies
 
     Args:
         command: The Rocq query command to execute.
         preamble: Optional import lines needed for the query context
                   (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+        max_results: Optional maximum number of results to return.
+            Useful for broad Search patterns. If omitted, all results are
+            returned (subject to character limit).
     """
     workspace = workspace or ROCQ_WORKSPACE
 
@@ -638,6 +683,51 @@ async def rocq_query(
 
     return await run_query(
         command=command,
+        preamble=preamble,
+        workspace=workspace,
+        lifespan_state=ctx.lifespan_context,
+        max_results=max_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_assumptions
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def rocq_assumptions(
+    name: str,
+    preamble: str = "",
+    workspace: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Check what axioms a theorem depends on.
+
+    Runs Print Assumptions on the given theorem/lemma name and classifies
+    the result. Returns whether the proof is closed (no axioms),
+    uses only standard axioms (classical logic, Reals, etc.), or has
+    suspicious/unproved assumptions.
+
+    Requires the theorem to be defined in the environment set up by preamble.
+    For theorems in a .v file, use the file's imports as preamble.
+
+    Args:
+        name: The theorem/lemma name to check (e.g., "add_comm").
+        preamble: Import lines for context (e.g., "From Coq Require Import Arith.").
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+
+    return await run_assumptions(
+        name=name,
         preamble=preamble,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,

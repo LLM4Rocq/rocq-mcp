@@ -54,8 +54,12 @@ _MAX_FORMAT_WARNINGS: int = 3
 # ---------------------------------------------------------------------------
 
 
-def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
-    """Write source to temp file, run coqc, return result dict.
+def _run_coqc_process(file_path: str, workspace: Path, timeout: int) -> dict[str, Any]:
+    """Run coqc on a .v file and return the result.
+
+    Shared subprocess management for both :func:`_run_coqc` (temp files) and
+    :func:`_run_coqc_file` (user files).  Handles timeout with graceful
+    SIGTERM → SIGKILL escalation.
 
     Returns dict with keys:
         returncode: int
@@ -63,21 +67,17 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
         stderr: str
         timed_out: bool
     """
-    ws = Path(workspace).resolve()
-    with tempfile.NamedTemporaryFile(
-        suffix=".v", mode="w", delete=False, dir=str(ws)
-    ) as f:
-        f.write(source)
-        f.flush()
-        tmp_path = f.name
-
     try:
         proc = subprocess.Popen(
-            [_server.ROCQ_COQC_BINARY, *_server._parse_project_flags(ws), tmp_path],
+            [
+                _server.ROCQ_COQC_BINARY,
+                *_server._parse_project_flags(workspace),
+                file_path,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=str(ws),
+            cwd=str(workspace),
             start_new_session=True,
         )
         try:
@@ -129,8 +129,41 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
             ),
             "timed_out": False,
         }
+
+
+def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
+    """Write source to temp file, run coqc, return result dict."""
+    ws = Path(workspace).resolve()
+    with tempfile.NamedTemporaryFile(
+        suffix=".v", mode="w", delete=False, dir=str(ws)
+    ) as f:
+        f.write(source)
+        f.flush()
+        tmp_path = f.name
+
+    try:
+        return _run_coqc_process(tmp_path, ws, timeout)
     finally:
         _server._cleanup_coqc_artifacts(tmp_path)
+
+
+def _run_coqc_file(file_path: str, workspace: str, timeout: int) -> dict[str, Any]:
+    """Run coqc on an existing .v file, return result dict.
+
+    Unlike :func:`_run_coqc`, does NOT create a temp file — runs coqc
+    directly on the given file.  Cleans up all compilation artifacts
+    but preserves the source .v file.
+    """
+    ws = Path(workspace).resolve()
+    try:
+        return _run_coqc_process(file_path, ws, timeout)
+    finally:
+        # Clean compilation artifacts but preserve the source .v file
+        base = Path(file_path).with_suffix("")
+        for ext in _server._CLEANUP_EXTENSIONS:
+            if ext == ".v":
+                continue
+            base.with_suffix(ext).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +213,15 @@ _TMP_PATH_RE = re.compile(r'"[^"]*tmp[^"]*\.v"')
 
 
 def _format_error(
-    error_str: str, proof_str: str, *, include_warnings: bool = True
+    error_str: str,
+    proof_str: str,
+    *,
+    include_warnings: bool = True,
+    file_label: str = "<proof>",
 ) -> str:
     """Reformat a raw coqc stderr string into LLM-friendly feedback.
 
-    - Replaces the opaque tmp file path with ``<proof>``
+    - Replaces the opaque tmp file path with ``file_label``
     - Annotates the first Error-level diagnostic with the source line
       and a caret underline marking the exact character range
     - Suppresses pure-warning outputs (they don't prevent compilation)
@@ -195,6 +232,8 @@ def _format_error(
         include_warnings: If True (default), include deduplicated warnings
             that precede the first error.  If False, return only the error
             diagnostic itself — useful when warnings would drown the context.
+        file_label: Label to use in error headers instead of the temp file
+            path.  Defaults to ``"<proof>"``.
 
     Falls back to the raw string (path-cleaned) when no structured
     location info is present (timeouts, workspace errors, etc.).
@@ -206,7 +245,7 @@ def _format_error(
     diagnostics = list(_COQC_DIAG_RE.finditer(error_str))
 
     if not diagnostics:
-        cleaned = _TMP_PATH_RE.sub('"<proof>"', error_str).strip()
+        cleaned = _TMP_PATH_RE.sub(f'"{file_label}"', error_str).strip()
         # Cap output so unstructured errors don't drown LLM context
         if len(cleaned) > _MAX_ERROR_LENGTH:
             cleaned = cleaned[-_MAX_ERROR_LENGTH:]
@@ -255,7 +294,7 @@ def _format_error(
         char_start = d["char_start"]
         char_end = d["char_end"]
 
-        header = f"<proof>, line {line_1}, characters {char_start}-{char_end}:"
+        header = f"{file_label}, line {line_1}, characters {char_start}-{char_end}:"
 
         line_idx = line_1 - 1
         source_line = (
@@ -329,6 +368,95 @@ def run_compile(
             raw = result["stderr"].strip()
             fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
             fallback = _TMP_PATH_RE.sub('"<proof>"', fallback).strip()
+            if not fallback:
+                fallback = f"coqc exited with code {result['returncode']} (no stderr)."
+            return {"success": False, "error": fallback}
+        positions = _parse_coqc_error_positions(result["stderr"])
+        result_dict: dict[str, Any] = {"success": False, "error": error_text}
+        if positions:
+            result_dict["error_positions"] = positions
+            result_dict["hint"] = (
+                "Use rocq_start(file=..., line=..., character=...) to start "
+                "an interactive session at the error position, then "
+                "rocq_check or rocq_step_multi to explore fixes."
+            )
+        else:
+            result_dict["hint"] = (
+                "Use rocq_check for faster iteration, "
+                "or rocq_step_multi to explore alternative tactics."
+            )
+        return result_dict
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_compile_file (core implementation)
+# ---------------------------------------------------------------------------
+
+
+def run_compile_file(
+    file: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool = True,
+) -> dict[str, Any]:
+    """Core implementation of rocq_compile_file (testable without FastMCP Context).
+
+    Compiles an existing .v file on disk.  Validates that the file is within
+    the workspace, checks for forbidden commands, and returns structured errors.
+    """
+    ws = Path(workspace).resolve()
+    file_path = str((ws / file).resolve())
+    ws_str = str(ws)
+
+    # Path containment check
+    if not file_path.startswith(ws_str + os.sep) and file_path != ws_str:
+        return {"success": False, "error": "File path must be within workspace."}
+
+    fp = Path(file_path)
+    if not fp.exists():
+        return {"success": False, "error": f"File not found: {file}"}
+    if not fp.is_file():
+        return {"success": False, "error": f"Not a file: {file}"}
+
+    try:
+        source = fp.read_text()
+    except OSError as e:
+        return {"success": False, "error": f"Cannot read file: {e}"}
+
+    if len(source) > _server.ROCQ_MAX_SOURCE_SIZE:
+        return {
+            "success": False,
+            "error": f"File exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
+        }
+
+    forbidden = _check_forbidden_commands(source)
+    if forbidden:
+        return {"success": False, "error": forbidden}
+
+    result = _run_coqc_file(file_path, workspace, timeout)
+
+    if result["timed_out"]:
+        return {
+            "success": False,
+            "error": (
+                f"Compilation timed out after {timeout}s. "
+                "The proof may contain a diverging tactic."
+            ),
+        }
+
+    if result["returncode"] == 0:
+        return {"success": True, "output": result["stdout"][:2000]}
+    else:
+        error_text = _format_error(
+            result["stderr"],
+            source,
+            include_warnings=include_warnings,
+            file_label=file,
+        )
+        if not error_text:
+            raw = result["stderr"].strip()
+            fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
+            fallback = fallback.strip()
             if not fallback:
                 fallback = f"coqc exited with code {result['returncode']} (no stderr)."
             return {"success": False, "error": fallback}

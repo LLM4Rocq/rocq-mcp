@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +220,8 @@ class _StateEntry:
     tactic: str | None
     step: int
     proof_finished: bool = False
+    file_mtime: float | None = None  # mtime at session creation
+    resolved_file: str | None = None  # absolute path for staleness check
 
 
 _state_table: dict[int, _StateEntry] = {}
@@ -234,6 +237,9 @@ def _state_add(
     parent_id: int | None,
     tactic: str | None,
     step: int,
+    *,
+    file_mtime: float | None = None,
+    resolved_file: str | None = None,
 ) -> int:
     """Add a state to the table and return its integer ID."""
     global _state_next_id, _state_current_id
@@ -248,6 +254,8 @@ def _state_add(
         tactic=tactic,
         step=step,
         proof_finished=getattr(state, "proof_finished", False),
+        file_mtime=file_mtime,
+        resolved_file=resolved_file,
     )
     _state_current_id = sid
     # Evict oldest entries when table exceeds max size
@@ -280,6 +288,31 @@ def _state_invalidate_all() -> None:
     global _state_current_id
     _state_table.clear()
     _state_current_id = None
+
+
+def _check_staleness(entry: _StateEntry) -> str | None:
+    """Check if a state's backing file has been modified since session start.
+
+    Returns a warning message if the file changed or is inaccessible,
+    or None if fresh.  Returns None for preamble-mode states (no backing file).
+    """
+    if entry.resolved_file is None or entry.file_mtime is None:
+        return None
+    try:
+        current_mtime = os.path.getmtime(entry.resolved_file)
+    except OSError:
+        return (
+            f"File '{entry.file}' is no longer accessible. "
+            f"The proof state may be stale. "
+            f"Use rocq_start to begin a fresh session."
+        )
+    if current_mtime != entry.file_mtime:
+        return (
+            f"File '{entry.file}' has been modified since session start. "
+            f"The proof state may be stale. "
+            f"Use rocq_start to begin a fresh session."
+        )
+    return None
 
 
 def _reconstruct_tactic_path(state_id: int) -> tuple[list[str], bool]:
@@ -328,6 +361,7 @@ async def run_query(
     preamble: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    max_results: int | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context).
 
@@ -356,7 +390,17 @@ async def run_query(
         state = pet.run(state, cmd)
         feedback = state.feedback or []
 
+        # Apply result-count limit before character truncation
+        total_results = len(feedback)
+        if max_results is not None and max_results > 0 and total_results > max_results:
+            feedback = feedback[:max_results]
+
         output = "\n".join(msg for _, msg in feedback)
+        if max_results is not None and max_results > 0 and total_results > max_results:
+            output += (
+                f"\n... ({total_results - max_results} more results, "
+                f"{total_results} total)"
+            )
         if len(output) > _MAX_QUERY_OUTPUT:
             output = (
                 output[:_MAX_QUERY_OUTPUT]
@@ -369,6 +413,71 @@ async def run_query(
         lifespan_state,
         "Query",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_assumptions
+# ---------------------------------------------------------------------------
+
+
+async def run_assumptions(
+    name: str,
+    preamble: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_assumptions (testable without FastMCP Context).
+
+    Runs ``Print Assumptions <name>.`` via :func:`run_query` and classifies
+    the result using :func:`verify.parse_and_classify_assumptions`.
+    """
+    from rocq_mcp.verify import parse_and_classify_assumptions
+
+    # Validate: non-empty, valid Rocq identifier or qualified name
+    clean_name = name.strip() if name else ""
+    if not clean_name:
+        return {"success": False, "error": "Theorem name must not be empty."}
+    if not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_']*(\.[A-Za-z_][A-Za-z0-9_']*)*", clean_name
+    ):
+        return {
+            "success": False,
+            "error": f"Invalid identifier: {clean_name!r}. "
+            "Expected a Rocq name like 'add_comm' or 'Nat.add_comm'.",
+        }
+
+    query_result = await run_query(
+        command=f"Print Assumptions {clean_name}.",
+        preamble=preamble,
+        workspace=workspace,
+        lifespan_state=lifespan_state,
+    )
+    if not query_result.get("success"):
+        return query_result
+
+    raw_output = query_result["output"]
+    try:
+        verdict, details = parse_and_classify_assumptions(raw_output)
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to parse assumptions output: {e}",
+            "raw_output": raw_output,
+        }
+    result: dict[str, Any] = {
+        "success": True,
+        "theorem": clean_name,
+        "verdict": verdict,
+        "raw_output": raw_output,
+    }
+    if verdict == "closed":
+        result["assumptions"] = []
+    elif verdict == "standard_only":
+        result["assumptions"] = details.get("standard", [])
+    else:
+        result["assumptions"] = details.get("suspicious", [])
+        result["standard_assumptions"] = details.get("standard", [])
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +689,11 @@ async def run_start(
             resolved_file = str((Path(workspace).resolve() / file).resolve())
             _server._set_workspace_if_needed(pet, workspace, lifespan_state)
             state = pet.start(resolved_file, theorem)
+            # Capture mtime after pet.start to avoid TOCTOU gap
+            try:
+                file_mtime = os.path.getmtime(resolved_file)
+            except OSError:
+                file_mtime = None
             state_id = _state_add(
                 state=state,
                 file=file,
@@ -588,6 +702,8 @@ async def run_start(
                 parent_id=None,
                 tactic=None,
                 step=0,
+                file_mtime=file_mtime,
+                resolved_file=resolved_file,
             )
             goals = _try_get_goals(pet, state) or ""
             return {
@@ -602,6 +718,11 @@ async def run_start(
             resolved_file = str((Path(workspace).resolve() / file).resolve())
             _server._set_workspace_if_needed(pet, workspace, lifespan_state)
             state = pet.get_state_at_pos(resolved_file, line, character)
+            # Capture mtime after get_state_at_pos to avoid TOCTOU gap
+            try:
+                file_mtime = os.path.getmtime(resolved_file)
+            except OSError:
+                file_mtime = None
             state_id = _state_add(
                 state=state,
                 file=file,
@@ -610,6 +731,8 @@ async def run_start(
                 parent_id=None,
                 tactic=None,
                 step=0,
+                file_mtime=file_mtime,
+                resolved_file=resolved_file,
             )
             goals = _try_get_goals(pet, state) or ""
             return {
@@ -736,6 +859,9 @@ async def run_check(
             return {"success": False, "error": re_err}
         entry_to_use = re_entry
 
+        # Check for file staleness (non-blocking warning)
+        stale_warning = _check_staleness(entry_to_use)
+
         start_time = time.monotonic()
         _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
 
@@ -763,6 +889,8 @@ async def run_check(
                     parent_id=prev_state_id,
                     tactic=cmd,
                     step=entry_to_use.step + i + 1,
+                    file_mtime=entry_to_use.file_mtime,
+                    resolved_file=entry_to_use.resolved_file,
                 )
                 prev_state_id = state_id
                 state = new_state
@@ -781,6 +909,8 @@ async def run_check(
                     "last_valid_state_id": prev_state_id,
                     "goals_at_failure": goals,
                 }
+                if stale_warning:
+                    result["stale_warning"] = stale_warning
                 if prev_state_id is not None:
                     result["hint"] = (
                         f"Use rocq_check(body='...', from_state={prev_state_id}) "
@@ -808,6 +938,8 @@ async def run_check(
             "state_id": prev_state_id,
             "parent_state_id": base_state_id,
         }
+        if stale_warning:
+            result["stale_warning"] = stale_warning
         if complete and complete.shelf:
             result["shelved_goals"] = len(complete.shelf)
         if complete and complete.given_up:
@@ -906,31 +1038,33 @@ async def run_step_multi(
             try:
                 pet = _server._ensure_pet(lifespan_state)
 
-                # Determine the base state
+                # Determine the base state — unify both branches into
+                # entry_to_use so workspace and staleness are always handled.
+                entry_to_use: _StateEntry | None = None
                 base_state_id: int | None = None
                 if from_state is not None:
-                    entry, err = _state_get_or_error(from_state)
+                    entry_to_use, err = _state_get_or_error(from_state)
                     if err:
                         return {"success": False, "error": err}
-                    _server._set_workspace_if_needed(
-                        pet, entry.workspace, lifespan_state
-                    )
-                    parent_state = entry.state
                     base_state_id = from_state
                 else:
-                    cur_entry = (
-                        _state_get(_state_current_id)
-                        if _state_current_id is not None
-                        else None
-                    )
-                    parent_state = cur_entry.state if cur_entry else None
+                    if _state_current_id is not None:
+                        entry_to_use = _state_get(_state_current_id)
                     base_state_id = _state_current_id
 
-                if parent_state is None:
+                if entry_to_use is None:
                     return {
                         "success": False,
                         "error": "No active state. Use rocq_start first.",
                     }
+
+                _server._set_workspace_if_needed(
+                    pet, entry_to_use.workspace, lifespan_state
+                )
+                parent_state = entry_to_use.state
+
+                # Check for file staleness (non-blocking warning)
+                stale_warning = _check_staleness(entry_to_use)
 
                 for tactic in tactics:
                     tac = tactic.strip()
@@ -981,6 +1115,8 @@ async def run_step_multi(
                 }
                 if base_state_id is not None:
                     resp["from_state_id"] = base_state_id
+                if stale_warning:
+                    resp["stale_warning"] = stale_warning
                 return resp
             finally:
                 lock.release()

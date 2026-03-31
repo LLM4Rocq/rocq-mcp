@@ -150,3 +150,55 @@ class TestQueryErrors:
         )
         assert result["success"] is False
         assert result["error"]  # some error message returned
+
+
+# ---------------------------------------------------------------------------
+# max_results (integration tests, require pet)
+# ---------------------------------------------------------------------------
+
+
+class TestQueryMaxResults:
+    """Test the max_results parameter for result limiting."""
+
+    @pytest.mark.asyncio
+    async def test_max_results_limits_output(self, workspace, lifespan_state):
+        """max_results should limit the number of Search results shown."""
+        from rocq_mcp.interactive import run_query
+
+        # First, get unlimited results
+        unlimited = await run_query(
+            command="Search nat.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert unlimited["success"] is True
+
+        # Now get limited results
+        limited = await run_query(
+            command="Search nat.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+            max_results=3,
+        )
+        assert limited["success"] is True
+        # Limited output should be shorter than unlimited
+        assert len(limited["output"]) <= len(unlimited["output"])
+        # Should show truncation notice
+        assert "more results" in limited["output"]
+
+    @pytest.mark.asyncio
+    async def test_max_results_none_shows_all(self, workspace, lifespan_state):
+        """max_results=None should show all results (no truncation notice)."""
+        from rocq_mcp.interactive import run_query
+
+        result = await run_query(
+            command="Check Nat.add.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+            max_results=None,
+        )
+        assert result["success"] is True
+        assert "more results" not in result["output"]

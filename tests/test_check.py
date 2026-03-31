@@ -79,7 +79,6 @@ class TestCheckSingleTactic:
 
         cr = await run_check(
             body="intros.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=start_state_id,
@@ -110,7 +109,6 @@ class TestCheckSingleTactic:
 
         cr = await run_check(
             body="exact I.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -138,7 +136,6 @@ class TestCheckSingleTactic:
 
         cr = await run_check(
             body="omega_nonexistent_tactic.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -186,7 +183,6 @@ class TestCheckBatch:
         )
         cr = await run_check(
             body=body,
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -217,7 +213,6 @@ class TestCheckBatch:
         # First tactic (intros) should succeed, second (omega_bad) should fail
         cr = await run_check(
             body="intros. omega_bad_tactic.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -261,7 +256,6 @@ class TestCheckFromState:
         # Branch A: run intros from start state
         cr_a = await run_check(
             body="intros.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=start_id,
@@ -272,7 +266,6 @@ class TestCheckFromState:
         # Branch B: run intros n from the SAME start state (not from state_a)
         cr_b = await run_check(
             body="intros n.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=start_id,
@@ -303,7 +296,6 @@ class TestCheckEdgeCases:
 
         cr = await run_check(
             body="intros.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=None,
@@ -332,7 +324,6 @@ class TestCheckEdgeCases:
 
         cr = await run_check(
             body="",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -361,7 +352,6 @@ class TestCheckEdgeCases:
         # "intros" without trailing dot -- should still succeed
         cr = await run_check(
             body="intros",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -386,7 +376,6 @@ class TestCheckEdgeCases:
 
         cr = await run_check(
             body="exact I.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -433,7 +422,6 @@ class TestCheckTimeout:
 
             cr = await run_check(
                 body="loop.",
-                workspace=str(workspace),
                 timeout=2.0,
                 lifespan_state=state,
                 from_state=sr["state_id"],
@@ -473,7 +461,6 @@ class TestCheckProofTactics:
 
         cr = await run_check(
             body="exact I.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -506,7 +493,6 @@ class TestCheckProofTactics:
         # Step 1
         cr1 = await run_check(
             body="intros.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -518,7 +504,6 @@ class TestCheckProofTactics:
         # Step 2 — finishes the proof
         cr2 = await run_check(
             body="reflexivity.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=cr1["state_id"],
@@ -547,7 +532,6 @@ class TestCheckProofTactics:
 
         cr = await run_check(
             body="intros. reflexivity.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -576,7 +560,6 @@ class TestCheckProofTactics:
 
         cr = await run_check(
             body="intros.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -614,7 +597,6 @@ class TestCheckProofTactics:
         # Path A: start with intros
         cr_a = await run_check(
             body="intros n.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,
@@ -624,7 +606,6 @@ class TestCheckProofTactics:
         # Path B (abandoned): also from root, different tactic
         cr_b = await run_check(
             body="intro.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,
@@ -634,7 +615,6 @@ class TestCheckProofTactics:
         # Continue path A to completion
         cr_finish = await run_check(
             body="induction n as [| n' IH]. - reflexivity. - simpl. rewrite IH. reflexivity.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=cr_a["state_id"],
@@ -668,7 +648,6 @@ class TestCheckProofTactics:
 
         cr = await run_check(
             body="exact I.",
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -778,7 +757,6 @@ class TestCheckMultiCommandTimeout:
         with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_check(
                 body="intros. simpl. reflexivity.",
-                workspace="/tmp",
                 timeout=30.0,
                 lifespan_state=lifespan_state,
                 from_state=sid,

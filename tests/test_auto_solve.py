@@ -1,7 +1,6 @@
 """Tests for Rocq sentence utilities and interactive auto-solving via step_multi.
 
 Part A: Unit tests for helper functions (NO coqc/pet needed)
-    - TestRocqCommentRanges: _rocq_comment_ranges scanner
     - TestFindSentenceEnd: _find_sentence_end sentence splitting
 
 Part B: Integration tests (require pet)
@@ -17,7 +16,6 @@ import pytest
 
 from tests.conftest import PET_AVAILABLE
 from rocq_mcp.compile import (
-    _rocq_comment_ranges,
     _find_sentence_end,
 )
 
@@ -45,84 +43,6 @@ AUTO_TACTICS = [
 # =========================================================================
 # PART A: Unit tests (no coqc/pet needed)
 # =========================================================================
-
-
-# ---------------------------------------------------------------------------
-# _rocq_comment_ranges
-# ---------------------------------------------------------------------------
-
-
-class TestRocqCommentRanges:
-    """Direct unit tests for the Rocq comment scanner."""
-
-    def test_no_comments(self):
-        assert _rocq_comment_ranges("Theorem t : True.") == []
-
-    def test_single_comment(self):
-        assert _rocq_comment_ranges("(* hello *)") == [(0, 11)]
-
-    def test_nested_comments(self):
-        assert _rocq_comment_ranges("(* (* inner *) *)") == [(0, 17)]
-
-    def test_triple_nested(self):
-        assert _rocq_comment_ranges("(* a (* b (* c *) d *) e *)") == [(0, 27)]
-
-    def test_multiple_comments(self):
-        ranges = _rocq_comment_ranges("x (* a *) y (* b *) z")
-        assert ranges == [(2, 9), (12, 19)]
-
-    def test_comment_inside_string_ignored(self):
-        assert _rocq_comment_ranges('"(* not a comment *)"') == []
-
-    def test_string_inside_comment(self):
-        # The string delimiter inside a comment doesn't start a string
-        ranges = _rocq_comment_ranges('(* "hello" *)')
-        assert ranges == [(0, 13)]
-
-    def test_escaped_double_quote_in_string(self):
-        # "" is an escaped quote, not end of string
-        assert _rocq_comment_ranges('"a""b" (* c *)') == [(7, 14)]
-
-    def test_empty_comment(self):
-        assert _rocq_comment_ranges("(**) rest") == [(0, 4)]
-
-    def test_unclosed_comment(self):
-        # Unclosed comment is NOT reported (no closing range)
-        assert _rocq_comment_ranges("(* unclosed") == []
-
-    def test_dot_inside_comment(self):
-        ranges = _rocq_comment_ranges("(* foo. bar *)")
-        assert ranges == [(0, 14)]
-
-    def test_string_with_fake_comment_open(self):
-        """(* inside string inside comment must NOT increase depth."""
-        # (* " (* " *) is ONE comment — the inner (* is inside a string
-        assert _rocq_comment_ranges('(* " (* " *)') == [(0, 12)]
-
-    def test_string_with_fake_comment_close(self):
-        """*) inside string inside comment must NOT decrease depth."""
-        # (* " *) " *) is ONE comment — the *) is inside a string
-        assert _rocq_comment_ranges('(* " *) " *)') == [(0, 12)]
-
-    def test_escaped_quote_in_string_inside_comment(self):
-        """\"\" inside string inside comment must not end the string."""
-        # (* "a""*)" *) — the "" is escape, *) is still inside string
-        assert _rocq_comment_ranges('(* "a""*)" *)') == [(0, 13)]
-
-    def test_multiple_strings_inside_comment(self):
-        """Multiple strings inside one comment."""
-        assert _rocq_comment_ranges('(* "a" and "b" *)') == [(0, 17)]
-
-    def test_empty_input(self):
-        assert _rocq_comment_ranges("") == []
-
-    def test_adjacent_comments(self):
-        """Adjacent comments (* a *)(* b *) are reported as one merged range."""
-        assert _rocq_comment_ranges("(* a *)(* b *)") == [(0, 14)]
-
-    def test_comment_at_end_with_leading_code(self):
-        """Comment at end of text with preceding code exercises the end-of-text path."""
-        assert _rocq_comment_ranges("x (* a *)") == [(2, 9)]
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +133,6 @@ async def _auto_solve(workspace, source, theorem, preamble_tactics=None, state=N
     if preamble_tactics:
         cr = await run_check(
             body=preamble_tactics,
-            workspace=str(workspace),
             timeout=30.0,
             lifespan_state=state,
             from_state=from_state,

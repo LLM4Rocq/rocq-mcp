@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -569,7 +570,6 @@ async def run_notations(
         dummy_source = (
             f"{preamble_text}\n" "Lemma _rocq_mcp_dummy : True. Proof. exact I. Qed.\n"
         )
-        import tempfile
 
         with tempfile.NamedTemporaryFile(
             suffix=".v",
@@ -781,7 +781,6 @@ async def run_start(
 
 async def run_check(
     body: str,
-    workspace: str,
     timeout: float,
     lifespan_state: dict[str, Any],
     from_state: int | None = None,
@@ -986,17 +985,6 @@ async def run_step_multi(
     Supports ``from_state`` to try tactics from a specific state.
     Results are ephemeral — commit with ``rocq_check(body=..., from_state=...)``.
     """
-    try:
-        from pytanque import PetanqueError
-    except ImportError:
-        return {
-            "success": False,
-            "error": (
-                "pytanque is not installed. "
-                "Install with: pip install 'rocq-mcp[interactive]'"
-            ),
-        }
-
     # Validate each tactic up front
     if len(tactics) > _MAX_STEP_MULTI_TACTICS:
         return {
@@ -1014,10 +1002,6 @@ async def run_step_multi(
 
     timeout: float = lifespan_state["pet_timeout"]
     hard_timeout = _compute_hard_timeout(timeout)
-    sem = _server._get_pet_semaphore()
-
-    # Shared list so partial results survive a timeout
-    partial_results: list[dict[str, Any]] = []
 
     # Quick pre-check to avoid acquiring lock for invalid states.
     # Re-validated inside _execute (state may be invalidated between checks).
@@ -1028,146 +1012,97 @@ async def run_step_multi(
     elif _state_current_id is None:
         return {"success": False, "error": "No active state. Use rocq_start first."}
 
-    async with sem:
+    # Shared list so partial results survive a timeout via partial_state
+    partial_state: dict[str, Any] = {"partial_results": []}
 
-        def _execute() -> dict[str, Any]:
-            # Access _pet_lock via module ref — see run_check comment.
-            lock = _server._pet_lock
-            if not lock.acquire(timeout=hard_timeout * 0.8):
-                raise _PetLockTimeout("Could not acquire pet lock")
-            try:
-                pet = _server._ensure_pet(lifespan_state)
-
-                # Determine the base state — unify both branches into
-                # entry_to_use so workspace and staleness are always handled.
-                entry_to_use: _StateEntry | None = None
-                base_state_id: int | None = None
-                if from_state is not None:
-                    entry_to_use, err = _state_get_or_error(from_state)
-                    if err:
-                        return {"success": False, "error": err}
-                    base_state_id = from_state
-                else:
-                    if _state_current_id is not None:
-                        entry_to_use = _state_get(_state_current_id)
-                    base_state_id = _state_current_id
-
-                if entry_to_use is None:
-                    return {
-                        "success": False,
-                        "error": "No active state. Use rocq_start first.",
-                    }
-
-                _server._set_workspace_if_needed(
-                    pet, entry_to_use.workspace, lifespan_state
-                )
-                parent_state = entry_to_use.state
-
-                # Check for file staleness (non-blocking warning)
-                stale_warning = _check_staleness(entry_to_use)
-
-                for tactic in tactics:
-                    tac = tactic.strip()
-                    if tac not in ("{", "}") and not tac.endswith("."):
-                        tac += "."
-
-                    # Per-tactic Rocq-level timeout for eligible tactics
-                    # Budget: divide timeout among all tactics so total
-                    # stays within the hard_timeout window.
-                    per_tactic_budget = max(1, int(timeout / len(tactics)))
-                    tac_rocq_timeout = (
-                        per_tactic_budget
-                        if _is_timeout_eligible(tac) and timeout >= 1
-                        else None
-                    )
-
-                    entry_dict: dict[str, Any] = {"tactic": tac}
-                    try:
-                        new_state = pet.run(parent_state, tac, timeout=tac_rocq_timeout)
-
-                        # Get complete goals for the trial state
-                        complete = pet.complete_goals(new_state)
-                        goals_list = complete.goals if complete else []
-
-                        # Format goals
-                        goals_text = _format_goals(goals_list)
-                        entry_dict["success"] = True
-                        entry_dict["goals"] = goals_text or "No goals remaining."
-                        entry_dict["proof_finished"] = new_state.proof_finished
-                        if complete and complete.shelf:
-                            entry_dict["shelved_goals"] = len(complete.shelf)
-                        if complete and complete.given_up:
-                            entry_dict["given_up_goals"] = len(complete.given_up)
-                    except PetanqueError as e:
-                        # If pet died, re-raise so outer handler detects it
-                        # and returns pet_restarted=True to the client.
-                        if not _server._pet_alive(lifespan_state.get("pet_client")):
-                            raise
-                        entry_dict["success"] = False
-                        entry_dict["error"] = e.message
-
-                    partial_results.append(entry_dict)
-
-                # Read-only exploration — do NOT update state table
-                resp: dict[str, Any] = {
-                    "success": True,
-                    "results": list(partial_results),
-                }
-                if base_state_id is not None:
-                    resp["from_state_id"] = base_state_id
-                if stale_warning:
-                    resp["stale_warning"] = stale_warning
-                return resp
-            finally:
-                lock.release()
-
+    def _execute(pet: Any) -> dict[str, Any]:
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(_execute),
-                timeout=hard_timeout,
-            )
-            return result
-        except asyncio.TimeoutError:
-            _server._invalidate_pet(lifespan_state)
-            await _server._force_release_pet_lock()
-            resp: dict[str, Any] = {
+            from pytanque import PetanqueError
+        except ImportError:
+            return {
                 "success": False,
                 "error": (
-                    f"Multi-tactic exploration timed out after {timeout}s. "
-                    "All states invalidated. Use rocq_start to begin a new session."
+                    "pytanque is not installed. "
+                    "Install with: pip install 'rocq-mcp[interactive]'"
                 ),
-                "pet_restarted": True,
             }
-            if partial_results:
-                resp["partial_results"] = list(partial_results)
-            return resp
-        except _PetLockTimeout:
+
+        # Determine the base state
+        entry_to_use: _StateEntry | None = None
+        base_state_id: int | None = None
+        if from_state is not None:
+            entry_to_use, err = _state_get_or_error(from_state)
+            if err:
+                return {"success": False, "error": err}
+            base_state_id = from_state
+        else:
+            if _state_current_id is not None:
+                entry_to_use = _state_get(_state_current_id)
+            base_state_id = _state_current_id
+
+        if entry_to_use is None:
             return {
                 "success": False,
-                "error": "pet is busy (lock contention). Try again.",
+                "error": "No active state. Use rocq_start first.",
             }
-        except PetanqueError as e:
-            if not _server._pet_alive(lifespan_state.get("pet_client")):
-                _server._invalidate_pet(lifespan_state)
-                await _server._force_release_pet_lock()
-                return {
-                    "success": False,
-                    "error": f"Pet process died: {e.message}",
-                    "pet_restarted": True,
-                }
-            return {"success": False, "error": e.message}
-        except FileNotFoundError:
-            return {
-                "success": False,
-                "error": "pet binary not found on PATH.",
-            }
-        except (BrokenPipeError, ConnectionError) as e:
-            _server._invalidate_pet(lifespan_state)
-            await _server._force_release_pet_lock()
-            return {
-                "success": False,
-                "error": f"Pet process died: {e}",
-                "pet_restarted": True,
-            }
-        except (OSError, RuntimeError, ValueError, TypeError) as e:
-            return {"success": False, "error": f"Unexpected error: {e}"}
+
+        _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
+        parent_state = entry_to_use.state
+
+        # Check for file staleness (non-blocking warning)
+        stale_warning = _check_staleness(entry_to_use)
+
+        for tactic in tactics:
+            tac = tactic.strip()
+            if tac not in ("{", "}") and not tac.endswith("."):
+                tac += "."
+
+            per_tactic_budget = max(1, int(timeout / len(tactics)))
+            tac_rocq_timeout = (
+                per_tactic_budget
+                if _is_timeout_eligible(tac) and timeout >= 1
+                else None
+            )
+
+            entry_dict: dict[str, Any] = {"tactic": tac}
+            try:
+                new_state = pet.run(parent_state, tac, timeout=tac_rocq_timeout)
+
+                complete = pet.complete_goals(new_state)
+                goals_list = complete.goals if complete else []
+
+                goals_text = _format_goals(goals_list)
+                entry_dict["success"] = True
+                entry_dict["goals"] = goals_text or "No goals remaining."
+                entry_dict["proof_finished"] = new_state.proof_finished
+                if complete and complete.shelf:
+                    entry_dict["shelved_goals"] = len(complete.shelf)
+                if complete and complete.given_up:
+                    entry_dict["given_up_goals"] = len(complete.given_up)
+            except PetanqueError as e:
+                # If pet died, re-raise so outer handler detects it.
+                if not _server._pet_alive(lifespan_state.get("pet_client")):
+                    raise
+                entry_dict["success"] = False
+                entry_dict["error"] = e.message
+
+            partial_state["partial_results"].append(entry_dict)
+
+        # Read-only exploration — do NOT update state table
+        resp: dict[str, Any] = {
+            "success": True,
+            "results": list(partial_state["partial_results"]),
+        }
+        if base_state_id is not None:
+            resp["from_state_id"] = base_state_id
+        if stale_warning:
+            resp["stale_warning"] = stale_warning
+        return resp
+
+    return await _server._run_with_pet(
+        _execute,
+        lifespan_state,
+        "Multi-tactic exploration",
+        timeout=hard_timeout,
+        partial_state=partial_state,
+    )

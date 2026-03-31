@@ -19,7 +19,6 @@ from typing import Any
 
 from rocq_mcp.verify import (
     _check_forbidden_commands,
-    _extract_user_axiom_names,
     _rocq_scan,
     build_verification_source,
     build_shared_defs_verification_source,
@@ -33,6 +32,7 @@ from rocq_mcp.verify import (
     parse_and_classify_assumptions,
     ProblemStructure,
     verification_hint,
+    _validate_rocq_identifier,
 )
 
 # Access server attributes through the module reference so that
@@ -319,6 +319,79 @@ def _format_error(
 
 
 # ---------------------------------------------------------------------------
+# Shared post-compilation result builder
+# ---------------------------------------------------------------------------
+
+
+def _build_compile_result(
+    result: dict[str, Any],
+    source: str,
+    timeout: int,
+    include_warnings: bool,
+    *,
+    file_label: str = "<proof>",
+    clean_tmp_paths: bool = True,
+) -> dict[str, Any]:
+    """Build a structured result dict from a coqc subprocess result.
+
+    Shared by ``run_compile`` (inline source) and ``run_compile_file`` (on-disk).
+
+    Parameters
+    ----------
+    result : dict from ``_run_coqc`` / ``_run_coqc_file``
+    source : the Rocq source text (for error context extraction)
+    timeout : the timeout value used (for the timeout error message)
+    include_warnings : passed to ``_format_error``
+    file_label : label used in ``_format_error`` and fallback path cleaning
+    clean_tmp_paths : if True, replace tmp file paths in fallback errors
+    """
+    if result["timed_out"]:
+        return {
+            "success": False,
+            "error": (
+                f"Compilation timed out after {timeout}s. "
+                "The proof may contain a diverging tactic."
+            ),
+        }
+
+    if result["returncode"] == 0:
+        return {"success": True, "output": result["stdout"][:2000]}
+
+    error_text = _format_error(
+        result["stderr"],
+        source,
+        include_warnings=include_warnings,
+        file_label=file_label,
+    )
+    if not error_text:
+        raw = result["stderr"].strip()
+        fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
+        if clean_tmp_paths:
+            fallback = _TMP_PATH_RE.sub(f'"{file_label}"', fallback).strip()
+        else:
+            fallback = fallback.strip()
+        if not fallback:
+            fallback = f"coqc exited with code {result['returncode']} (no stderr)."
+        return {"success": False, "error": fallback}
+
+    positions = _parse_coqc_error_positions(result["stderr"])
+    result_dict: dict[str, Any] = {"success": False, "error": error_text}
+    if positions:
+        result_dict["error_positions"] = positions
+        result_dict["hint"] = (
+            "Use rocq_start(file=..., line=..., character=...) to start "
+            "an interactive session at the error position, then "
+            "rocq_check or rocq_step_multi to explore fixes."
+        )
+    else:
+        result_dict["hint"] = (
+            "Use rocq_check for faster iteration, "
+            "or rocq_step_multi to explore alternative tactics."
+        )
+    return result_dict
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_compile (core implementation)
 # ---------------------------------------------------------------------------
 
@@ -344,48 +417,7 @@ def run_compile(
         return {"success": False, "error": forbidden}
 
     result = _run_coqc(source, workspace, timeout)
-
-    if result["timed_out"]:
-        return {
-            "success": False,
-            "error": (
-                f"Compilation timed out after {timeout}s. "
-                "The proof may contain a diverging tactic."
-            ),
-        }
-
-    if result["returncode"] == 0:
-        return {"success": True, "output": result["stdout"][:2000]}
-    else:
-        error_text = _format_error(
-            result["stderr"], source, include_warnings=include_warnings
-        )
-        if not error_text:
-            # No Error diagnostic parsed, but coqc still failed.
-            # This can happen when voluminous warnings (e.g. math-comp
-            # coercion ambiguity notices) precede the actual error.
-            # Fall back to the tail of raw stderr so the error is visible.
-            raw = result["stderr"].strip()
-            fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
-            fallback = _TMP_PATH_RE.sub('"<proof>"', fallback).strip()
-            if not fallback:
-                fallback = f"coqc exited with code {result['returncode']} (no stderr)."
-            return {"success": False, "error": fallback}
-        positions = _parse_coqc_error_positions(result["stderr"])
-        result_dict: dict[str, Any] = {"success": False, "error": error_text}
-        if positions:
-            result_dict["error_positions"] = positions
-            result_dict["hint"] = (
-                "Use rocq_start(file=..., line=..., character=...) to start "
-                "an interactive session at the error position, then "
-                "rocq_check or rocq_step_multi to explore fixes."
-            )
-        else:
-            result_dict["hint"] = (
-                "Use rocq_check for faster iteration, "
-                "or rocq_step_multi to explore alternative tactics."
-            )
-        return result_dict
+    return _build_compile_result(result, source, timeout, include_warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -434,47 +466,14 @@ def run_compile_file(
         return {"success": False, "error": forbidden}
 
     result = _run_coqc_file(file_path, workspace, timeout)
-
-    if result["timed_out"]:
-        return {
-            "success": False,
-            "error": (
-                f"Compilation timed out after {timeout}s. "
-                "The proof may contain a diverging tactic."
-            ),
-        }
-
-    if result["returncode"] == 0:
-        return {"success": True, "output": result["stdout"][:2000]}
-    else:
-        error_text = _format_error(
-            result["stderr"],
-            source,
-            include_warnings=include_warnings,
-            file_label=file,
-        )
-        if not error_text:
-            raw = result["stderr"].strip()
-            fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
-            fallback = fallback.strip()
-            if not fallback:
-                fallback = f"coqc exited with code {result['returncode']} (no stderr)."
-            return {"success": False, "error": fallback}
-        positions = _parse_coqc_error_positions(result["stderr"])
-        result_dict: dict[str, Any] = {"success": False, "error": error_text}
-        if positions:
-            result_dict["error_positions"] = positions
-            result_dict["hint"] = (
-                "Use rocq_start(file=..., line=..., character=...) to start "
-                "an interactive session at the error position, then "
-                "rocq_check or rocq_step_multi to explore fixes."
-            )
-        else:
-            result_dict["hint"] = (
-                "Use rocq_check for faster iteration, "
-                "or rocq_step_multi to explore alternative tactics."
-            )
-        return result_dict
+    return _build_compile_result(
+        result,
+        source,
+        timeout,
+        include_warnings,
+        file_label=file,
+        clean_tmp_paths=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -728,13 +727,7 @@ def _build_assumptions_result(
             "(definitions placed outside Module M for type compatibility). "
         )
     elif method == "direct":
-        note_suffix = (
-            "Verified via direct compilation (no Module M sandbox). "
-            "Notation/scope redefinition before identically-texted definitions, "
-            "redefinition of non-core types with identical names, "
-            "and shadowing of stdlib functions called by problem definitions, "
-            "are not fully covered. "
-        )
+        note_suffix = "Verified via direct compilation (no Module M sandbox). "
 
     if verdict == "closed":
         return {
@@ -793,12 +786,8 @@ def _try_direct_verification(
     """
     # --- Build and compile proof source (Run A) ---
     try:
-        proof_source = build_direct_verification_source(
-            proof, problem_name, problem_statement=problem_statement
-        )
+        proof_source = build_direct_verification_source(proof, problem_name)
     except ValueError as e:
-        # Phase 3-specific rejection (Export/Include ban, type shadowing).
-        # Return a proper error so the user sees the specific reason.
         return {"verified": False, "error": str(e), "verification_method": "direct"}
 
     t_start = time.monotonic()
@@ -815,16 +804,7 @@ def _try_direct_verification(
         return None
 
     # --- Parse Print Assumptions from proof (Run A stdout) ---
-    # Phase 3 has no Module M, so user axioms appear unqualified.
-    # Defense-in-depth: user_axiom_names catches explicit Axiom/Parameter
-    # declarations, require_qualified catches ambiguous short names (add,
-    # sub, etc.) from Admitted lemmas.
-    user_axioms = _extract_user_axiom_names(proof)
-    verdict, details = parse_and_classify_assumptions(
-        result_a["stdout"],
-        require_qualified=True,
-        user_axiom_names=user_axioms,
-    )
+    verdict, details = parse_and_classify_assumptions(result_a["stdout"])
     if verdict == "suspicious":
         return _build_assumptions_result(verdict, details, "direct")
 
@@ -895,6 +875,162 @@ def _phase3_or_fallback(
     return fallback
 
 
+def _run_phase1_module_m(
+    proof: str,
+    problem_name: str,
+    problem_statement: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool,
+    t0: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Phase 1: Standard Module M sandbox (strongest security).
+
+    Returns ``(result, phase1_failure)`` where:
+    - *result* is non-None if Phase 1 produces a definitive answer
+      (success, timeout+Phase3, or build error).
+    - *phase1_failure* is the formatted error dict for Phase 2/3 fallback.
+    """
+    try:
+        verification_source = build_verification_source(
+            proof,
+            problem_name,
+            problem_statement,
+        )
+    except ValueError as e:
+        return ({"verified": False, "error": str(e)}, {})
+
+    result = _run_coqc(verification_source, workspace, timeout)
+
+    if result["timed_out"]:
+        # Timeout in Module M (common for compute-heavy proofs).
+        # Skip Phase 2 (also Module M) and try Phase 3 (no Module M).
+        return (
+            _phase3_or_fallback(
+                proof,
+                problem_name,
+                problem_statement,
+                workspace,
+                _remaining_timeout(t0, timeout),
+                fallback={
+                    "verified": False,
+                    "error": f"Verification timed out after {timeout}s.",
+                },
+            ),
+            {},
+        )
+
+    if result["returncode"] == 0:
+        verdict, details = parse_and_classify_assumptions(result["stdout"])
+        return (_build_assumptions_result(verdict, details, "module_m"), {})
+
+    # Phase 1 failed — build failure dict for Phase 2/3 fallback
+    phase1_stderr = result["stderr"]
+    phase1_error = _format_error(
+        phase1_stderr, verification_source, include_warnings=include_warnings
+    )
+    if not phase1_error:
+        raw = phase1_stderr.strip()
+        phase1_error = _TMP_PATH_RE.sub(
+            '"<proof>"',
+            raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
+        ).strip()
+        if not phase1_error:
+            phase1_error = f"coqc exited with code {result['returncode']}."
+    phase1_failure: dict[str, Any] = {
+        "verified": False,
+        "error": phase1_error,
+        "hint": verification_hint(phase1_stderr),
+    }
+    return (None, phase1_failure)
+
+
+async def _run_phase2_shared_defs(
+    proof: str,
+    problem_name: str,
+    problem_statement: str,
+    workspace: str,
+    timeout: int,
+    lifespan_state: dict[str, Any] | None,
+    phase1_failure: dict[str, Any],
+    t0: float,
+) -> dict[str, Any]:
+    """Phase 2: Shared-defs Module M, with Phase 3 fallback.
+
+    For problems with custom types (Inductive, Record, etc.), extracts
+    shared definitions outside Module M.  Falls back to Phase 3 (direct
+    compilation) if Phase 2 cannot apply or fails.
+    """
+    if lifespan_state is None:
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
+
+    structure = await _extract_problem_structure(
+        problem_statement, problem_name, workspace, lifespan_state
+    )
+
+    if structure is None:
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
+
+    if not structure.has_shared_defs and not structure.preamble_source.strip():
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
+
+    try:
+        shared_source = build_shared_defs_verification_source(
+            proof, problem_name, structure
+        )
+    except ValueError as e:
+        return {"verified": False, "error": str(e)}
+
+    result2 = _run_coqc(shared_source, workspace, _remaining_timeout(t0, timeout))
+
+    if result2["timed_out"]:
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            fallback={
+                "verified": False,
+                "error": f"Verification (shared-defs) timed out after {timeout}s.",
+            },
+        )
+
+    if result2["returncode"] != 0:
+        return _phase3_or_fallback(
+            proof,
+            problem_name,
+            problem_statement,
+            workspace,
+            _remaining_timeout(t0, timeout),
+            phase1_failure,
+        )
+
+    verdict2, details2 = parse_and_classify_assumptions(result2["stdout"])
+    return _build_assumptions_result(verdict2, details2, "shared_defs")
+
+
 async def run_verify(
     proof: str,
     problem_name: str,
@@ -917,14 +1053,10 @@ async def run_verify(
     A wall-clock budget is tracked so the total time across all phases
     stays within approximately ``2 * timeout`` in the worst case.
     """
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_']*", problem_name):
-        return {
-            "verified": False,
-            "error": (
-                f"problem_name must be a valid Rocq identifier "
-                f"(letters, digits, underscores, primes). Got: '{problem_name}'."
-            ),
-        }
+    try:
+        _validate_rocq_identifier(problem_name)
+    except ValueError as exc:
+        return {"verified": False, "error": str(exc)}
 
     if len(proof) > _server.ROCQ_MAX_SOURCE_SIZE:
         return {
@@ -940,203 +1072,35 @@ async def run_verify(
 
     t0 = time.monotonic()
 
-    # --- Phase 1: Standard Module M. template ---
-    try:
-        verification_source = build_verification_source(
-            proof,
-            problem_name,
-            problem_statement,
-        )
-    except ValueError as e:
-        return {"verified": False, "error": str(e)}
-
-    result = _run_coqc(verification_source, workspace, timeout)
-
-    if result["timed_out"]:
-        # Phase 1 timed out (common for compute-heavy proofs where Module M
-        # requires compiling the problem statement twice).  Skip Phase 2
-        # (also uses Module M) and try Phase 3 (direct, no Module M) which
-        # avoids the double compilation.
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            _remaining_timeout(t0, timeout),
-            fallback={
-                "verified": False,
-                "error": f"Verification timed out after {timeout}s.",
-            },
-        )
-
-    if result["returncode"] == 0:
-        # Phase 1 succeeded — parse Print Assumptions
-        verdict, details = parse_and_classify_assumptions(result["stdout"])
-        return _build_assumptions_result(verdict, details, "module_m")
-
-    # --- Phase 1 failed: check if Phase 2 fallback is applicable ---
-    phase1_stderr = result["stderr"]
-    phase1_error = _format_error(
-        phase1_stderr, verification_source, include_warnings=include_warnings
+    # Phase 1: Standard Module M
+    phase1_result, phase1_failure = _run_phase1_module_m(
+        proof,
+        problem_name,
+        problem_statement,
+        workspace,
+        timeout,
+        include_warnings,
+        t0,
     )
-    if not phase1_error:
-        # No Error diagnostic parsed (e.g. voluminous warnings hid it).
-        # Fall back to tail of raw stderr so the caller sees the actual error.
-        raw = phase1_stderr.strip()
-        phase1_error = _TMP_PATH_RE.sub(
-            '"<proof>"',
-            raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
-        ).strip()
-        if not phase1_error:
-            phase1_error = f"coqc exited with code {result['returncode']}."
-    phase1_hint = verification_hint(phase1_stderr)
-    phase1_failure: dict[str, Any] = {
-        "verified": False,
-        "error": phase1_error,
-        "hint": phase1_hint,
-    }
+    if phase1_result is not None:
+        return phase1_result
 
-    # Phase 2 condition: problem statement contains definition keywords
-    # (Inductive, Record, etc.) or Require/Import statements that may cause
-    # issues inside Module M.  Phase 2 is safe to attempt speculatively:
-    # it either succeeds (correct) or fails (we return the Phase 1 error).
-
-    # --- Phase 2: Shared-defs template via pytanque toc ---
-    p3_timeout = _remaining_timeout(t0, timeout)
-
-    if lifespan_state is None:
-        # No lifespan context (e.g., testing) — cannot use pytanque.
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            p3_timeout,
-            phase1_failure,
-        )
-
-    structure = await _extract_problem_structure(
-        problem_statement, problem_name, workspace, lifespan_state
+    # Phase 2: Shared-defs Module M (includes Phase 3 fallback)
+    return await _run_phase2_shared_defs(
+        proof,
+        problem_name,
+        problem_statement,
+        workspace,
+        timeout,
+        lifespan_state,
+        phase1_failure,
+        t0,
     )
-
-    if structure is None:
-        # Could not extract structure — try Phase 3 before giving up
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            _remaining_timeout(t0, timeout),
-            phase1_failure,
-        )
-
-    if not structure.has_shared_defs and not structure.preamble_source.strip():
-        # No shared defs and no preamble to extract — Phase 2 won't help.
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            _remaining_timeout(t0, timeout),
-            phase1_failure,
-        )
-
-    try:
-        shared_source = build_shared_defs_verification_source(
-            proof, problem_name, structure
-        )
-    except ValueError as e:
-        return {"verified": False, "error": str(e)}
-
-    result2 = _run_coqc(shared_source, workspace, _remaining_timeout(t0, timeout))
-
-    if result2["timed_out"]:
-        # Phase 2 timed out — try Phase 3 (no Module M) before giving up
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            _remaining_timeout(t0, timeout),
-            fallback={
-                "verified": False,
-                "error": f"Verification (shared-defs) timed out after {timeout}s.",
-            },
-        )
-
-    if result2["returncode"] != 0:
-        # Phase 2 also failed — try Phase 3 before giving up
-        return _phase3_or_fallback(
-            proof,
-            problem_name,
-            problem_statement,
-            workspace,
-            _remaining_timeout(t0, timeout),
-            phase1_failure,
-        )
-
-    # Phase 2 succeeded — parse Print Assumptions
-    verdict2, details2 = parse_and_classify_assumptions(result2["stdout"])
-    return _build_assumptions_result(verdict2, details2, "shared_defs")
 
 
 # ---------------------------------------------------------------------------
 # Rocq sentence utilities
 # ---------------------------------------------------------------------------
-
-
-def _rocq_comment_ranges(text: str) -> list[tuple[int, int]]:
-    """Return ``(start, end)`` ranges for ``(* ... *)`` comments in *text*.
-
-    Handles nested comments and skips ``(*``/``*)`` inside string literals
-    (delimited by ``"``).  The returned ranges cover only comments, not
-    strings; strings are tracked solely to avoid false positives.
-    """
-    ranges: list[tuple[int, int]] = []
-    comment_start: int | None = None
-    prev_in_comment = False
-    closing_end: int | None = None
-    depth = 0
-    for idx, ch, in_comment, _in_str in _rocq_scan(text):
-        if in_comment and not prev_in_comment:
-            comment_start = idx
-            closing_end = None
-            depth = 1
-        elif not in_comment and prev_in_comment and comment_start is not None:
-            # The '*' of '*)' is yielded with in_comment=True, and the
-            # scanner skips past both chars (i += 2).  So idx here is the
-            # first character AFTER the closing ')'.
-            ranges.append((comment_start, idx))
-            comment_start = None
-            closing_end = None
-            depth = 0
-        elif in_comment and prev_in_comment and not _in_str:
-            # Track nesting depth for nested (* ... *) inside a comment.
-            # Skip depth changes for (* / *) inside string literals within
-            # a comment, matching the scanner's behavior.
-            if ch == "(" and idx + 1 < len(text) and text[idx + 1] == "*":
-                depth += 1
-            elif ch == "*" and idx + 1 < len(text) and text[idx + 1] == ")":
-                depth -= 1
-        # Track position of closing *) for end-of-text handling, but ONLY
-        # when the *) actually closes the outermost comment (depth -> 0).
-        # For nested comments, an inner *) reduces depth but should not
-        # set closing_end since the outer comment is still open.
-        if (
-            in_comment
-            and not _in_str
-            and ch == "*"
-            and idx + 1 < len(text)
-            and text[idx + 1] == ")"
-            and depth == 0
-        ):
-            closing_end = idx + 2
-        prev_in_comment = in_comment
-    # Comment that closes at the very end of text — no subsequent char
-    # triggers the transition above.
-    if prev_in_comment and comment_start is not None and closing_end is not None:
-        ranges.append((comment_start, closing_end))
-    return ranges
 
 
 def _find_sentence_end(text: str) -> int | None:

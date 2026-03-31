@@ -551,7 +551,6 @@ class TestStepMultiIntegration:
             # Execute intros to get a state with a goal
             r2 = await run_check(
                 body="intros.",
-                workspace=str(workspace),
                 timeout=30.0,
                 lifespan_state=state,
                 from_state=start_state_id,
@@ -583,7 +582,6 @@ class TestStepMultiIntegration:
             # Commit the winning tactic via run_check
             r4 = await run_check(
                 body="reflexivity.",
-                workspace=str(workspace),
                 timeout=30.0,
                 lifespan_state=state,
                 from_state=intros_state_id,

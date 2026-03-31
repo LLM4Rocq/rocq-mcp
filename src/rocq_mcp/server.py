@@ -394,6 +394,7 @@ async def _run_with_pet(
     description: str,
     on_timeout: Callable[[], None] | None = None,
     timeout: float | None = None,
+    partial_state: dict[str, Any] | None = None,
 ) -> Any:
     """Run *fn(pet)* with the pet client, handling lock/semaphore/timeout/errors.
 
@@ -413,6 +414,10 @@ async def _run_with_pet(
 
     When pet crashes (timeout, broken pipe), the return dict includes
     ``"pet_restarted": True`` so callers can decide whether to retry.
+
+    If *partial_state* is given (a mutable dict), *fn* can populate it
+    with intermediate results.  On timeout or error the dict contents
+    are merged into the error response so partial work is not lost.
     """
     try:
         from pytanque import PetanqueError
@@ -455,11 +460,14 @@ async def _run_with_pet(
             await _force_release_pet_lock()
             if on_timeout:
                 on_timeout()
-            return {
+            resp = {
                 "success": False,
                 "error": f"{description} timed out after {_timeout}s.",
                 "pet_restarted": True,
             }
+            if partial_state:
+                resp.update(partial_state)
+            return resp
         except _PetLockTimeout:
             return {
                 "success": False,
@@ -469,22 +477,28 @@ async def _run_with_pet(
             if not _pet_alive(lifespan_state.get("pet_client")):
                 _invalidate_pet(lifespan_state)
                 await _force_release_pet_lock()
-                return {
+                resp = {
                     "success": False,
                     "error": f"Pet process died: {e.message}",
                     "pet_restarted": True,
                 }
+                if partial_state:
+                    resp.update(partial_state)
+                return resp
             return {"success": False, "error": e.message}
         except (BrokenPipeError, ConnectionError) as e:
             _invalidate_pet(lifespan_state)
             await _force_release_pet_lock()
             if on_timeout:
                 on_timeout()
-            return {
+            resp = {
                 "success": False,
                 "error": f"Pet process died: {e}",
                 "pet_restarted": True,
             }
+            if partial_state:
+                resp.update(partial_state)
+            return resp
         except FileNotFoundError:
             return {
                 "success": False,
@@ -953,19 +967,15 @@ async def rocq_check(
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
         timeout: Timeout in seconds (default: ROCQ_PET_TIMEOUT env var).
     """
-    workspace = workspace or ROCQ_WORKSPACE
+    # Note: workspace param is accepted for API compatibility but unused;
+    # the active workspace comes from the state entry set by rocq_start.
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_PET_TIMEOUT
-
-    err = _validate_workspace(workspace)
-    if err:
-        return {"success": False, "error": err}
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
 
     return await run_check(
         body=body,
-        workspace=workspace,
         timeout=float(timeout),
         lifespan_state=ctx.lifespan_context,
         from_state=from_state,

@@ -528,7 +528,6 @@ class TestQueryStepWorkflow:
             # Execute first tactic
             r2 = await run_check(
                 body="intros.",
-                workspace=str(workspace),
                 timeout=30.0,
                 lifespan_state=state,
                 from_state=start_id,
@@ -540,7 +539,6 @@ class TestQueryStepWorkflow:
             # Execute second tactic to finish proof
             r3 = await run_check(
                 body="reflexivity.",
-                workspace=str(workspace),
                 timeout=30.0,
                 lifespan_state=state,
                 from_state=intros_id,
@@ -580,7 +578,6 @@ class TestQueryStepWorkflow:
             # Trigger timeout via looping tactic -- kills pet
             r1 = await run_check(
                 body="loop.",
-                workspace=str(workspace),
                 timeout=1.0,
                 lifespan_state=state,
                 from_state=start_id,

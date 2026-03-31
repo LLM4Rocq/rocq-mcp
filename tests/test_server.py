@@ -836,7 +836,6 @@ class TestRunCheckBodySizeLimit:
 
         result = await run_check(
             body=big_body,
-            workspace="/tmp",
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,
@@ -1099,7 +1098,6 @@ class TestRunCheckBodyWithinLimit:
         small_body = "x" * 100
         result = await run_check(
             body=small_body,
-            workspace="/tmp",
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,
@@ -1127,7 +1125,6 @@ class TestRunCheckBodyWithinLimit:
         exact_body = "x" * 200
         result = await run_check(
             body=exact_body,
-            workspace="/tmp",
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,
@@ -1155,7 +1152,6 @@ class TestRunCheckBodyWithinLimit:
         over_body = "x" * 201
         result = await run_check(
             body=over_body,
-            workspace="/tmp",
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=root,

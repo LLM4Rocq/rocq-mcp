@@ -210,7 +210,6 @@ class TestStalenessInRunCheck:
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(
                 body="exact I.",
-                workspace="/tmp",
                 timeout=30.0,
                 lifespan_state=lifespan_state,
                 from_state=self._state_id,
@@ -249,7 +248,6 @@ class TestStalenessInRunCheck:
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(
                 body="bad_tactic.",
-                workspace="/tmp",
                 timeout=30.0,
                 lifespan_state=lifespan_state,
                 from_state=self._state_id,
@@ -300,7 +298,6 @@ class TestStalenessInRunCheck:
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(
                 body="exact I.",
-                workspace=str(tmp_path),
                 timeout=30.0,
                 lifespan_state=lifespan_state,
                 from_state=fresh_id,

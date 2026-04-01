@@ -9,7 +9,7 @@ An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover
 ## Prerequisites
 
 - **Rocq / Coq** -- `coqc` must be on your `PATH` (needed by all tools). If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). Otherwise it defaults to `-Q <workspace> Test`.
-- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile and verify tools still work.
+- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile and verify tools still work.
 - **Python 3.11+**
 
 ## Installation
@@ -20,7 +20,7 @@ Using [uv](https://docs.astral.sh/uv/):
 # Core (compile + verify tools only)
 uv pip install -e .
 
-# With interactive pytanque support (all 8 tools)
+# With interactive pytanque support (all 11 tools)
 uv pip install -e ".[interactive]"
 ```
 
@@ -38,7 +38,7 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes ten MCP tools:
+The server exposes eleven MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
@@ -52,8 +52,8 @@ The server exposes ten MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Supports `Print Assumptions` for axiom checking. Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
-| **`rocq_assumptions`** | Check what axioms a theorem depends on. Wraps `Print Assumptions` with classification: returns `"closed"` (no axioms), `"standard_only"` (classical logic, Reals, etc.), or `"suspicious"` (unproved assumptions). |
+| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Two context modes: **preamble** (import commands as a string) or **file** (a `.v` file path whose definitions are in scope). Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
+| **`rocq_assumptions`** | Check what axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns `"closed"` (no axioms), `"standard_only"` (classical logic, Reals, etc.), or `"suspicious"` (unproved assumptions). |
 | **`rocq_start`** | Start an interactive proof session. Three modes: by theorem name, by error position, or from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. |
 | **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. Includes `stale_warning` if the source file was modified since session start. |
 | **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
@@ -85,7 +85,7 @@ The verification tool (`rocq_verify`) uses defense in depth with three verificat
 
 2. **Phase 2 -- Shared-defs template.** For problems with Inductive/Record/Definition types, type definitions are placed outside Module M to avoid nominal typing mismatches, while the proof stays inside the sandbox. Uses pytanque's `toc` to extract problem structure. Falls back from Phase 1 when type incompatibilities are detected.
 
-3. **Phase 3 -- Direct verification.** When Phase 1 times out, the proof is compiled standalone (no Module M), and correctness is verified by comparing `Check <name>.` output against the problem statement's expected type after normalization. Additional security checks compensate for the lack of a sandbox (see below).
+3. **Phase 3 -- Direct verification.** When Phase 1 or Phase 2 times out or fails, the proof is compiled standalone (no Module M) with the full original timeout budget. Correctness is verified by comparing `Check <name>.` output against the problem statement's expected type after normalization. Additional security checks compensate for the lack of a sandbox (see below). This phase handles compute-heavy proofs that are too slow under Module M wrapping.
 
 ### Layer 1: Module M sandbox (Phases 1 & 2)
 
@@ -118,18 +118,19 @@ Printing flags (`Set Printing All`, `Set Printing Universes`, `Set Printing Widt
 
 ### Phase 3 security checks
 
-Without the Module M sandbox, Phase 3 applies additional static checks to the proof source:
+Without the Module M sandbox, Phase 3 applies additional checks to compensate:
 
-- **Core type shadowing** -- Redefining core types (`nat`, `bool`, `Prop`, `eq`, etc.) is rejected.
-- **Module name shadowing** -- Defining modules with stdlib-like names (e.g., `Module ClassicalDedekindReals`) is rejected.
-- **User axiom extraction** -- `Axiom`, `Parameter`, `Conjecture`, `Hypothesis`, `Variable`, and `Context` declarations are parsed; their names are cross-checked against `Print Assumptions` output to detect axiom spoofing.
-- **Problem definition comparison** -- The problem's definition sentence is extracted and compared to the proof's to detect redefinition attacks.
-- **Type comparison** -- The proven type (via `Check`) is normalized and compared to the expected type from the problem statement.
+- **Forbidden commands** -- Same scanning as Phases 1 & 2 (Layer 2).
+- **Incomplete proof rejection** -- `Admitted`, `admit`, and `give_up` in the proof source are rejected outright.
+- **Axiom-introducing commands blocked** -- `Axiom`, `Parameter`, and `Conjecture` declarations are rejected. (`Variable` and `Hypothesis` are allowed since they are section-local and become parameters after `End Section`, not global axioms.)
+- **Print Assumptions check** -- Same axiom whitelist as Phases 1 & 2 (Layer 3). However, without the `M.` prefix from Module M, user-declared axioms could potentially spoof whitelisted names.
+- **Type comparison** -- The proven type (via `Check @<name>.` with `Set Printing All`) is normalized and compared to the expected type from the problem statement. Universe annotations are stripped before comparison.
 
 **Known limitations of Phase 3:**
 
-- Notation/scope redefinition before identically-texted definitions can change kernel semantics without being detected by text comparison.
-- Stdlib function shadowing (redefining functions called by the problem's definition) is not fully covered.
+- Without Module M, type redefinition attacks are not caught (e.g., redefining `nat` as `bool` then proving a trivially true statement).
+- Notation/scope redefinition before identically-texted definitions can change kernel semantics without being detected by type comparison.
+- Stdlib function shadowing (redefining functions called by the problem's definition) is not covered.
 
 The `verification_method` field in the result indicates which phase was used (`"module_m"`, `"shared_defs"`, or `"direct"`).
 
@@ -179,14 +180,14 @@ Add to your MCP client configuration (e.g., Claude Desktop, Claude Code):
 uv run pytest
 ```
 
-Tests for pytanque-based tools (`rocq_query`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`) require `pet` to be installed. Integration tests will be skipped automatically if it is not available.
+Tests for pytanque-based tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`) require `pet` to be installed. Integration tests will be skipped automatically if it is not available.
 
 ## Project Structure
 
 ```
 src/rocq_mcp/
   __init__.py       Package init
-  server.py         MCP server, 10 tool definitions, pet subprocess management
+  server.py         MCP server, 11 tool definitions, pet subprocess management
   compile.py        coqc-based tools: compile, compile_file, verify
   interactive.py    pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
   verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing

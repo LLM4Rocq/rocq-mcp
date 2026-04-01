@@ -163,7 +163,7 @@ class TestCompileFileDirectory:
         subdir.mkdir(exist_ok=True)
         result = run_compile_file(file="subdir", workspace=str(workspace), timeout=60)
         assert result["success"] is False
-        assert "not a file" in result["error"].lower()
+        assert "not found" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------

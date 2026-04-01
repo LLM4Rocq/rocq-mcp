@@ -172,7 +172,9 @@ def _get_or_create_import_state(
         lifespan_state["current_workspace"] = None  # force re-set
     _server._set_workspace_if_needed(pet, workspace, lifespan_state)
 
-    end_line = cache_content.count("\n")
+    # Position past the last line so all imports are in scope.
+    # +1 ensures consistency with _get_file_end_state line counting.
+    end_line = cache_content.count("\n") + 1
     state = pet.get_state_at_pos(str(cache_file), end_line, 0)
 
     _import_cache[imports_key] = _CachedImportContext(
@@ -187,6 +189,48 @@ def _get_or_create_import_state(
         del _import_cache[next(iter(_import_cache))]
 
     return state
+
+
+def _get_file_end_state(
+    pet: Any,
+    file: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> Any:
+    """Get pytanque State at end of a ``.v`` file (all definitions in scope).
+
+    Resolves the file path, validates workspace containment, sets the
+    workspace, counts lines, and calls ``pet.get_state_at_pos`` past the
+    last line.  The returned state has all imports, definitions, and
+    notations from the file in scope.
+
+    This is used by tools that accept a ``file`` parameter as an
+    alternative to ``preamble`` (e.g., ``rocq_query``, ``rocq_assumptions``).
+
+    Forces a workspace re-set so coq-lsp re-indexes modified files.
+
+    Raises:
+        ValueError: If the file path is outside the workspace.
+        FileNotFoundError: If the file does not exist or is not readable.
+    """
+    resolved = _server._resolve_file_in_workspace(file, workspace)
+
+    try:
+        content = Path(resolved).read_text()
+    except PermissionError:
+        raise FileNotFoundError(f"File not accessible: {file}")
+
+    # Force workspace re-set so coq-lsp re-indexes any file changes.
+    # Unlike preamble mode (which has a content-hash cache), file mode
+    # has no way to know if the file changed since the last call.
+    lifespan_state["current_workspace"] = None
+    _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+
+    # Position past the last line so all definitions are in scope.
+    # +1 ensures files without a trailing newline still capture the last line.
+    end_line = content.count("\n") + 1
+
+    return pet.get_state_at_pos(resolved, end_line, 0)
 
 
 def _invalidate_import_cache() -> None:
@@ -356,28 +400,46 @@ async def run_query(
     preamble: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    file: str = "",
     max_results: int | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context).
 
-    Uses the import cache for preamble commands — repeated queries with the
-    same imports skip the import phase entirely.
+    Two modes (mutually exclusive):
+    - **preamble mode**: import commands set up the environment (cached).
+    - **file mode**: a ``.v`` file provides the full environment.
+
+    When *file* is given, uses :func:`_get_file_end_state` to obtain a
+    state at the end of the file where all definitions are in scope.
     """
+    if file and preamble.strip():
+        return {
+            "success": False,
+            "error": "Provide either 'file' or 'preamble', not both.",
+        }
+
     forbidden = _check_forbidden_commands(command)
     if forbidden:
         return {"success": False, "error": forbidden}
-    forbidden = _check_forbidden_commands(preamble)
-    if forbidden:
-        return {"success": False, "error": forbidden}
+    if not file:
+        forbidden = _check_forbidden_commands(preamble)
+        if forbidden:
+            return {"success": False, "error": forbidden}
 
     def _do_query(pet: Any) -> dict[str, Any]:
-        preamble_text = preamble.strip()
-        preamble_cmds = _split_rocq_sentences(preamble_text) if preamble_text else []
-
-        # Get a usable state — cached if preamble was seen before
-        state = _get_or_create_import_state(
-            pet, workspace, preamble_cmds, lifespan_state
-        )
+        if file:
+            try:
+                state = _get_file_end_state(pet, file, workspace, lifespan_state)
+            except (ValueError, FileNotFoundError) as e:
+                return {"success": False, "error": str(e)}
+        else:
+            preamble_text = preamble.strip()
+            preamble_cmds = (
+                _split_rocq_sentences(preamble_text) if preamble_text else []
+            )
+            state = _get_or_create_import_state(
+                pet, workspace, preamble_cmds, lifespan_state
+            )
 
         cmd = command.strip()
         if not cmd.endswith("."):
@@ -417,16 +479,25 @@ async def run_query(
 
 async def run_assumptions(
     name: str,
-    preamble: str,
+    file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_assumptions (testable without FastMCP Context).
 
-    Runs ``Print Assumptions <name>.`` via :func:`run_query` and classifies
-    the result using :func:`verify.parse_and_classify_assumptions`.
+    Runs ``Print Assumptions <name>.`` via :func:`run_query` in file mode
+    and classifies the result using :func:`verify.parse_and_classify_assumptions`.
+
+    The *file* parameter is required — it provides the ``.v`` file where the
+    theorem is defined, so the query runs in a context where all definitions
+    from that file are in scope.  This eliminates shadowing ambiguity that
+    plagued the old preamble-based approach.
     """
     from rocq_mcp.verify import parse_and_classify_assumptions
+
+    # Validate file parameter
+    if not file or not file.strip():
+        return {"success": False, "error": "File parameter is required."}
 
     # Validate: non-empty, valid Rocq identifier or qualified name
     clean_name = name.strip() if name else ""
@@ -443,9 +514,10 @@ async def run_assumptions(
 
     query_result = await run_query(
         command=f"Print Assumptions {clean_name}.",
-        preamble=preamble,
+        preamble="",
         workspace=workspace,
         lifespan_state=lifespan_state,
+        file=file,
     )
     if not query_result.get("success"):
         return query_result
@@ -504,11 +576,11 @@ async def run_toc(
     lifespan_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Core implementation of rocq_toc (testable without FastMCP Context)."""
-    # Path traversal check (before entering thread)
-    file_path = str((Path(workspace).resolve() / file).resolve())
-    ws_resolved = str(Path(workspace).resolve())
-    if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
-        return {"success": False, "error": "File path must be within workspace."}
+    # Path traversal + existence check (before entering thread)
+    try:
+        file_path = _server._resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError) as e:
+        return {"success": False, "error": str(e)}
 
     def _do_toc(pet: Any) -> dict[str, Any]:
         _server._set_workspace_if_needed(pet, workspace, lifespan_state)
@@ -665,12 +737,13 @@ async def run_start(
                 "error": "line and character must be in range [0, 100000].",
             }
 
-    # Path traversal check
+    # Path traversal + existence check (early validation before entering thread)
+    resolved_file: str = ""
     if _start_by_theorem or _start_by_pos:
-        file_path = str((Path(workspace).resolve() / file).resolve())
-        ws_resolved = str(Path(workspace).resolve())
-        if not file_path.startswith(ws_resolved + os.sep) and file_path != ws_resolved:
-            return {"success": False, "error": "File path must be within workspace."}
+        try:
+            resolved_file = _server._resolve_file_in_workspace(file, workspace)
+        except (ValueError, FileNotFoundError) as e:
+            return {"success": False, "error": str(e)}
 
     # Forbidden commands check for preamble
     if _start_by_preamble:
@@ -680,7 +753,6 @@ async def run_start(
 
     def _execute(pet: Any) -> dict[str, Any]:
         if _start_by_theorem:
-            resolved_file = str((Path(workspace).resolve() / file).resolve())
             _server._set_workspace_if_needed(pet, workspace, lifespan_state)
             state = pet.start(resolved_file, theorem)
             # Capture mtime after pet.start to avoid TOCTOU gap
@@ -709,7 +781,6 @@ async def run_start(
                 "proof_finished": getattr(state, "proof_finished", False),
             }
         elif _start_by_pos:
-            resolved_file = str((Path(workspace).resolve() / file).resolve())
             _server._set_workspace_if_needed(pet, workspace, lifespan_state)
             state = pet.get_state_at_pos(resolved_file, line, character)
             # Capture mtime after get_state_at_pos to avoid TOCTOU gap

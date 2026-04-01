@@ -436,22 +436,13 @@ def run_compile_file(
     Compiles an existing .v file on disk.  Validates that the file is within
     the workspace, checks for forbidden commands, and returns structured errors.
     """
-    ws = Path(workspace).resolve()
-    file_path = str((ws / file).resolve())
-    ws_str = str(ws)
-
-    # Path containment check
-    if not file_path.startswith(ws_str + os.sep) and file_path != ws_str:
-        return {"success": False, "error": "File path must be within workspace."}
-
-    fp = Path(file_path)
-    if not fp.exists():
-        return {"success": False, "error": f"File not found: {file}"}
-    if not fp.is_file():
-        return {"success": False, "error": f"Not a file: {file}"}
+    try:
+        file_path = _server._resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError) as e:
+        return {"success": False, "error": str(e)}
 
     try:
-        source = fp.read_text()
+        source = Path(file_path).read_text()
     except OSError as e:
         return {"success": False, "error": f"Cannot read file: {e}"}
 

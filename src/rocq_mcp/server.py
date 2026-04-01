@@ -134,6 +134,24 @@ def _check_path_containment(ws: Path, dir_arg: str) -> str | None:
     return None
 
 
+def _resolve_file_in_workspace(file: str, workspace: str) -> str:
+    """Resolve *file* relative to *workspace* and verify containment.
+
+    Returns the resolved absolute path as a string.
+
+    Raises:
+        ValueError: If the resolved path escapes the workspace.
+        FileNotFoundError: If the file does not exist on disk.
+    """
+    resolved = str((Path(workspace).resolve() / file).resolve())
+    ws_resolved = str(Path(workspace).resolve())
+    if not resolved.startswith(ws_resolved + os.sep) and resolved != ws_resolved:
+        raise ValueError("File path must be within workspace.")
+    if not Path(resolved).is_file():
+        raise FileNotFoundError(f"File not found: {file}")
+    return resolved
+
+
 def _parse_project_flags(ws: Path) -> list[str]:
     """Parse _RocqProject or _CoqProject and return coqc flags.
 
@@ -678,6 +696,7 @@ async def rocq_verify(
 async def rocq_query(
     command: str,
     preamble: str = "",
+    file: str = "",
     workspace: str = "",
     max_results: int | None = None,
     ctx: Context = None,
@@ -689,12 +708,19 @@ async def rocq_query(
       command="Check Nat.add."               — check a term's type
       command="Print Nat.add."               — see a definition
       command="About plus."                  — summary of a name
-      command="Print Assumptions my_thm."    — check axiom dependencies
+
+    Two context modes (mutually exclusive):
+    - **preamble mode** (default): pass import commands as a string.
+    - **file mode**: pass a ``.v`` file path; the query runs with all
+      definitions from that file in scope.  More reliable than preamble
+      because it captures ``Open Scope``, ``Set`` options, etc.
 
     Args:
         command: The Rocq query command to execute.
         preamble: Optional import lines needed for the query context
                   (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
+        file: Path to a .v file (relative to workspace) whose definitions
+            should be in scope. Mutually exclusive with preamble.
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
         max_results: Optional maximum number of results to return.
             Useful for broad Search patterns. If omitted, all results are
@@ -714,6 +740,7 @@ async def rocq_query(
         preamble=preamble,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
+        file=file,
         max_results=max_results,
     )
 
@@ -726,7 +753,7 @@ async def rocq_query(
 @mcp.tool
 async def rocq_assumptions(
     name: str,
-    preamble: str = "",
+    file: str,
     workspace: str = "",
     ctx: Context = None,
 ) -> dict[str, Any]:
@@ -737,12 +764,14 @@ async def rocq_assumptions(
     uses only standard axioms (classical logic, Reals, etc.), or has
     suspicious/unproved assumptions.
 
-    Requires the theorem to be defined in the environment set up by preamble.
-    For theorems in a .v file, use the file's imports as preamble.
+    The theorem must be defined in the given file.  The tool reads the file
+    to set up the full Rocq environment (imports, scopes, definitions),
+    ensuring the correct theorem is resolved even when names are reused
+    across sections.
 
     Args:
         name: The theorem/lemma name to check (e.g., "add_comm").
-        preamble: Import lines for context (e.g., "From Coq Require Import Arith.").
+        file: Path to the .v file where the theorem is defined (relative to workspace).
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
     """
     workspace = workspace or ROCQ_WORKSPACE
@@ -756,7 +785,7 @@ async def rocq_assumptions(
 
     return await run_assumptions(
         name=name,
-        preamble=preamble,
+        file=file,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
     )

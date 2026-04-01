@@ -871,6 +871,12 @@ async def rocq_start(
        (e.g., from rocq_compile's error_positions field)
     3. From imports: preamble — set up import context only (for rocq_check)
 
+    **Important:** The interactive session reads the file at start time and
+    does not track subsequent edits. If another process or agent modifies the
+    file while a session is active, the proof state becomes stale and tactics
+    may fail or produce wrong results. To avoid this, work on a **copy** of
+    the file for interactive proving, or restart the session after edits.
+
     Args:
         file: Path to the .v file (relative to workspace).
         theorem: Name of the theorem to prove.
@@ -974,6 +980,10 @@ async def rocq_check(
     2. rocq_check(body="intros. simpl.") to advance
     3. If stuck: rocq_step_multi(tactics=[...]) to explore
     4. rocq_check(body="winning_tactic.") to commit
+
+    **Note:** If the underlying .v file is modified after rocq_start, the
+    session state becomes stale. A ``stale_warning`` field is returned when
+    this is detected. Restart the session with rocq_start after file edits.
 
     Args:
         body: Commands to execute (one or more Rocq sentences).

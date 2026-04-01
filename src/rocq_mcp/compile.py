@@ -896,13 +896,15 @@ def _run_phase1_module_m(
     if result["timed_out"]:
         # Timeout in Module M (common for compute-heavy proofs).
         # Skip Phase 2 (also Module M) and try Phase 3 (no Module M).
+        # Give Phase 3 the full original timeout — without Module M overhead
+        # the proof may compile much faster.
         return (
             _phase3_or_fallback(
                 proof,
                 problem_name,
                 problem_statement,
                 workspace,
-                _remaining_timeout(t0, timeout),
+                timeout,
                 fallback={
                     "verified": False,
                     "error": f"Verification timed out after {timeout}s.",
@@ -996,12 +998,13 @@ async def _run_phase2_shared_defs(
     result2 = _run_coqc(shared_source, workspace, _remaining_timeout(t0, timeout))
 
     if result2["timed_out"]:
+        # Give Phase 3 the full original timeout (no Module M overhead).
         return _phase3_or_fallback(
             proof,
             problem_name,
             problem_statement,
             workspace,
-            _remaining_timeout(t0, timeout),
+            timeout,
             fallback={
                 "verified": False,
                 "error": f"Verification (shared-defs) timed out after {timeout}s.",
@@ -1014,7 +1017,7 @@ async def _run_phase2_shared_defs(
             problem_name,
             problem_statement,
             workspace,
-            _remaining_timeout(t0, timeout),
+            timeout,
             phase1_failure,
         )
 

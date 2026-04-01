@@ -73,7 +73,10 @@ class TestGoalPathValidation:
             )
         )
         assert result["success"] is False
-        assert "not found" in result["error"].lower() or "no such" in result["error"].lower()
+        assert (
+            "not found" in result["error"].lower()
+            or "no such" in result["error"].lower()
+        )
 
     def test_line_out_of_range(self, tmp_path):
         lifespan_state = {"pet_timeout": 10}
@@ -324,9 +327,7 @@ class TestGoalIntegration:
         """Goal retrieval inside a proof returns non-empty goals."""
         test_file = workspace / "test_goal_inside.v"
         test_file.write_text(
-            "Theorem foo : forall n : nat, n = n.\n"
-            "Proof.\n"
-            "  intros n.\n"
+            "Theorem foo : forall n : nat, n = n.\n" "Proof.\n" "  intros n.\n"
         )
 
         result = await run_goal(
@@ -363,8 +364,7 @@ class TestGoalIntegration:
         """Goal after Qed returns empty goals."""
         test_file = workspace / "test_goal_qed.v"
         test_file.write_text(
-            "Theorem foo : True.\nProof. exact I. Qed.\n"
-            "Definition bar := 1.\n"
+            "Theorem foo : True.\nProof. exact I. Qed.\n" "Definition bar := 1.\n"
         )
 
         result = await run_goal(
@@ -400,7 +400,10 @@ class TestRocqGoalWrapper:
             ctx=None,
         )
         assert result["success"] is False
-        assert "context" in result["error"].lower() or "internal" in result["error"].lower()
+        assert (
+            "context" in result["error"].lower()
+            or "internal" in result["error"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_invalid_workspace(self):
@@ -438,10 +441,18 @@ class TestRocqGoalWrapper:
         mock_ctx = MagicMock()
         mock_ctx.lifespan_context = {"pet_client": None, "pet_timeout": 10}
 
-        expected = {"success": True, "goals": "", "proof_finished": False,
-                    "file": "test.v", "line": 5, "character": 3}
+        expected = {
+            "success": True,
+            "goals": "",
+            "proof_finished": False,
+            "file": "test.v",
+            "line": 5,
+            "character": 3,
+        }
 
-        with patch.object(srv, "run_goal", new_callable=AsyncMock, return_value=expected) as mock_run:
+        with patch.object(
+            srv, "run_goal", new_callable=AsyncMock, return_value=expected
+        ) as mock_run:
             result = await srv.rocq_goal(
                 file="test.v",
                 line=5,

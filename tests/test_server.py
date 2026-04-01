@@ -30,6 +30,7 @@ import pytest
 
 from rocq_mcp.server import (
     _force_release_pet_lock,
+    _merge_partial_state,
     _parse_project_flags,
     _PetLockTimeout,
     _run_with_pet,
@@ -1455,6 +1456,45 @@ class TestRunWithPetExceptionHandling:
             result = await _run_with_pet(fn, lifespan_state, "Test")
         assert result["success"] is False
         assert "pet binary not found" in result["error"]
+
+
+# =========================================================================
+# _merge_partial_state — safe merge helper
+# =========================================================================
+
+
+class TestMergePartialState:
+    """Tests for _merge_partial_state."""
+
+    def test_adds_new_keys(self):
+        resp = {"success": False, "error": "timeout"}
+        _merge_partial_state(resp, {"partial_results": [1, 2]})
+        assert resp["partial_results"] == [1, 2]
+
+    def test_does_not_overwrite_success(self):
+        """partial_state must not clobber the 'success' key."""
+        resp = {"success": False, "error": "timeout"}
+        _merge_partial_state(resp, {"success": True, "extra": "data"})
+        assert resp["success"] is False
+        assert resp["extra"] == "data"
+
+    def test_does_not_overwrite_error(self):
+        """partial_state must not clobber the 'error' key."""
+        resp = {"success": False, "error": "real error"}
+        _merge_partial_state(resp, {"error": "fake", "partial_results": []})
+        assert resp["error"] == "real error"
+        assert resp["partial_results"] == []
+
+    def test_does_not_overwrite_pet_restarted(self):
+        resp = {"success": False, "error": "died", "pet_restarted": True}
+        _merge_partial_state(resp, {"pet_restarted": False, "data": 42})
+        assert resp["pet_restarted"] is True
+        assert resp["data"] == 42
+
+    def test_empty_partial_state(self):
+        resp = {"success": False, "error": "timeout"}
+        _merge_partial_state(resp, {})
+        assert resp == {"success": False, "error": "timeout"}
 
 
 # =========================================================================

@@ -388,6 +388,17 @@ def _get_pet_semaphore() -> asyncio.Semaphore:
     return _pet_semaphore
 
 
+def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
+    """Merge *partial* into *resp* without overwriting control keys.
+
+    Keys like ``"success"``, ``"error"``, and ``"pet_restarted"`` are set by
+    the error handler and must not be clobbered by user-provided partial state.
+    """
+    for k, v in partial.items():
+        if k not in resp:
+            resp[k] = v
+
+
 async def _run_with_pet(
     fn: Callable[[Any], Any],
     lifespan_state: dict[str, Any],
@@ -466,7 +477,7 @@ async def _run_with_pet(
                 "pet_restarted": True,
             }
             if partial_state:
-                resp.update(partial_state)
+                _merge_partial_state(resp, partial_state)
             return resp
         except _PetLockTimeout:
             return {
@@ -483,7 +494,7 @@ async def _run_with_pet(
                     "pet_restarted": True,
                 }
                 if partial_state:
-                    resp.update(partial_state)
+                    _merge_partial_state(resp, partial_state)
                 return resp
             return {"success": False, "error": e.message}
         except (BrokenPipeError, ConnectionError) as e:
@@ -497,7 +508,7 @@ async def _run_with_pet(
                 "pet_restarted": True,
             }
             if partial_state:
-                resp.update(partial_state)
+                _merge_partial_state(resp, partial_state)
             return resp
         except FileNotFoundError:
             return {
@@ -505,7 +516,10 @@ async def _run_with_pet(
                 "error": "pet binary not found on PATH. Install coq-lsp.",
             }
         except (OSError, RuntimeError, ValueError, TypeError) as e:
-            return {"success": False, "error": f"Unexpected error: {e}"}
+            resp = {"success": False, "error": f"Unexpected error: {e}"}
+            if partial_state:
+                _merge_partial_state(resp, partial_state)
+            return resp
 
 
 # ---------------------------------------------------------------------------

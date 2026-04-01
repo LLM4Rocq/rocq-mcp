@@ -919,6 +919,22 @@ def build_direct_verification_source(proof: str, problem_name: str) -> str:
             "verification. Provide a complete proof without give_up."
         )
 
+    # Block axiom-introducing commands.  In Phase 1/2 these are harmless
+    # (Module M wrapping makes them visible to Print Assumptions), but in
+    # Phase 3 (direct compilation) a user-declared ``Axiom classic : False``
+    # would be whitelisted by _is_standard_axiom because "classic" is in
+    # _KNOWN_SAFE_AXIOMS.
+    #
+    # Note: Variable/Hypothesis are NOT blocked — they are section-local
+    # and become parameters after ``End Section``.  They don't persist as
+    # global axioms and are safe in Phase 3.
+    for kw in ("Axiom", "Parameter", "Conjecture"):
+        if re.search(rf"\b{kw}\b", neutralized):
+            raise ValueError(
+                f"Proof contains '{kw}' which is not allowed in direct verification. "
+                f"A complete proof must not introduce axioms or unproven assumptions."
+            )
+
     return (
         f"{proof}\n\n"
         f"Set Printing Width 120.\n"

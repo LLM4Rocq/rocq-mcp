@@ -21,7 +21,6 @@ Infrastructure:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 import re
@@ -39,11 +38,6 @@ from rocq_mcp.verify import _check_forbidden_commands
 # because _force_release_pet_lock can replace the global.  A bare
 # ``from server import _pet_lock`` would capture a stale reference.
 import rocq_mcp.server as _server
-
-# _PetLockTimeout is a class used in raise/except — direct import required.
-# Everything else is accessed via _server.X so that monkeypatching on
-# rocq_mcp.server is visible.
-from rocq_mcp.server import _PetLockTimeout
 
 # _split_rocq_sentences is in compile — import directly (no cycle).
 from rocq_mcp.compile import _split_rocq_sentences
@@ -840,6 +834,9 @@ async def run_check(
     _timeout = timeout if timeout > 0 else lifespan_state["pet_timeout"]
     is_single = len(commands) == 1
 
+    # Track progress so partial work survives an asyncio-level timeout.
+    partial_state: dict[str, Any] = {"commands_run": 0}
+
     def _execute(pet: Any) -> dict[str, Any]:
         try:
             from pytanque import PetanqueError
@@ -893,6 +890,8 @@ async def run_check(
                 )
                 prev_state_id = state_id
                 state = new_state
+                partial_state["commands_run"] = i + 1
+                partial_state["last_valid_state_id"] = state_id
             except PetanqueError as e:
                 # If pet died, re-raise so _run_with_pet detects it
                 # and returns pet_restarted=True to the client.
@@ -967,6 +966,7 @@ async def run_check(
         lifespan_state,
         "Check",
         timeout=float(hard_timeout),
+        partial_state=partial_state,
     )
 
 

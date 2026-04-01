@@ -45,6 +45,7 @@ from rocq_mcp.verify import (
     _parse_assumptions_raw,
     _SHARED_DEF_DETAILS,
     _strip_shared_defs,
+    _validate_rocq_identifier,
     build_direct_type_check_source,
     build_direct_verification_source,
     build_shared_defs_verification_source,
@@ -2683,7 +2684,8 @@ class TestTimeoutFallbackToPhase3:
             workspace=str(workspace),
         )
         assert result["verified"] is False
-        assert "cheat" in result.get("error", "").lower()
+        # Phase 3 now blocks Axiom keyword before compilation
+        assert "axiom" in result.get("error", "").lower()
 
     async def test_phase1_timeout_phase3_also_times_out(self, workspace, monkeypatch):
         """When Phase 1 and Phase 3 both timeout, return Phase 1 timeout error."""
@@ -2798,3 +2800,107 @@ class TestAdmittedBanInDirectVerification:
                 proof="Theorem t : True.\nProof. give_up. Qed.",
                 problem_name="t",
             )
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestAxiomBanInDirectVerification:
+    """Test that axiom-introducing commands are banned in Phase 3.
+
+    This prevents a bypass where ``Axiom classic : False`` would pass
+    verification because "classic" is in _KNOWN_SAFE_AXIOMS.
+    """
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["Axiom", "Parameter", "Conjecture"],
+    )
+    def test_axiom_keyword_rejected(self, keyword):
+        """Proofs containing axiom-introducing commands must be rejected."""
+        proof = f"{keyword} my_thing : False.\nTheorem t : True. Proof. exact I. Qed."
+        with pytest.raises(ValueError, match=keyword):
+            build_direct_verification_source(proof=proof, problem_name="t")
+
+    def test_axiom_whitelist_bypass_blocked(self):
+        """The specific attack: Axiom classic : False must be blocked."""
+        proof = "Axiom classic : False.\nTheorem t : True. Proof. exact I. Qed."
+        with pytest.raises(ValueError, match="Axiom"):
+            build_direct_verification_source(proof=proof, problem_name="t")
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["Axiom", "Parameter", "Conjecture"],
+    )
+    def test_axiom_keyword_in_comment_allowed(self, keyword):
+        """Axiom keywords inside comments must NOT trigger the ban."""
+        proof = f"(* {keyword} foo : False. *)\nTheorem t : True. Proof. exact I. Qed."
+        source = build_direct_verification_source(proof=proof, problem_name="t")
+        assert "Check @t." in source
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["Axiom", "Parameter", "Conjecture"],
+    )
+    def test_axiom_keyword_in_string_allowed(self, keyword):
+        """Axiom keywords inside strings must NOT trigger the ban."""
+        proof = (
+            f'Theorem t : True. Proof. idtac "{keyword} foo : False.". exact I. Qed.'
+        )
+        source = build_direct_verification_source(proof=proof, problem_name="t")
+        assert "Check @t." in source
+
+    def test_variable_hypothesis_allowed(self):
+        """Variable/Hypothesis are section-local and allowed in Phase 3."""
+        proof = (
+            "Section Foo.\n"
+            "Variable A : Type.\n"
+            "Hypothesis H : True.\n"
+            "Theorem t : True. Proof. exact H. Qed.\n"
+            "End Foo.\n"
+        )
+        source = build_direct_verification_source(proof=proof, problem_name="t")
+        assert "Check @t." in source
+
+
+class TestValidateRocqIdentifier:
+    """Tests for _validate_rocq_identifier."""
+
+    def test_simple_identifier(self):
+        """Simple identifiers should pass."""
+        _validate_rocq_identifier("foo")
+        _validate_rocq_identifier("Bar")
+        _validate_rocq_identifier("_x")
+
+    def test_identifier_with_primes(self):
+        """Identifiers with primes (tick marks) should pass."""
+        _validate_rocq_identifier("x'")
+        _validate_rocq_identifier("foo''")
+
+    def test_identifier_with_digits(self):
+        """Identifiers with digits should pass."""
+        _validate_rocq_identifier("x1")
+        _validate_rocq_identifier("foo_bar_42")
+
+    def test_empty_string_rejected(self):
+        """Empty string is not a valid identifier."""
+        with pytest.raises(ValueError, match="must be a valid Rocq identifier"):
+            _validate_rocq_identifier("")
+
+    def test_starts_with_digit_rejected(self):
+        """Identifiers starting with digits are invalid."""
+        with pytest.raises(ValueError, match="must be a valid Rocq identifier"):
+            _validate_rocq_identifier("42foo")
+
+    def test_contains_spaces_rejected(self):
+        """Identifiers with spaces are invalid."""
+        with pytest.raises(ValueError, match="must be a valid Rocq identifier"):
+            _validate_rocq_identifier("foo bar")
+
+    def test_contains_dots_rejected(self):
+        """Qualified names (with dots) are not simple identifiers."""
+        with pytest.raises(ValueError, match="must be a valid Rocq identifier"):
+            _validate_rocq_identifier("Foo.bar")
+
+    def test_custom_label(self):
+        """Custom label should appear in error message."""
+        with pytest.raises(ValueError, match="theorem_name"):
+            _validate_rocq_identifier("123", label="theorem_name")

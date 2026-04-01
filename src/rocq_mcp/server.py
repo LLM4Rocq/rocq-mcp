@@ -554,6 +554,7 @@ from rocq_mcp.interactive import (  # noqa: E402
     run_check,
     run_step_multi,
     run_toc,
+    run_goal,
     run_notations,
 )
 
@@ -825,6 +826,51 @@ async def rocq_toc(
 
     return await run_toc(
         file=file,
+        workspace=workspace,
+        lifespan_state=ctx.lifespan_context,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_goal
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def rocq_goal(
+    file: str,
+    line: int,
+    character: int,
+    workspace: str = "",
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Get the proof goal at a specific position in a Rocq file.
+
+    Returns the current goal(s) at the given file position without
+    creating an interactive session.  Useful for inspecting the proof
+    state at any point in a file.
+
+    Does NOT require a rocq_start session.
+
+    Args:
+        file: Path to the .v file (relative to workspace).
+        line: 0-based line number (LSP convention).
+        character: 0-based character offset (LSP convention).
+        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+    """
+    workspace = workspace or ROCQ_WORKSPACE
+
+    err = _validate_workspace(workspace)
+    if err:
+        return {"success": False, "error": err}
+
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+
+    return await run_goal(
+        file=file,
+        line=line,
+        character=character,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
     )

@@ -608,6 +608,58 @@ async def run_toc(
 
 
 # ---------------------------------------------------------------------------
+# Tool: rocq_goal
+# ---------------------------------------------------------------------------
+
+
+async def run_goal(
+    file: str,
+    line: int,
+    character: int,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Core implementation of rocq_goal (testable without FastMCP Context).
+
+    Returns the proof goal at a given file position without creating a session.
+    """
+    # Validate line/character bounds (same as run_start position mode)
+    if not (0 <= line <= 100000) or not (0 <= character <= 100000):
+        return {
+            "success": False,
+            "error": "line and character must be in range [0, 100000].",
+        }
+
+    # Path traversal + existence check (before entering thread)
+    try:
+        resolved_file = _server._resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError) as e:
+        return {"success": False, "error": str(e)}
+
+    def _do_goal(pet: Any) -> dict[str, Any]:
+        # Force workspace re-set so coq-lsp re-indexes the file
+        lifespan_state["current_workspace"] = None
+        _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+
+        state = pet.get_state_at_pos(resolved_file, line, character)
+        goals = _try_get_goals(pet, state) or ""
+        return {
+            "success": True,
+            "goals": goals,
+            "proof_finished": getattr(state, "proof_finished", False),
+            "file": file,
+            "line": line,
+            "character": character,
+        }
+
+    return await _server._run_with_pet(
+        _do_goal,
+        lifespan_state,
+        "Goal request",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: rocq_notations
 # ---------------------------------------------------------------------------
 

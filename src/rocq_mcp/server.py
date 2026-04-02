@@ -888,6 +888,7 @@ async def rocq_start(
     line: int | None = None,
     character: int | None = None,
     preamble: str = "",
+    force_restart: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Start an interactive proof session — see goals, explore tactics.
@@ -917,6 +918,10 @@ async def rocq_start(
         line: 0-based line number for position-based start.
         character: 0-based character offset for position-based start.
         preamble: Import commands for preamble mode (e.g., "Require Import Lia.").
+        force_restart: If True, kill the current PET process and clear all
+            cached state before starting.  Use when PET is alive but in a
+            bad state (e.g., coq-lsp indexing corruption).  You rarely need
+            this — PET auto-restarts on crash/timeout.  Default: False.
     """
     workspace = workspace or ROCQ_WORKSPACE
 
@@ -935,6 +940,7 @@ async def rocq_start(
         line=line,
         character=character,
         preamble=preamble,
+        force_restart=force_restart,
     )
 
 

@@ -704,6 +704,7 @@ async def run_start(
     line: int | None = None,
     character: int | None = None,
     preamble: str = "",
+    force_restart: bool = False,
 ) -> dict[str, Any]:
     """Open a proof context and return a state_id.
 
@@ -711,6 +712,9 @@ async def run_start(
     1. By theorem: file + theorem -> pet.start()
     2. By position: file + line + character -> pet.get_state_at_pos()
     3. From imports: preamble -> _get_or_create_import_state()
+
+    If force_restart is True, kill the current PET process and clear
+    all cached state before starting the new session.
     """
     # Mode detection
     _start_by_theorem = bool(file and theorem)
@@ -831,6 +835,9 @@ async def run_start(
                 "theorem": "<preamble>",
                 "proof_finished": getattr(import_state, "proof_finished", False),
             }
+
+    if force_restart:
+        _server._invalidate_pet(lifespan_state)
 
     return await _server._run_with_pet(
         _execute,

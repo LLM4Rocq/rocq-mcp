@@ -287,12 +287,8 @@ class TestStartEdgeCases:
 # ---------------------------------------------------------------------------
 
 
-class TestStartProofFinished:
-    """Test that rocq_start includes proof_finished in response.
-
-    This is a mock-based test that does not require pet, so we override
-    the module-level pytestmark skip.
-    """
+class _MockPetBase:
+    """Shared fixtures for mock-based rocq_start tests (no real pet needed)."""
 
     # Override module-level skip — this class uses mocks, not real pet
     pytestmark = []
@@ -328,9 +324,17 @@ class TestStartProofFinished:
         yield
         sys.modules.pop("pytanque", None)
 
+
+class TestStartProofFinished(_MockPetBase):
+    """Test that rocq_start includes proof_finished in response.
+
+    This is a mock-based test that does not require pet, so we override
+    the module-level pytestmark skip.
+    """
+
     @pytest.mark.asyncio
-    async def test_start_theorem_includes_proof_finished(self):
-        """rocq_start in theorem mode should include proof_finished."""
+    async def test_start_theorem_proof_not_finished(self):
+        """rocq_start in theorem mode: proof_finished=False when proof is open."""
         import os
         import tempfile
         from types import SimpleNamespace
@@ -367,12 +371,52 @@ class TestStartProofFinished:
                 )
 
         assert result["success"] is True
-        assert "proof_finished" in result
         assert result["proof_finished"] is False
 
     @pytest.mark.asyncio
-    async def test_start_position_includes_proof_finished(self):
-        """rocq_start in position mode should include proof_finished."""
+    async def test_start_theorem_proof_finished(self):
+        """rocq_start in theorem mode: proof_finished=True after Qed."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=True, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.start.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True. Proof. exact I. Qed.\n")
+
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                )
+
+        assert result["success"] is True
+        assert result["proof_finished"] is True
+
+    @pytest.mark.asyncio
+    async def test_start_position_proof_not_finished(self):
+        """rocq_start in position mode: proof_finished=False mid-proof."""
         import os
         import tempfile
         from types import SimpleNamespace
@@ -411,8 +455,50 @@ class TestStartProofFinished:
                 )
 
         assert result["success"] is True
-        assert "proof_finished" in result
         assert result["proof_finished"] is False
+
+    @pytest.mark.asyncio
+    async def test_start_position_proof_finished(self):
+        """rocq_start in position mode: proof_finished=True after Qed."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=True, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.get_state_at_pos.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True.\nProof. exact I. Qed.\n")
+
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    line=1,
+                    character=15,
+                )
+
+        assert result["success"] is True
+        assert result["proof_finished"] is True
 
     @pytest.mark.asyncio
     async def test_start_preamble_includes_proof_finished(self):
@@ -451,3 +537,157 @@ class TestStartProofFinished:
         assert result["success"] is True
         assert "proof_finished" in result
         assert result["proof_finished"] is False
+
+
+# ---------------------------------------------------------------------------
+# TestForceRestart: force_restart parameter
+# ---------------------------------------------------------------------------
+
+
+class TestForceRestart(_MockPetBase):
+    """Test that force_restart=True kills PET and clears state before starting."""
+
+    @pytest.mark.asyncio
+    async def test_force_restart_calls_invalidate_pet(self):
+        """force_restart=True should call _invalidate_pet before _run_with_pet."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.start.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True. Proof. exact I. Qed.\n")
+
+            with (
+                patch.object(rocq_mcp.server, "_invalidate_pet") as mock_invalidate,
+                patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet),
+            ):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    force_restart=True,
+                )
+
+        assert result["success"] is True
+        mock_invalidate.assert_called_once_with(lifespan_state)
+
+    @pytest.mark.asyncio
+    async def test_no_force_restart_skips_invalidate(self):
+        """force_restart=False (default) should NOT call _invalidate_pet."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.start.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True. Proof. exact I. Qed.\n")
+
+            with (
+                patch.object(rocq_mcp.server, "_invalidate_pet") as mock_invalidate,
+                patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet),
+            ):
+                result = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    force_restart=False,
+                )
+
+        assert result["success"] is True
+        mock_invalidate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_force_restart_clears_state_table(self):
+        """force_restart=True should invalidate all existing state IDs."""
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+        from rocq_mcp.interactive import _state_table
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.start.return_value = mock_state
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with tempfile.TemporaryDirectory() as ws:
+            test_file = os.path.join(ws, "test.v")
+            with open(test_file, "w") as f:
+                f.write("Theorem foo : True. Proof. exact I. Qed.\n")
+
+            # First start — creates a state entry
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result1 = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                )
+            old_id = result1["state_id"]
+            assert old_id in _state_table
+
+            # Second start with force_restart — old state should be gone
+            with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+                result2 = await _interactive.run_start(
+                    file="test.v",
+                    theorem="foo",
+                    workspace=ws,
+                    lifespan_state=lifespan_state,
+                    force_restart=True,
+                )
+            assert result2["success"] is True
+            # Old state ID should have been cleared by _invalidate_pet hooks
+            assert old_id not in _state_table

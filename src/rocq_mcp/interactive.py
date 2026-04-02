@@ -1040,9 +1040,7 @@ async def run_check(
         # Include feedback (truncated) when present
         if feedback_parts:
             raw_feedback = "\n".join(feedback_parts)
-            result["feedback"] = _truncate_result(
-                raw_feedback, _MAX_FEEDBACK_LENGTH
-            )
+            result["feedback"] = _truncate_result(raw_feedback, _MAX_FEEDBACK_LENGTH)
         if stale_warning:
             result["stale_warning"] = stale_warning
         if complete and complete.shelf:

@@ -131,7 +131,9 @@ def _reconstruct_proof_state(
         logger.info("Reconstruction: trying start('%s')", thm_name)
         start_state = pet.start(file_path, thm_name)
         if getattr(start_state, "proof_finished", False):
-            logger.info("Reconstruction: start() returned proof_finished, trying strategy 2")
+            logger.info(
+                "Reconstruction: start() returned proof_finished, trying strategy 2"
+            )
             start_state = None
     except Exception as e:
         logger.info("Reconstruction: start() failed (%s), trying strategy 2", e)
@@ -149,7 +151,9 @@ def _reconstruct_proof_state(
             logger.info("Reconstruction: getting state at line %d", first_require)
             base_state = pet.get_state_at_pos(file_path, first_require, 0)
 
-            replay_text = "".join(file_lines[first_require : proof_start_line + 1]).strip()
+            replay_text = "".join(
+                file_lines[first_require : proof_start_line + 1]
+            ).strip()
             if not replay_text.rstrip().endswith("Proof."):
                 replay_text += "\nProof."
 
@@ -169,7 +173,7 @@ def _reconstruct_proof_state(
 
     # --- Replay tactics from Proof. to cursor ---
     replay_start = proof_start_line + 1
-    tactic_text = "".join(file_lines[replay_start : cursor_line]).strip()
+    tactic_text = "".join(file_lines[replay_start:cursor_line]).strip()
 
     # Strip comments and proof terminators
     tactic_text = re.sub(r"\(\*.*?\*\)", "", tactic_text, flags=re.DOTALL)
@@ -182,7 +186,9 @@ def _reconstruct_proof_state(
         try:
             current = pet.run(current, tactic_text)
         except Exception:
-            logger.info("Reconstruction: block replay failed, trying sentence-by-sentence")
+            logger.info(
+                "Reconstruction: block replay failed, trying sentence-by-sentence"
+            )
             current = start_state
             sentences = re.split(r"\.(?=\s|$)", tactic_text)
             for sent in sentences:

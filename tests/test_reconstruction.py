@@ -214,8 +214,8 @@ Admitted.
         final_state = _make_state(proof_finished=False)
         pet.run.side_effect = [
             Exception("block fail"),  # block replay
-            mid_state,                # "idtac."
-            final_state,              # "exact I."
+            mid_state,  # "idtac."
+            final_state,  # "exact I."
         ]
 
         # cursor at line 3 (Admitted) — should replay "idtac. exact I."
@@ -437,8 +437,8 @@ class TestRunStartReconstruction(_MockPetBase):
 
         finished = SimpleNamespace(st=50, proof_finished=True, feedback=[])
         mock_pet.get_state_at_pos.side_effect = [
-            finished,                       # run_start call
-            Exception("approach 2 fail"),   # reconstruction approach 2
+            finished,  # run_start call
+            Exception("approach 2 fail"),  # reconstruction approach 2
         ]
         mock_pet.start.side_effect = Exception("approach 1 fail")
         mock_pet.complete_goals.return_value = SimpleNamespace(
@@ -455,8 +455,7 @@ class TestRunStartReconstruction(_MockPetBase):
             vfile = os.path.join(ws, "test.v")
             with open(vfile, "w") as f:
                 f.write(
-                    "Require Import Arith.\n"
-                    "Lemma foo : True.\nProof.\nAdmitted.\n"
+                    "Require Import Arith.\n" "Lemma foo : True.\nProof.\nAdmitted.\n"
                 )
 
             with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):

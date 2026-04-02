@@ -347,6 +347,7 @@ class TestStartProofFinished(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.start.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -388,6 +389,7 @@ class TestStartProofFinished(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.start.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -429,6 +431,7 @@ class TestStartProofFinished(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.get_state_at_pos.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -472,6 +475,7 @@ class TestStartProofFinished(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.get_state_at_pos.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -514,6 +518,7 @@ class TestStartProofFinished(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.get_state_at_pos.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -562,6 +567,7 @@ class TestForceRestart(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.start.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -607,6 +613,7 @@ class TestForceRestart(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.start.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
@@ -653,6 +660,7 @@ class TestForceRestart(_MockPetBase):
         mock_pet = MagicMock()
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None
+        mock_pet._own_pgrp = False
         mock_pet.start.return_value = mock_state
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals

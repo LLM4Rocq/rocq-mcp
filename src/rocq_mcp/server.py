@@ -893,11 +893,15 @@ async def rocq_start(
     """Start an interactive proof session — see goals, explore tactics.
 
     Returns a state_id for use with rocq_check and rocq_step_multi.
+    Also returns the current proof goals at the starting position,
+    so this tool can be used to inspect goals at any point in a file.
 
     Three start modes (precedence: theorem > position > preamble):
     1. By theorem: file + theorem — start proving a specific theorem
-    2. By position: file + line + character — jump to an error position
-       (e.g., from rocq_compile's error_positions field)
+    2. By position: file + line + character — jump to any position in
+       a file and see the proof goals there.  Useful for inspecting
+       proof state at a specific point, or recovering from an error
+       position returned by rocq_compile.
     3. From imports: preamble — set up import context only (for rocq_check)
 
     **Important:** The interactive session reads the file at start time and

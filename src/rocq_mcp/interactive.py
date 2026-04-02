@@ -48,6 +48,20 @@ from rocq_mcp.compile import _split_rocq_sentences
 
 _MAX_GOALS_LENGTH: int = 8000  # Max chars for formatted goals output
 _MAX_GOALS_SHOWN: int = 10  # Max number of goals to format
+_MAX_FEEDBACK_LENGTH: int = 50_000  # Max chars for feedback in run_check responses
+
+
+def _truncate_result(text: str, max_length: int) -> str:
+    """Truncate *text* to *max_length* chars, appending a notice if trimmed.
+
+    This prevents token explosions when tactics like ``vm_compute`` or
+    ``native_compute`` produce enormous output (up to 6.5 M chars observed).
+    The truncation notice includes the original length so the caller knows
+    how much was dropped.
+    """
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + f"\n... (truncated, {len(text)} total chars)"
 
 
 def _format_goals(goals_list: list[Any]) -> str:
@@ -941,6 +955,7 @@ async def run_check(
 
         state = entry_to_use.state
         prev_state_id = base_state_id
+        feedback_parts: list[str] = []  # Collect feedback from each step
 
         for i, cmd in enumerate(commands):
             try:
@@ -955,6 +970,14 @@ async def run_check(
                     rocq_timeout = None
 
                 new_state = pet.run(state, cmd, timeout=rocq_timeout)
+
+                # Collect any feedback (e.g. from vm_compute, native_compute,
+                # or Print/Check commands that produce output).
+                step_feedback = getattr(new_state, "feedback", None) or []
+                for _, msg in step_feedback:
+                    if msg:
+                        feedback_parts.append(msg)
+
                 state_id = _state_add(
                     state=new_state,
                     file=entry_to_use.file,
@@ -1014,6 +1037,12 @@ async def run_check(
             "state_id": prev_state_id,
             "parent_state_id": base_state_id,
         }
+        # Include feedback (truncated) when present
+        if feedback_parts:
+            raw_feedback = "\n".join(feedback_parts)
+            result["feedback"] = _truncate_result(
+                raw_feedback, _MAX_FEEDBACK_LENGTH
+            )
         if stale_warning:
             result["stale_warning"] = stale_warning
         if complete and complete.shelf:

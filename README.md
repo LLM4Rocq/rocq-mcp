@@ -17,17 +17,8 @@ An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover
 Using [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# Core (compile + verify tools only)
+# Install (includes pytanque for interactive tools)
 uv pip install -e .
-
-# With interactive pytanque support (all 11 tools)
-uv pip install -e ".[interactive]"
-```
-
-pytanque is installed from Git:
-
-```bash
-uv pip install "pytanque @ git+https://github.com/LLM4Rocq/pytanque"
 ```
 
 For development (includes pytest):

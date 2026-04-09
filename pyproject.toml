@@ -6,12 +6,10 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.1.0",
+    "pytanque @ git+https://github.com/LLM4Rocq/pytanque",
 ]
 
 [project.optional-dependencies]
-interactive = [
-    "pytanque @ git+https://github.com/LLM4Rocq/pytanque",
-]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25",

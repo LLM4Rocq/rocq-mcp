@@ -1122,6 +1122,9 @@ async def rocq_step_multi(
     Or to explore proof structure:
       tactics=["destruct n.", "induction n.", "case_eq n."]
 
+    Each result entry includes a ``feedback`` field (truncated string)
+    when the tactic produces visible output (e.g., ``Print``, ``Search``).
+
     Requires an active state from rocq_start or rocq_check (or use from_state).
 
     Args:
@@ -1167,6 +1170,11 @@ async def rocq_check(
     2. rocq_check(body="intros. simpl.") to advance
     3. If stuck: rocq_step_multi(tactics=[...]) to explore
     4. rocq_check(body="winning_tactic.") to commit
+
+    When commands produce visible output (e.g., ``Print``, ``Check``,
+    ``vm_compute``, ``native_compute``), a ``feedback`` field is included
+    as a list of ``[command, output]`` pairs (truncated per step at 50K
+    chars).  Omitted when no command produces output.
 
     **Note:** If the underlying .v file is modified after rocq_start, the
     session state becomes stale. A ``stale_warning`` field is returned when

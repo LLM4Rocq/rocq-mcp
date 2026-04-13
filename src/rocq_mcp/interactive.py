@@ -48,6 +48,27 @@ from rocq_mcp.compile import _split_rocq_sentences
 
 _MAX_GOALS_LENGTH: int = 8000  # Max chars for formatted goals output
 _MAX_GOALS_SHOWN: int = 10  # Max number of goals to format
+_MAX_FEEDBACK_LENGTH: int = 50_000  # Max chars per feedback step
+_MAX_TOTAL_FEEDBACK: int = 200_000  # Max total chars across all feedback steps
+
+
+def _truncate_result(text: str, max_length: int) -> str:
+    """Truncate *text* to *max_length* chars, appending an indicator if cut."""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + f"\n... (truncated, {len(text)} total chars)"
+
+
+def _extract_feedback(state: Any) -> str | None:
+    """Extract non-empty feedback from a pytanque State, joined as a string.
+
+    Returns *None* when there is nothing to report.
+    """
+    msgs = [msg for _, msg in (state.feedback or []) if msg]
+    if not msgs:
+        return None
+    raw = "\n".join(msgs)
+    return _truncate_result(raw, _MAX_FEEDBACK_LENGTH)
 
 
 def _format_goals(goals_list: list[Any]) -> str:
@@ -941,6 +962,8 @@ async def run_check(
 
         state = entry_to_use.state
         prev_state_id = base_state_id
+        feedback_pairs: list[list[str]] = []
+        total_feedback_size = 0
 
         for i, cmd in enumerate(commands):
             try:
@@ -955,6 +978,15 @@ async def run_check(
                     rocq_timeout = None
 
                 new_state = pet.run(state, cmd, timeout=rocq_timeout)
+
+                # Collect per-step feedback (e.g. Print output,
+                # vm_compute traces) before it is lost.
+                if total_feedback_size < _MAX_TOTAL_FEEDBACK:
+                    fb_text = _extract_feedback(new_state)
+                    if fb_text is not None:
+                        feedback_pairs.append([cmd, fb_text])
+                        total_feedback_size += len(fb_text)
+
                 state_id = _state_add(
                     state=new_state,
                     file=entry_to_use.file,
@@ -985,6 +1017,8 @@ async def run_check(
                     "last_valid_state_id": prev_state_id,
                     "goals_at_failure": goals,
                 }
+                if feedback_pairs:
+                    result["feedback"] = feedback_pairs
                 if stale_warning:
                     result["stale_warning"] = stale_warning
                 if prev_state_id is not None:
@@ -1014,6 +1048,8 @@ async def run_check(
             "state_id": prev_state_id,
             "parent_state_id": base_state_id,
         }
+        if feedback_pairs:
+            result["feedback"] = feedback_pairs
         if stale_warning:
             result["stale_warning"] = stale_warning
         if complete and complete.shelf:
@@ -1130,6 +1166,8 @@ async def run_step_multi(
         # Check for file staleness (non-blocking warning)
         stale_warning = _check_staleness(entry_to_use)
 
+        total_feedback_size = 0
+
         for tactic in tactics:
             tac = tactic.strip()
             if tac not in ("{", "}") and not tac.endswith("."):
@@ -1145,6 +1183,13 @@ async def run_step_multi(
             entry_dict: dict[str, Any] = {"tactic": tac}
             try:
                 new_state = pet.run(parent_state, tac, timeout=tac_rocq_timeout)
+
+                # Collect per-tactic feedback if any.
+                if total_feedback_size < _MAX_TOTAL_FEEDBACK:
+                    fb_text = _extract_feedback(new_state)
+                    if fb_text is not None:
+                        entry_dict["feedback"] = fb_text
+                        total_feedback_size += len(fb_text)
 
                 complete = pet.complete_goals(new_state)
                 goals_list = complete.goals if complete else []

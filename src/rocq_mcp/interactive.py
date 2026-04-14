@@ -717,6 +717,85 @@ async def run_notations(
 _MAX_STEP_MULTI_TACTICS = 20
 
 
+def _build_position_start_result(
+    pet: Any,
+    *,
+    file: str,
+    resolved_file: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+    line: int,
+    character: int,
+    track_staleness: bool = True,
+) -> dict[str, Any]:
+    """Return the rocq_start-style payload for a position-based state."""
+    _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+    state = pet.get_state_at_pos(resolved_file, line, character)
+
+    file_mtime: float | None = None
+    tracked_file: str | None = None
+    if track_staleness:
+        try:
+            file_mtime = os.path.getmtime(resolved_file)
+        except OSError:
+            file_mtime = None
+        tracked_file = resolved_file
+
+    theorem = f"@pos({line},{character})"
+    state_id = _state_add(
+        state=state,
+        file=file,
+        theorem=theorem,
+        workspace=workspace,
+        parent_id=None,
+        tactic=None,
+        step=0,
+        file_mtime=file_mtime,
+        resolved_file=tracked_file,
+    )
+    goals = _try_get_goals(pet, state) or ""
+    return {
+        "success": True,
+        "state_id": state_id,
+        "goals": goals,
+        "file": file,
+        "theorem": theorem,
+        "proof_finished": getattr(state, "proof_finished", False),
+    }
+
+
+async def capture_position_state(
+    *,
+    file: str,
+    resolved_file: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+    line: int,
+    character: int,
+    description: str,
+    track_staleness: bool = True,
+) -> dict[str, Any]:
+    """Capture a position-based proof state via the async PET helper."""
+
+    def _execute(pet: Any) -> dict[str, Any]:
+        return _build_position_start_result(
+            pet,
+            file=file,
+            resolved_file=resolved_file,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+            line=line,
+            character=character,
+            track_staleness=track_staleness,
+        )
+
+    return await _server._run_with_pet(
+        _execute,
+        lifespan_state,
+        description,
+    )
+
+
 async def run_start(
     file: str,
     theorem: str,
@@ -806,33 +885,15 @@ async def run_start(
                 "proof_finished": getattr(state, "proof_finished", False),
             }
         elif _start_by_pos:
-            _server._set_workspace_if_needed(pet, workspace, lifespan_state)
-            state = pet.get_state_at_pos(resolved_file, line, character)
-            # Capture mtime after get_state_at_pos to avoid TOCTOU gap
-            try:
-                file_mtime = os.path.getmtime(resolved_file)
-            except OSError:
-                file_mtime = None
-            state_id = _state_add(
-                state=state,
+            return _build_position_start_result(
+                pet,
                 file=file,
-                theorem=f"@pos({line},{character})",
-                workspace=workspace,
-                parent_id=None,
-                tactic=None,
-                step=0,
-                file_mtime=file_mtime,
                 resolved_file=resolved_file,
+                workspace=workspace,
+                lifespan_state=lifespan_state,
+                line=line,
+                character=character,
             )
-            goals = _try_get_goals(pet, state) or ""
-            return {
-                "success": True,
-                "state_id": state_id,
-                "goals": goals,
-                "file": file,
-                "theorem": f"@pos({line},{character})",
-                "proof_finished": getattr(state, "proof_finished", False),
-            }
         else:
             # Preamble mode
             preamble_cmds = _split_rocq_sentences(preamble) if preamble.strip() else []

@@ -346,6 +346,134 @@ class TestCompileWarningsTruncation:
 
 
 # ---------------------------------------------------------------------------
+# Proof-state capture on compile errors
+# ---------------------------------------------------------------------------
+
+
+class TestCompileErrorStateCapture:
+    """Compile errors should include rocq_start-style state when available."""
+
+    pytestmark = []
+
+    @staticmethod
+    def _make_fake_result(stderr, returncode=1):
+        return {
+            "returncode": returncode,
+            "stdout": "",
+            "stderr": stderr,
+            "timed_out": False,
+        }
+
+    def test_compile_error_includes_state_when_capture_succeeds(
+        self, workspace, monkeypatch
+    ):
+        """Successful PET capture should enrich the compile error result."""
+        from rocq_mcp import compile as _compile
+
+        stderr = (
+            'File "/tmp/tmp.v", line 2, characters 2-9:\n'
+            "Error: The term \"0\" has type \"nat\" while it is expected to have type \"True\".\n"
+        )
+        monkeypatch.setattr(
+            _compile,
+            "_run_coqc",
+            lambda *a, **kw: self._make_fake_result(stderr),
+        )
+        async def _mock_capture_success(*args, **kwargs):
+            return {
+                "state_id": 17,
+                "goals": "|- True",
+                "file": "<proof>",
+                "theorem": "@pos(1,2)",
+                "proof_finished": False,
+            }
+
+        monkeypatch.setattr(
+            _compile,
+            "_capture_compile_error_state",
+            _mock_capture_success,
+        )
+
+        result = asyncio.run(_compile.run_compile_with_state(
+            "Theorem bad : True.\n  exact 0.\n",
+            str(workspace),
+            60,
+            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+        ))
+
+        assert result["success"] is False
+        assert result["state_id"] == 17
+        assert result["goals"] == "|- True"
+        assert result["file"] == "<proof>"
+        assert result["theorem"] == "@pos(1,2)"
+        assert result["proof_finished"] is False
+        assert "rocq_check(from_state=17)" in result["hint"]
+
+    def test_warning_before_error_uses_error_position(self, workspace, monkeypatch):
+        """State capture must target the first Error, not a preceding Warning."""
+        from rocq_mcp import compile as _compile
+
+        stderr = (
+            'File "/tmp/tmp.v", line 1, characters 0-5:\n'
+            "Warning: Deprecated.\n"
+            'File "/tmp/tmp.v", line 5, characters 3-11:\n'
+            "Error: Real failure.\n"
+        )
+        captured = {}
+
+        monkeypatch.setattr(
+            _compile,
+            "_run_coqc",
+            lambda *a, **kw: self._make_fake_result(stderr),
+        )
+
+        async def _mock_capture(*args, **kwargs):
+            captured.update(kwargs)
+            return None
+
+        monkeypatch.setattr(_compile, "_capture_compile_error_state", _mock_capture)
+
+        asyncio.run(_compile.run_compile_with_state(
+            "x",
+            str(workspace),
+            60,
+            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+        ))
+
+        assert captured["line"] == 4
+        assert captured["character"] == 3
+
+    def test_capture_failure_preserves_existing_hint(self, workspace, monkeypatch):
+        """Failed PET capture should fall back to the original compile guidance."""
+        from rocq_mcp import compile as _compile
+
+        stderr = (
+            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
+            "Error: Real failure.\n"
+        )
+        monkeypatch.setattr(
+            _compile,
+            "_run_coqc",
+            lambda *a, **kw: self._make_fake_result(stderr),
+        )
+        async def _mock_capture_none(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(_compile, "_capture_compile_error_state", _mock_capture_none)
+
+        result = asyncio.run(_compile.run_compile_with_state(
+            "x",
+            str(workspace),
+            60,
+            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+        ))
+
+        assert result["success"] is False
+        assert "state_id" not in result
+        assert "Use rocq_start" in result["hint"]
+
+
+# ---------------------------------------------------------------------------
 # Wrapper forwarding
 # ---------------------------------------------------------------------------
 

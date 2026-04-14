@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import glob as glob_mod
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -233,3 +234,65 @@ class TestCompileFileStructuredErrors:
         )
         assert result["success"] is False
         assert "hint" in result
+
+
+# ---------------------------------------------------------------------------
+# Wrapper forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestRocqCompileFileWrapper:
+    """The server wrapper should forward ctx.lifespan_context."""
+
+    pytestmark = []
+
+    def test_ctx_forwarded(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from rocq_mcp.server import rocq_compile_file
+
+        captured = {}
+
+        async def mock_run_compile_file_with_state(
+            file,
+            workspace,
+            timeout,
+            include_warnings,
+            lifespan_state=None,
+        ):
+            captured.update(
+                {
+                    "file": file,
+                    "workspace": workspace,
+                    "timeout": timeout,
+                    "include_warnings": include_warnings,
+                    "lifespan_state": lifespan_state,
+                }
+            )
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(
+            _server,
+            "run_compile_file_with_state",
+            mock_run_compile_file_with_state,
+        )
+
+        mock_ctx = MagicMock()
+        mock_ctx.lifespan_context = {"pet_client": None}
+
+        result = asyncio.run(
+            rocq_compile_file(
+                file="demo.v",
+                workspace=str(tmp_path),
+                timeout=7,
+                include_warnings=False,
+                ctx=mock_ctx,
+            )
+        )
+
+        assert result["success"] is True
+        assert captured["file"] == "demo.v"
+        assert captured["workspace"] == str(tmp_path)
+        assert captured["timeout"] == 7
+        assert captured["include_warnings"] is False
+        assert captured["lifespan_state"] is mock_ctx.lifespan_context

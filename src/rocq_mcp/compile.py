@@ -199,6 +199,24 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
     return positions
 
 
+def _first_error_position(stderr: str) -> dict[str, Any] | None:
+    """Return the first Error-level diagnostic position, skipping warnings."""
+    for pos in _parse_coqc_error_positions(stderr):
+        if pos["message"].startswith("Error:"):
+            return pos
+    return None
+
+
+def _first_error_from_positions(
+    positions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first Error-level entry from parsed diagnostic positions."""
+    for pos in positions:
+        if pos["message"].startswith("Error:"):
+            return pos
+    return None
+
+
 # Regex to match coqc diagnostic blocks: File "path", line N, characters S-E:\n<body>
 _COQC_DIAG_RE = re.compile(
     r'(File "([^"]*)", line (\d+), characters (\d+)-(\d+):\s*\n)(.*?)(?=File "|$)',
@@ -391,6 +409,74 @@ def _build_compile_result(
     return result_dict
 
 
+async def _capture_compile_error_state(
+    source: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+    *,
+    line: int,
+    character: int,
+    file_label: str,
+    resolved_file: str | None = None,
+) -> dict[str, Any] | None:
+    """Best-effort PET lookup of the proof state at a compile error."""
+    try:
+        from rocq_mcp.interactive import capture_position_state
+    except ImportError:
+        return None
+
+    ws = Path(workspace).resolve()
+    lookup_file = resolved_file
+    temp_path: str | None = None
+
+    if lookup_file is None:
+        with tempfile.NamedTemporaryFile(
+            suffix=".v",
+            mode="w",
+            delete=False,
+            dir=str(ws),
+        ) as f:
+            f.write(source)
+            f.flush()
+            temp_path = f.name
+        lookup_file = temp_path
+
+    try:
+        state_result = await capture_position_state(
+            file=file_label,
+            resolved_file=lookup_file,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+            line=line,
+            character=character,
+            description="Compile error state capture",
+            track_staleness=resolved_file is not None,
+        )
+    finally:
+        if temp_path is not None:
+            _server._cleanup_coqc_artifacts(temp_path)
+
+    if not isinstance(state_result, dict) or not state_result.get("success"):
+        return None
+    return state_result
+
+
+def _merge_compile_error_state(
+    result_dict: dict[str, Any],
+    state_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach captured proof-state fields to a compile failure result."""
+    for key in ("state_id", "goals", "file", "theorem", "proof_finished"):
+        result_dict[key] = state_result[key]
+    result_dict["hint"] = (
+        "Interactive proof state captured at the error position. "
+        f"Use rocq_check(from_state={state_result['state_id']}) or "
+        f"rocq_step_multi(from_state={state_result['state_id']}) "
+        "to explore fixes."
+    )
+    return result_dict
+
+
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile (core implementation)
 # ---------------------------------------------------------------------------
@@ -417,7 +503,12 @@ def run_compile(
         return {"success": False, "error": forbidden}
 
     result = _run_coqc(source, workspace, timeout)
-    return _build_compile_result(result, source, timeout, include_warnings)
+    return _build_compile_result(
+        result,
+        source,
+        timeout,
+        include_warnings,
+    )
 
 
 async def run_compile_with_state(
@@ -427,13 +518,30 @@ async def run_compile_with_state(
     include_warnings: bool = True,
     lifespan_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Async wrapper for run_compile.
+    """Async wrapper for run_compile that enriches failures with PET state."""
+    result = run_compile(source, workspace, timeout, include_warnings)
+    if (
+        lifespan_state is None
+        or result.get("success")
+        or "error_positions" not in result
+    ):
+        return result
 
-    The compile MCP wrappers are async, so keep a matching async boundary here
-    even before compile errors start consulting PET state.
-    """
-    del lifespan_state
-    return run_compile(source, workspace, timeout, include_warnings)
+    primary_error = _first_error_from_positions(result["error_positions"])
+    if primary_error is None:
+        return result
+
+    state_result = await _capture_compile_error_state(
+        source,
+        workspace,
+        lifespan_state,
+        line=primary_error["line"],
+        character=primary_error["character"],
+        file_label="<proof>",
+    )
+    if state_result is None:
+        return result
+    return _merge_compile_error_state(result, state_result)
 
 
 # ---------------------------------------------------------------------------
@@ -490,9 +598,42 @@ async def run_compile_file_with_state(
     include_warnings: bool = True,
     lifespan_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Async wrapper for run_compile_file."""
-    del lifespan_state
-    return run_compile_file(file, workspace, timeout, include_warnings)
+    """Async wrapper for run_compile_file that enriches failures with PET state."""
+    try:
+        resolved_file = _server._resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError):
+        resolved_file = None
+
+    try:
+        source = Path(resolved_file).read_text() if resolved_file else ""
+    except OSError:
+        source = ""
+
+    result = run_compile_file(file, workspace, timeout, include_warnings)
+    if (
+        lifespan_state is None
+        or result.get("success")
+        or "error_positions" not in result
+        or resolved_file is None
+    ):
+        return result
+
+    primary_error = _first_error_from_positions(result["error_positions"])
+    if primary_error is None:
+        return result
+
+    state_result = await _capture_compile_error_state(
+        source,
+        workspace,
+        lifespan_state,
+        line=primary_error["line"],
+        character=primary_error["character"],
+        file_label=file,
+        resolved_file=resolved_file,
+    )
+    if state_result is None:
+        return result
+    return _merge_compile_error_state(result, state_result)
 
 
 # ---------------------------------------------------------------------------

@@ -331,6 +331,113 @@ class _MockContext:
 
 @pytest.mark.skipif(
     not (COQC_AVAILABLE and PET_AVAILABLE),
+    reason="coqc and pet required for compile error state capture",
+)
+class TestCompileErrorStateWorkflow:
+    """End-to-end: compile errors should include the current proof state."""
+
+    @pytest.fixture
+    def lifespan_state(self):
+        from rocq_mcp.server import _invalidate_pet
+
+        state = {"pet_client": None, "pet_timeout": 30.0, "current_workspace": None}
+        yield state
+        _invalidate_pet(state)
+
+    async def test_compile_includes_error_state(self, lifespan_state, workspace):
+        """rocq_compile should attach a recoverable state at the error position."""
+        from rocq_mcp.server import rocq_compile
+
+        source = (
+            "Theorem bad : True.\n"
+            "Proof.\n"
+            "  exact 0.\n"
+            "Qed.\n"
+        )
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
+
+        assert result["success"] is False
+        assert isinstance(result["state_id"], int)
+        assert result["goals"] == "\n|-True"
+        assert result["file"] == "<proof>"
+        assert result["theorem"] == "@pos(2,8)"
+        assert result["proof_finished"] is False
+
+    async def test_compile_file_includes_error_state(self, lifespan_state, workspace):
+        """rocq_compile_file should attach a recoverable state at the error position."""
+        from rocq_mcp.server import rocq_compile_file
+
+        path = workspace / "error_state_test.v"
+        path.write_text(
+            "Theorem bad : True.\n"
+            "Proof.\n"
+            "  exact 0.\n"
+            "Qed.\n"
+        )
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile_file(
+            file="error_state_test.v",
+            workspace=str(workspace),
+            ctx=ctx,
+        )
+
+        assert result["success"] is False
+        assert isinstance(result["state_id"], int)
+        assert result["goals"] == "\n|-True"
+        assert result["file"] == "error_state_test.v"
+        assert result["theorem"] == "@pos(2,8)"
+        assert result["proof_finished"] is False
+
+    async def test_compile_with_assumption_includes_goal_context(
+        self, lifespan_state, workspace
+    ):
+        """Captured goals should include local assumptions from the proof state."""
+        from rocq_mcp.server import rocq_compile
+
+        source = (
+            "Lemma bad (n : nat) : True.\n"
+            "Proof.\n"
+            "  exact 0.\n"
+            "Qed.\n"
+        )
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
+
+        assert result["success"] is False
+        assert result["goals"] == "n : nat\n|-True"
+        assert result["file"] == "<proof>"
+        assert result["theorem"] == "@pos(2,8)"
+        assert result["proof_finished"] is False
+
+    async def test_compile_multiple_tactics_same_line_uses_later_error_position(
+        self, lifespan_state, workspace
+    ):
+        """Error-state capture should point after earlier successful tactics."""
+        from rocq_mcp.server import rocq_compile
+
+        source = (
+            "Lemma bad (n : nat) : True.\n"
+            "Proof.\n"
+            "  idtac. exact 0.\n"
+            "Qed.\n"
+        )
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
+
+        assert result["success"] is False
+        assert result["goals"] == "n : nat\n|-True"
+        assert result["file"] == "<proof>"
+        assert result["theorem"] == "@pos(2,15)"
+        assert result["proof_finished"] is False
+
+
+@pytest.mark.skipif(
+    not (COQC_AVAILABLE and PET_AVAILABLE),
     reason="coqc and pet required for Phase 2 verification",
 )
 class TestSharedDefsVerifyWorkflow:

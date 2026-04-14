@@ -731,8 +731,10 @@ async def rocq_compile(
     rocq_check (faster, cached imports, returns state for recovery)
     or rocq_step_multi (try multiple tactics at once).
 
-    On error, returns error_positions for jumping to the failure via
-    rocq_start(file=..., line=..., character=...).
+    On structured errors, returns error_positions for jumping to the
+    failure via rocq_start(file=..., line=..., character=...). When
+    coq-lsp is available in the active MCP session, also captures the
+    current proof state at the error position automatically.
 
     Args:
         source: Complete Rocq (.v) file content to compile.
@@ -777,8 +779,10 @@ async def rocq_compile_file(
     More efficient for large files (avoids transmitting full source).
     The file must already exist within the workspace.
 
-    On error, returns error_positions for jumping to the failure via
-    rocq_start(file=..., line=..., character=...).
+    On structured errors, returns error_positions for jumping to the
+    failure via rocq_start(file=..., line=..., character=...). When
+    coq-lsp is available in the active MCP session, also captures the
+    current proof state at the error position automatically.
 
     Args:
         file: Path to the .v file (relative to workspace).

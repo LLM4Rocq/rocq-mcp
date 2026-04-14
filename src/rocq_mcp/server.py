@@ -694,7 +694,13 @@ async def _run_with_pet(
 # NOTE: These imports MUST come after all shared infrastructure above is
 # defined, because compile and interactive import from this module.
 
-from rocq_mcp.compile import run_compile, run_compile_file, run_verify  # noqa: E402
+from rocq_mcp.compile import (  # noqa: E402
+    run_compile,
+    run_compile_file,
+    run_compile_with_state,
+    run_compile_file_with_state,
+    run_verify,
+)
 from rocq_mcp.interactive import (  # noqa: E402
     run_assumptions,
     run_query,
@@ -711,11 +717,12 @@ from rocq_mcp.interactive import (  # noqa: E402
 
 
 @mcp.tool
-def rocq_compile(
+async def rocq_compile(
     source: str,
     workspace: str = "",
     timeout: int = 0,
     include_warnings: bool = True,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Compile Rocq source code and return structured errors.
 
@@ -742,7 +749,13 @@ def rocq_compile(
     if err:
         return {"success": False, "error": err}
 
-    return run_compile(source, workspace, timeout, include_warnings)
+    return await run_compile_with_state(
+        source=source,
+        workspace=workspace,
+        timeout=timeout,
+        include_warnings=include_warnings,
+        lifespan_state=ctx.lifespan_context if ctx else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -751,11 +764,12 @@ def rocq_compile(
 
 
 @mcp.tool
-def rocq_compile_file(
+async def rocq_compile_file(
     file: str,
     workspace: str = "",
     timeout: int = 0,
     include_warnings: bool = True,
+    ctx: Context = None,
 ) -> dict[str, Any]:
     """Compile a Rocq (.v) file on disk and return structured errors.
 
@@ -781,7 +795,13 @@ def rocq_compile_file(
     if err:
         return {"success": False, "error": err}
 
-    return run_compile_file(file, workspace, timeout, include_warnings)
+    return await run_compile_file_with_state(
+        file=file,
+        workspace=workspace,
+        timeout=timeout,
+        include_warnings=include_warnings,
+        lifespan_state=ctx.lifespan_context if ctx else None,
+    )
 
 
 # ---------------------------------------------------------------------------

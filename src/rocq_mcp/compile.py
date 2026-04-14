@@ -420,6 +420,22 @@ def run_compile(
     return _build_compile_result(result, source, timeout, include_warnings)
 
 
+async def run_compile_with_state(
+    source: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool = True,
+    lifespan_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Async wrapper for run_compile.
+
+    The compile MCP wrappers are async, so keep a matching async boundary here
+    even before compile errors start consulting PET state.
+    """
+    del lifespan_state
+    return run_compile(source, workspace, timeout, include_warnings)
+
+
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile_file (core implementation)
 # ---------------------------------------------------------------------------
@@ -465,6 +481,18 @@ def run_compile_file(
         file_label=file,
         clean_tmp_paths=False,
     )
+
+
+async def run_compile_file_with_state(
+    file: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool = True,
+    lifespan_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Async wrapper for run_compile_file."""
+    del lifespan_state
+    return run_compile_file(file, workspace, timeout, include_warnings)
 
 
 # ---------------------------------------------------------------------------

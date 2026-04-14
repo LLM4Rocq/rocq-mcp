@@ -10,7 +10,9 @@ Tests are grouped into:
 
 from __future__ import annotations
 
+import asyncio
 import glob as glob_mod
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +20,11 @@ from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.server import rocq_compile
 
 pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+
+
+def _call_rocq_compile(**kwargs):
+    """Run the async server wrapper from synchronous tests."""
+    return asyncio.run(rocq_compile(**kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -29,22 +36,24 @@ class TestCompileSuccess:
     """Sources that compile without error."""
 
     def test_simple_proof(self, workspace, simple_proof):
-        result = rocq_compile(source=simple_proof, workspace=str(workspace))
+        result = _call_rocq_compile(source=simple_proof, workspace=str(workspace))
         assert result["success"] is True
 
     def test_empty_source(self, workspace):
         """An empty file is valid Rocq source."""
-        result = rocq_compile(source="", workspace=str(workspace))
+        result = _call_rocq_compile(source="", workspace=str(workspace))
         assert result["success"] is True
 
     def test_braces_in_proof(self, workspace, braces_proof):
         """Proofs using { } subgoal braces must not confuse f-string templates."""
-        result = rocq_compile(source=braces_proof, workspace=str(workspace))
+        result = _call_rocq_compile(source=braces_proof, workspace=str(workspace))
         assert result["success"] is True
 
     def test_multiline_import(self, workspace, multiline_import_proof):
         """Multi-line From ... Require Import must compile correctly."""
-        result = rocq_compile(source=multiline_import_proof, workspace=str(workspace))
+        result = _call_rocq_compile(
+            source=multiline_import_proof, workspace=str(workspace)
+        )
         assert result["success"] is True
 
 
@@ -59,7 +68,7 @@ class TestCompileErrors:
     def test_type_error(self, workspace):
         """A proof of an obviously false statement must fail."""
         source = "Theorem bad : nat = bool.\n" "Proof. reflexivity. Qed.\n"
-        result = rocq_compile(source=source, workspace=str(workspace))
+        result = _call_rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is False
         assert "error" in result
         assert len(result["error"]) > 0
@@ -67,14 +76,14 @@ class TestCompileErrors:
     def test_syntax_error(self, workspace):
         """Malformed syntax should produce a compilation error."""
         source = "Theorem bad : .\nQed.\n"
-        result = rocq_compile(source=source, workspace=str(workspace))
+        result = _call_rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is False
         assert "error" in result
 
     def test_missing_import(self, workspace):
         """Using R without importing Reals should fail."""
         source = "Theorem test : forall x : R, x = x.\n" "Proof. reflexivity. Qed.\n"
-        result = rocq_compile(source=source, workspace=str(workspace))
+        result = _call_rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is False
         assert "error" in result
 
@@ -88,7 +97,9 @@ class TestCompileTimeout:
     """Diverging tactics should trigger timeout."""
 
     def test_diverging_tactic(self, workspace, timeout_proof):
-        result = rocq_compile(source=timeout_proof, workspace=str(workspace), timeout=3)
+        result = _call_rocq_compile(
+            source=timeout_proof, workspace=str(workspace), timeout=3
+        )
         assert result["success"] is False
         assert "timed out" in result["error"].lower()
 
@@ -103,7 +114,7 @@ class TestCompileInputValidation:
 
     def test_bad_workspace(self):
         """Non-existent workspace should return a clear error."""
-        result = rocq_compile(source="", workspace="/nonexistent/path/xyz")
+        result = _call_rocq_compile(source="", workspace="/nonexistent/path/xyz")
         assert result["success"] is False
         assert (
             "not exist" in result["error"].lower()
@@ -113,7 +124,9 @@ class TestCompileInputValidation:
 
     def test_oversized_source(self, workspace):
         """Source exceeding ROCQ_MAX_SOURCE_SIZE should be rejected early."""
-        result = rocq_compile(source="x" * 2_000_000, workspace=str(workspace))
+        result = _call_rocq_compile(
+            source="x" * 2_000_000, workspace=str(workspace)
+        )
         assert result["success"] is False
         assert "size" in result["error"].lower()
 
@@ -122,7 +135,7 @@ class TestCompileInputValidation:
         monkeypatch.setattr(
             "rocq_mcp.server.ROCQ_COQC_BINARY", "nonexistent_coqc_binary_xyz"
         )
-        result = rocq_compile(source="", workspace=str(workspace))
+        result = _call_rocq_compile(source="", workspace=str(workspace))
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
@@ -137,7 +150,7 @@ class TestCompileCleanup:
 
     def test_no_artifacts_left(self, workspace, simple_proof):
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_compile(source=simple_proof, workspace=str(workspace))
+        _call_rocq_compile(source=simple_proof, workspace=str(workspace))
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
@@ -145,14 +158,14 @@ class TestCompileCleanup:
         """Even on compilation error, temp files should be cleaned up."""
         source = "Theorem bad : .\nQed.\n"
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_compile(source=source, workspace=str(workspace))
+        _call_rocq_compile(source=source, workspace=str(workspace))
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
     def test_no_artifacts_on_timeout(self, workspace, timeout_proof):
         """Even on timeout, temp files should be cleaned up."""
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_compile(source=timeout_proof, workspace=str(workspace), timeout=3)
+        _call_rocq_compile(source=timeout_proof, workspace=str(workspace), timeout=3)
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
 
@@ -209,7 +222,7 @@ class TestCompileWarningsTruncation:
         )
 
         source = "Theorem t : True. Proof. exact I. Qed."
-        result = rocq_compile(source=source, workspace=str(workspace))
+        result = _call_rocq_compile(source=source, workspace=str(workspace))
 
         assert (
             result["success"] is False
@@ -232,7 +245,7 @@ class TestCompileWarningsTruncation:
         )
 
         source = "Theorem t : True. Proof. exact I. Qed."
-        result = rocq_compile(source=source, workspace=str(workspace))
+        result = _call_rocq_compile(source=source, workspace=str(workspace))
         assert result["success"] is True
 
     def test_empty_stderr_nonzero_returncode(self, workspace, monkeypatch):
@@ -245,7 +258,7 @@ class TestCompileWarningsTruncation:
             lambda *a, **kw: self._make_fake_result(""),
         )
 
-        result = rocq_compile(source="x", workspace=str(workspace))
+        result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
         assert "coqc exited with code" in result["error"]
 
@@ -259,7 +272,7 @@ class TestCompileWarningsTruncation:
             lambda *a, **kw: self._make_fake_result("   \n\n  "),
         )
 
-        result = rocq_compile(source="x", workspace=str(workspace))
+        result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
         assert "coqc exited with code" in result["error"]
 
@@ -275,7 +288,7 @@ class TestCompileWarningsTruncation:
             lambda *a, **kw: self._make_fake_result(warnings),
         )
 
-        result = rocq_compile(source="x", workspace=str(workspace))
+        result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
         assert "Notation overridden" in result["error"]
 
@@ -298,7 +311,7 @@ class TestCompileWarningsTruncation:
             lambda *a, **kw: self._make_fake_result(warn + error),
         )
 
-        result = rocq_compile(
+        result = _call_rocq_compile(
             source="x",
             workspace=str(workspace),
             include_warnings=False,
@@ -326,7 +339,62 @@ class TestCompileWarningsTruncation:
             lambda *a, **kw: self._make_fake_result(warnings + error),
         )
 
-        result = rocq_compile(source="x", workspace=str(workspace))
+        result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
         assert "Real error here" in result["error"]
         assert len(result["error"]) <= _compile._MAX_ERROR_LENGTH
+
+
+# ---------------------------------------------------------------------------
+# Wrapper forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestRocqCompileWrapper:
+    """The server wrapper should forward ctx.lifespan_context."""
+
+    pytestmark = []
+
+    def test_ctx_forwarded(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+
+        captured = {}
+
+        async def mock_run_compile_with_state(
+            source,
+            workspace,
+            timeout,
+            include_warnings,
+            lifespan_state=None,
+        ):
+            captured.update(
+                {
+                    "source": source,
+                    "workspace": workspace,
+                    "timeout": timeout,
+                    "include_warnings": include_warnings,
+                    "lifespan_state": lifespan_state,
+                }
+            )
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_server, "run_compile_with_state", mock_run_compile_with_state)
+
+        mock_ctx = MagicMock()
+        mock_ctx.lifespan_context = {"pet_client": None}
+
+        result = _call_rocq_compile(
+            source="Check nat.",
+            workspace=str(tmp_path),
+            timeout=7,
+            include_warnings=False,
+            ctx=mock_ctx,
+        )
+
+        assert result["success"] is True
+        assert captured["source"] == "Check nat."
+        assert captured["workspace"] == str(tmp_path)
+        assert captured["timeout"] == 7
+        assert captured["include_warnings"] is False
+        assert captured["lifespan_state"] is mock_ctx.lifespan_context

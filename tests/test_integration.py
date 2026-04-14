@@ -7,12 +7,20 @@ TestQueryStepWorkflow: query then start+check (require pet)
 
 from __future__ import annotations
 
+import asyncio
 import glob as glob_mod
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE
+
+
+def _call_rocq_compile(**kwargs):
+    """Run the async server wrapper from synchronous tests."""
+    from rocq_mcp.server import rocq_compile
+
+    return asyncio.run(rocq_compile(**kwargs))
 
 # =========================================================================
 # Compile -> Verify workflow (Phase 0)
@@ -29,7 +37,9 @@ class TestCompileVerifyWorkflow:
         """Full happy path: compile succeeds -> verify succeeds."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(source=simple_proof, workspace=str(workspace))
+        compile_result = await rocq_compile(
+            source=simple_proof, workspace=str(workspace)
+        )
         assert compile_result["success"] is True
 
         verify_result = await rocq_verify(
@@ -46,7 +56,9 @@ class TestCompileVerifyWorkflow:
         """Cheat is rejected: either compilation fails or verify catches it."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(source=cheating_proof, workspace=str(workspace))
+        compile_result = await rocq_compile(
+            source=cheating_proof, workspace=str(workspace)
+        )
         # The cheat may or may not compile (depends on exact Rocq version).
         # If compilation already rejects it, the cheat is caught — test passes.
         if not compile_result["success"]:
@@ -66,7 +78,9 @@ class TestCompileVerifyWorkflow:
         """Proof using classical logic passes both compile and verify."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(source=classical_proof, workspace=str(workspace))
+        compile_result = await rocq_compile(
+            source=classical_proof, workspace=str(workspace)
+        )
         assert compile_result["success"] is True
 
         verify_result = await rocq_verify(
@@ -88,7 +102,7 @@ class TestCompileVerifyWorkflow:
         """
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
+        compile_result = await rocq_compile(
             source=axiom_spoofing_proof, workspace=str(workspace)
         )
         if not compile_result["success"]:
@@ -108,7 +122,9 @@ class TestCompileVerifyWorkflow:
         """Proof with an Admitted helper: compile passes, verify must reject."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(source=admitted_proof, workspace=str(workspace))
+        compile_result = await rocq_compile(
+            source=admitted_proof, workspace=str(workspace)
+        )
         assert compile_result["success"] is True
         verify_result = await rocq_verify(
             proof=admitted_proof,
@@ -143,7 +159,9 @@ class TestCompileVerifyWorkflow:
             "Theorem add_0_r : forall n : nat, n + 0 = n.\n"
             "Admitted.\n"
         )
-        compile_result = rocq_compile(source=injection_proof, workspace=str(workspace))
+        compile_result = await rocq_compile(
+            source=injection_proof, workspace=str(workspace)
+        )
         assert compile_result["success"] is True
 
         verify_result = await rocq_verify(
@@ -161,7 +179,7 @@ class TestCompileVerifyWorkflow:
         """rocq_compile must reject source containing Redirect."""
         from rocq_mcp.server import rocq_compile
 
-        result = rocq_compile(
+        result = _call_rocq_compile(
             source='Redirect "/tmp/evil" Print nat.\nTheorem t : True. Proof. exact I. Qed.',
             workspace=str(workspace),
         )
@@ -172,7 +190,7 @@ class TestCompileVerifyWorkflow:
         """rocq_compile must reject source containing Load."""
         from rocq_mcp.server import rocq_compile
 
-        result = rocq_compile(
+        result = _call_rocq_compile(
             source='Load "evil".\nTheorem t : True. Proof. exact I. Qed.',
             workspace=str(workspace),
         )
@@ -183,7 +201,7 @@ class TestCompileVerifyWorkflow:
         """rocq_compile must reject source containing Drop."""
         from rocq_mcp.server import rocq_compile
 
-        result = rocq_compile(
+        result = _call_rocq_compile(
             source="Drop.\nTheorem t : True. Proof. exact I. Qed.",
             workspace=str(workspace),
         )
@@ -208,7 +226,7 @@ class TestCompileVerifyWorkflow:
         )
 
         # Now compile source that imports Helper via rocq_compile
-        result = rocq_compile(
+        result = _call_rocq_compile(
             source=(
                 "From TestProj Require Import Helper.\n" "Definition x := my_const.\n"
             ),
@@ -242,7 +260,7 @@ class TestCompileVerifyWorkflow:
             "Admitted.\n"
         )
 
-        compile_result = rocq_compile(source=proof, workspace=str(tmp_path))
+        compile_result = await rocq_compile(source=proof, workspace=str(tmp_path))
         assert compile_result["success"] is True
 
         verify_result = await rocq_verify(
@@ -262,7 +280,7 @@ class TestCompileVerifyWorkflow:
         from rocq_mcp.server import rocq_compile, rocq_verify
 
         before = set(glob_mod.glob(str(workspace / "*")))
-        rocq_compile(source=simple_proof, workspace=str(workspace))
+        await rocq_compile(source=simple_proof, workspace=str(workspace))
         await rocq_verify(
             proof=simple_proof,
             problem_name="add_0_r",
@@ -278,7 +296,7 @@ class TestCompileVerifyWorkflow:
         """Multi-line From...Require Import works end-to-end."""
         from rocq_mcp.server import rocq_compile, rocq_verify
 
-        compile_result = rocq_compile(
+        compile_result = await rocq_compile(
             source=multiline_import_proof, workspace=str(workspace)
         )
         assert compile_result["success"] is True
@@ -635,5 +653,5 @@ class TestMiniF2FSample:
 
         # The problem file likely ends with Admitted, so compilation should
         # succeed (Admitted is accepted by coqc). We just verify no crash.
-        result = rocq_compile(source=source, workspace=str(ws))
+        result = _call_rocq_compile(source=source, workspace=str(ws))
         assert "success" in result

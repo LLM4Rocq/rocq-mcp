@@ -22,6 +22,7 @@ Infrastructure:
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import tempfile
@@ -41,6 +42,169 @@ import rocq_mcp.server as _server
 
 # _split_rocq_sentences is in compile — import directly (no cycle).
 from rocq_mcp.compile import _split_rocq_sentences
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Proof reconstruction for Admitted / Section-local theorems
+# ---------------------------------------------------------------------------
+
+# Keywords that start a proof-bearing declaration
+_PROOF_DECL_KEYWORDS = (
+    "Lemma ",
+    "Theorem ",
+    "Definition ",
+    "Instance ",
+    "Local Lemma ",
+    "Local Theorem ",
+    "Local Definition ",
+    "Local Instance ",
+    "Global Instance ",
+    "Program Lemma ",
+    "Program Definition ",
+)
+
+_LEMMA_RE = re.compile(
+    r"(?:Local\s+|Global\s+|Program\s+)?"
+    r"(?:Lemma|Theorem|Definition|Instance)\s+"
+    r"(\w+)"
+)
+
+
+def _reconstruct_proof_state(
+    pet: Any, file_path: str, cursor_line: int, cursor_char: int
+) -> tuple[Any | None, str]:
+    """Reconstruct an open proof state when get_state_at_pos returns proof_finished.
+
+    When the cursor is inside an Admitted proof, get_state_at_pos treats the
+    theorem as finished.  This function opens the proof interactively so the
+    user can develop a replacement proof.
+
+    Strategy:
+      1. Search backwards for the enclosing Lemma/Theorem and ``Proof.``.
+      2. Try ``pet.start(file, thm_name)`` (works for top-level theorems).
+      3. Fall back to replaying imports + Section preamble from the file start
+         through ``Proof.`` (works for Section-local theorems).
+      4. Replay tactics from ``Proof.`` to the cursor position.
+
+    Returns ``(state, info_message)`` on success or ``(None, error_message)``
+    on failure.
+    """
+    try:
+        with open(file_path, "r") as f:
+            file_lines = f.readlines()
+    except OSError as e:
+        return None, f"Cannot read file: {e}"
+
+    # --- Locate enclosing declaration and Proof. line ---
+    proof_start_line: int | None = None
+    lemma_line: int | None = None
+    thm_name: str | None = None
+
+    for i in range(min(cursor_line, len(file_lines) - 1), -1, -1):
+        stripped = file_lines[i].strip()
+        if stripped.startswith("Proof"):
+            proof_start_line = i
+        if any(stripped.startswith(kw) for kw in _PROOF_DECL_KEYWORDS):
+            lemma_line = i
+            m = _LEMMA_RE.match(stripped)
+            if m:
+                thm_name = m.group(1)
+            break
+
+    # If Proof not found backwards, search forward from the Lemma line
+    if lemma_line is not None and proof_start_line is None:
+        for i in range(lemma_line, min(cursor_line + 5, len(file_lines))):
+            if "Proof" in file_lines[i].strip():
+                proof_start_line = i
+                break
+
+    if not (lemma_line is not None and proof_start_line is not None and thm_name):
+        return None, (
+            f"Could not locate lemma/proof/name "
+            f"(lemma={lemma_line}, proof={proof_start_line}, name={thm_name})"
+        )
+
+    # --- Strategy 1: pet.start(thm_name) ---
+    start_state = None
+    try:
+        logger.info("Reconstruction: trying start('%s')", thm_name)
+        start_state = pet.start(file_path, thm_name)
+        if getattr(start_state, "proof_finished", False):
+            logger.info(
+                "Reconstruction: start() returned proof_finished, trying strategy 2"
+            )
+            start_state = None
+    except Exception as e:
+        logger.info("Reconstruction: start() failed (%s), trying strategy 2", e)
+
+    # --- Strategy 2: replay from first Require through Proof. ---
+    if start_state is None:
+        try:
+            first_require = 0
+            for i in range(len(file_lines)):
+                s = file_lines[i].strip()
+                if s.startswith("Require") or s.startswith("From "):
+                    first_require = i
+                    break
+
+            logger.info("Reconstruction: getting state at line %d", first_require)
+            base_state = pet.get_state_at_pos(file_path, first_require, 0)
+
+            replay_text = "".join(
+                file_lines[first_require : proof_start_line + 1]
+            ).strip()
+            if not replay_text.rstrip().endswith("Proof."):
+                replay_text += "\nProof."
+
+            logger.info(
+                "Reconstruction: replaying %d lines from file start",
+                proof_start_line + 1 - first_require,
+            )
+            start_state = pet.run(base_state, replay_text)
+
+            if getattr(start_state, "proof_finished", False):
+                return None, "Section replay returned proof_finished"
+        except Exception as e:
+            return None, f"Section replay failed: {e}"
+
+    if start_state is None:
+        return None, "Both reconstruction strategies failed"
+
+    # --- Replay tactics from Proof. to cursor ---
+    replay_start = proof_start_line + 1
+    tactic_text = "".join(file_lines[replay_start:cursor_line]).strip()
+
+    # Strip comments and proof terminators
+    tactic_text = re.sub(r"\(\*.*?\*\)", "", tactic_text, flags=re.DOTALL)
+    for term in ("Admitted.", "Qed.", "Abort.", "Defined."):
+        tactic_text = tactic_text.replace(term, "")
+    tactic_text = tactic_text.strip()
+
+    current = start_state
+    if tactic_text:
+        try:
+            current = pet.run(current, tactic_text)
+        except Exception:
+            logger.info(
+                "Reconstruction: block replay failed, trying sentence-by-sentence"
+            )
+            current = start_state
+            sentences = re.split(r"\.(?=\s|$)", tactic_text)
+            for sent in sentences:
+                sent = sent.strip()
+                if not sent:
+                    continue
+                try:
+                    current = pet.run(current, sent + ".")
+                except Exception as e:
+                    logger.info("Reconstruction: stopped at: %.60s (%s)", sent, e)
+                    break
+
+    info = f"Reconstructed via '{thm_name}', replay lines {replay_start}-{cursor_line}"
+    logger.info("Reconstruction: success — %s", info)
+    return current, info
+
 
 # ---------------------------------------------------------------------------
 # Goal formatting helper (shared by run_check, run_step_multi)
@@ -808,6 +972,20 @@ async def run_start(
         elif _start_by_pos:
             _server._set_workspace_if_needed(pet, workspace, lifespan_state)
             state = pet.get_state_at_pos(resolved_file, line, character)
+            proof_finished = getattr(state, "proof_finished", False)
+
+            # If proof_finished inside an Admitted proof, try to reconstruct
+            # an open proof state so the user can develop a replacement.
+            reconstructed_info = ""
+            if proof_finished:
+                rstate, rmsg = _reconstruct_proof_state(
+                    pet, resolved_file, line, character
+                )
+                if rstate is not None:
+                    state = rstate
+                    proof_finished = getattr(state, "proof_finished", False)
+                    reconstructed_info = rmsg
+
             # Capture mtime after get_state_at_pos to avoid TOCTOU gap
             try:
                 file_mtime = os.path.getmtime(resolved_file)
@@ -825,14 +1003,17 @@ async def run_start(
                 resolved_file=resolved_file,
             )
             goals = _try_get_goals(pet, state) or ""
-            return {
+            result = {
                 "success": True,
                 "state_id": state_id,
                 "goals": goals,
                 "file": file,
                 "theorem": f"@pos({line},{character})",
-                "proof_finished": getattr(state, "proof_finished", False),
+                "proof_finished": proof_finished,
             }
+            if reconstructed_info:
+                result["reconstructed"] = reconstructed_info
+            return result
         else:
             # Preamble mode
             preamble_cmds = _split_rocq_sentences(preamble) if preamble.strip() else []

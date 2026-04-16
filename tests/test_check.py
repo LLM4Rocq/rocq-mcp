@@ -401,12 +401,7 @@ class TestCheckTimeout:
         from rocq_mcp.server import _invalidate_pet
 
         vfile = workspace / "check_timeout.v"
-        # Define the looping tactic but use a non-diverging proof body.
-        # coq-lsp processes the full file during pet.start(), so the file
-        # itself must not diverge. The loop is tested via run_check.
-        vfile.write_text(
-            "Ltac loop := idtac; loop.\n" "Theorem t : True.\nProof. exact I. Qed.\n"
-        )
+        vfile.write_text("Theorem t : True.\nProof. exact I. Qed.\n")
 
         # Use a normal timeout for start (pet compilation takes time),
         # then pass a short timeout explicitly to run_check.
@@ -421,7 +416,7 @@ class TestCheckTimeout:
             assert sr["success"] is True
 
             cr = await run_check(
-                body="loop.",
+                body="repeat eapply proj1.",
                 timeout=2.0,
                 lifespan_state=state,
                 from_state=sr["state_id"],

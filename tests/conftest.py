@@ -129,16 +129,10 @@ def admitted_proof():
 def timeout_proof():
     """A proof that loops forever, causing subprocess timeout.
 
-    Uses a recursive Ltac that truly diverges. The test must use a short
-    subprocess timeout (e.g. 3s) to trigger TimeoutExpired.
+    Uses a tactic that keeps growing the obligation without making
+    progress.
     """
-    return (
-        "Ltac loop := idtac; loop.\n"
-        "Theorem loop_thm : True.\n"
-        "Proof.\n"
-        "  loop.\n"
-        "Qed.\n"
-    )
+    return "Theorem loop_thm : True.\n" "Proof.\n" "  repeat eapply proj1.\n" "Qed.\n"
 
 
 @pytest.fixture

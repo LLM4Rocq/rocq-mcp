@@ -457,6 +457,49 @@ class TestParseProjectFlags:
         flags = _parse_project_flags(tmp_path)
         assert flags == []
 
+    # --- .mcp-workspace/ directory support ---
+
+    def test_mcp_workspace_coqproject_preferred(self, tmp_path):
+        """.mcp-workspace/_CoqProject is preferred over root _CoqProject."""
+        (tmp_path / "_CoqProject").write_text("-Q . RootProject\n")
+        mcp_ws = tmp_path / ".mcp-workspace"
+        mcp_ws.mkdir()
+        (mcp_ws / "_CoqProject").write_text("-Q . McpProject\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "McpProject"]
+
+    def test_mcp_workspace_rocqproject_preferred(self, tmp_path):
+        """.mcp-workspace/_RocqProject is preferred over root _RocqProject."""
+        (tmp_path / "_RocqProject").write_text("-Q . RootProject\n")
+        mcp_ws = tmp_path / ".mcp-workspace"
+        mcp_ws.mkdir()
+        (mcp_ws / "_RocqProject").write_text("-Q . McpProject\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "McpProject"]
+
+    def test_mcp_workspace_missing_falls_back(self, tmp_path):
+        """Without .mcp-workspace/, falls back to root _CoqProject."""
+        (tmp_path / "_CoqProject").write_text("-Q . RootProject\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "RootProject"]
+
+    def test_mcp_workspace_empty_falls_back(self, tmp_path):
+        """.mcp-workspace/ exists but has no project file -> root _CoqProject."""
+        (tmp_path / "_CoqProject").write_text("-Q . RootProject\n")
+        mcp_ws = tmp_path / ".mcp-workspace"
+        mcp_ws.mkdir()
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "RootProject"]
+
+    def test_mcp_workspace_rocqproject_over_root_coqproject(self, tmp_path):
+        """.mcp-workspace/_RocqProject beats root _CoqProject."""
+        (tmp_path / "_CoqProject").write_text("-Q . RootCoq\n")
+        mcp_ws = tmp_path / ".mcp-workspace"
+        mcp_ws.mkdir()
+        (mcp_ws / "_RocqProject").write_text("-Q . McpRocq\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-Q", ".", "McpRocq"]
+
 
 # =========================================================================
 # _parse_dune_flags — dune project detection

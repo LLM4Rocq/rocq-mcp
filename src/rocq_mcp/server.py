@@ -313,6 +313,16 @@ def _parse_project_flags(ws: Path) -> list[str]:
     - Directory paths in ``-Q``/``-R``/``-I`` are validated to stay
       within the workspace (absolute paths and ``../`` escapes rejected).
     """
+    # Prefer .mcp-workspace/ subdirectory if it contains a project file.
+    # This allows projects to maintain a separate _CoqProject for MCP/coq-lsp
+    # without modifying the main build's _CoqProject.
+    mcp_ws = ws / ".mcp-workspace"
+    for name in ("_RocqProject", "_CoqProject"):
+        p = mcp_ws / name
+        if p.is_file():
+            ws = mcp_ws  # redirect to the MCP workspace
+            break
+
     for name in ("_RocqProject", "_CoqProject"):
         proj = ws / name
         if proj.is_file():

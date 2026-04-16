@@ -132,12 +132,7 @@ def timeout_proof():
     Uses a tactic that keeps growing the obligation without making
     progress.
     """
-    return (
-        "Theorem loop_thm : True.\n"
-        "Proof.\n"
-        "  repeat eapply proj1.\n"
-        "Qed.\n"
-    )
+    return "Theorem loop_thm : True.\n" "Proof.\n" "  repeat eapply proj1.\n" "Qed.\n"
 
 
 @pytest.fixture

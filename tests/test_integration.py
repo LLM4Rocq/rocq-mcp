@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import glob as glob_mod
+import re
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ def _call_rocq_compile(**kwargs):
     from rocq_mcp.server import rocq_compile
 
     return asyncio.run(rocq_compile(**kwargs))
+
 
 # =========================================================================
 # Compile -> Verify workflow (Phase 0)
@@ -348,21 +350,18 @@ class TestCompileErrorStateWorkflow:
         """rocq_compile should attach a recoverable state at the error position."""
         from rocq_mcp.server import rocq_compile
 
-        source = (
-            "Theorem bad : True.\n"
-            "Proof.\n"
-            "  exact 0.\n"
-            "Qed.\n"
-        )
+        source = "Theorem bad : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n"
         ctx = _MockContext(lifespan_state)
 
         result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
 
         assert result["success"] is False
         assert isinstance(result["state_id"], int)
-        assert result["goals"] == "\n|-True"
+        assert "|-True" in result["goals"]
         assert result["file"] == "<proof>"
-        assert result["theorem"] == "@pos(2,8)"
+        # Position is on line 2 (0-indexed: the `exact 0.` line);
+        # the column is set by coqc and may shift across Rocq versions.
+        assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
 
     async def test_compile_file_includes_error_state(self, lifespan_state, workspace):
@@ -370,12 +369,7 @@ class TestCompileErrorStateWorkflow:
         from rocq_mcp.server import rocq_compile_file
 
         path = workspace / "error_state_test.v"
-        path.write_text(
-            "Theorem bad : True.\n"
-            "Proof.\n"
-            "  exact 0.\n"
-            "Qed.\n"
-        )
+        path.write_text("Theorem bad : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n")
         ctx = _MockContext(lifespan_state)
 
         result = await rocq_compile_file(
@@ -386,9 +380,9 @@ class TestCompileErrorStateWorkflow:
 
         assert result["success"] is False
         assert isinstance(result["state_id"], int)
-        assert result["goals"] == "\n|-True"
+        assert "|-True" in result["goals"]
         assert result["file"] == "error_state_test.v"
-        assert result["theorem"] == "@pos(2,8)"
+        assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
 
     async def test_compile_with_assumption_includes_goal_context(
@@ -397,20 +391,16 @@ class TestCompileErrorStateWorkflow:
         """Captured goals should include local assumptions from the proof state."""
         from rocq_mcp.server import rocq_compile
 
-        source = (
-            "Lemma bad (n : nat) : True.\n"
-            "Proof.\n"
-            "  exact 0.\n"
-            "Qed.\n"
-        )
+        source = "Lemma bad (n : nat) : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n"
         ctx = _MockContext(lifespan_state)
 
         result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
 
         assert result["success"] is False
-        assert result["goals"] == "n : nat\n|-True"
+        assert "n : nat" in result["goals"]
+        assert "|-True" in result["goals"]
         assert result["file"] == "<proof>"
-        assert result["theorem"] == "@pos(2,8)"
+        assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
 
     async def test_compile_multiple_tactics_same_line_uses_later_error_position(
@@ -420,19 +410,27 @@ class TestCompileErrorStateWorkflow:
         from rocq_mcp.server import rocq_compile
 
         source = (
-            "Lemma bad (n : nat) : True.\n"
-            "Proof.\n"
-            "  idtac. exact 0.\n"
-            "Qed.\n"
+            "Lemma bad (n : nat) : True.\n" "Proof.\n" "  idtac. exact 0.\n" "Qed.\n"
         )
         ctx = _MockContext(lifespan_state)
 
         result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
 
         assert result["success"] is False
-        assert result["goals"] == "n : nat\n|-True"
+        assert "n : nat" in result["goals"]
+        assert "|-True" in result["goals"]
         assert result["file"] == "<proof>"
-        assert result["theorem"] == "@pos(2,15)"
+        # Capture must point on line 2 and *after* the prior `idtac.` so
+        # the goal reflects the earlier successful tactic.  The exact
+        # column is coqc-reported and may shift across Rocq versions.
+        m = re.match(r"@pos\((\d+),(\d+)\)", result["theorem"])
+        assert m, f"theorem should be @pos(line,col), got {result['theorem']!r}"
+        line, col = int(m.group(1)), int(m.group(2))
+        assert line == 2
+        assert col > len("  idtac."), (
+            f"position should be past 'idtac.' (col >{len('  idtac.')}), "
+            f"got col={col}"
+        )
         assert result["proof_finished"] is False
 
 

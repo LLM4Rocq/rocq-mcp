@@ -199,14 +199,6 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
     return positions
 
 
-def _first_error_position(stderr: str) -> dict[str, Any] | None:
-    """Return the first Error-level diagnostic position, skipping warnings."""
-    for pos in _parse_coqc_error_positions(stderr):
-        if pos["message"].startswith("Error:"):
-            return pos
-    return None
-
-
 def _first_error_from_positions(
     positions: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
@@ -425,20 +417,23 @@ async def _capture_compile_error_state(
     except ImportError:
         return None
 
-    ws = Path(workspace).resolve()
     lookup_file = resolved_file
     temp_path: str | None = None
 
     if lookup_file is None:
-        with tempfile.NamedTemporaryFile(
-            suffix=".v",
-            mode="w",
-            delete=False,
-            dir=str(ws),
-        ) as f:
-            f.write(source)
-            f.flush()
-            temp_path = f.name
+        ws = Path(workspace).resolve()
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".v",
+                mode="w",
+                delete=False,
+                dir=str(ws),
+            ) as f:
+                f.write(source)
+                f.flush()
+                temp_path = f.name
+        except OSError:
+            return None
         lookup_file = temp_path
 
     try:
@@ -604,11 +599,6 @@ async def run_compile_file_with_state(
     except (ValueError, FileNotFoundError):
         resolved_file = None
 
-    try:
-        source = Path(resolved_file).read_text() if resolved_file else ""
-    except OSError:
-        source = ""
-
     result = run_compile_file(file, workspace, timeout, include_warnings)
     if (
         lifespan_state is None
@@ -623,7 +613,7 @@ async def run_compile_file_with_state(
         return result
 
     state_result = await _capture_compile_error_state(
-        source,
+        "",
         workspace,
         lifespan_state,
         line=primary_error["line"],

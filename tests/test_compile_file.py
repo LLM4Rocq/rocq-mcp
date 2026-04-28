@@ -259,12 +259,13 @@ class TestCompileFileErrorStateCapture:
         self, workspace, monkeypatch
     ):
         import rocq_mcp.compile as _compile
+        import rocq_mcp.server as _server
 
         path = workspace / "capture_test.v"
         path.write_text("Theorem bad : True.\n  exact 0.\n")
         stderr = (
             'File "capture_test.v", line 2, characters 2-9:\n'
-            "Error: The term \"0\" has type \"nat\" while it is expected to have type \"True\".\n"
+            'Error: The term "0" has type "nat" while it is expected to have type "True".\n'
         )
 
         monkeypatch.setattr(
@@ -272,6 +273,7 @@ class TestCompileFileErrorStateCapture:
             "_run_coqc_file",
             lambda *a, **kw: self._make_fake_result(stderr),
         )
+
         async def _mock_capture_success(*args, **kwargs):
             return {
                 "state_id": 23,
@@ -282,17 +284,19 @@ class TestCompileFileErrorStateCapture:
             }
 
         monkeypatch.setattr(
-            _compile,
+            _server,
             "_capture_compile_error_state",
             _mock_capture_success,
         )
 
-        result = asyncio.run(_compile.run_compile_file_with_state(
-            file="capture_test.v",
-            workspace=str(workspace),
-            timeout=60,
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-        ))
+        result = asyncio.run(
+            _server.run_compile_file_with_state(
+                file="capture_test.v",
+                workspace=str(workspace),
+                timeout=60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
 
         assert result["success"] is False
         assert result["state_id"] == 23
@@ -302,6 +306,7 @@ class TestCompileFileErrorStateCapture:
 
     def test_compile_file_capture_receives_resolved_path(self, workspace, monkeypatch):
         import rocq_mcp.compile as _compile
+        import rocq_mcp.server as _server
 
         path = workspace / "resolved_path_test.v"
         path.write_text("Theorem bad : True.\n  exact 0.\n")
@@ -321,14 +326,16 @@ class TestCompileFileErrorStateCapture:
             captured.update(kwargs)
             return None
 
-        monkeypatch.setattr(_compile, "_capture_compile_error_state", _mock_capture)
+        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture)
 
-        asyncio.run(_compile.run_compile_file_with_state(
-            file="resolved_path_test.v",
-            workspace=str(workspace),
-            timeout=60,
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-        ))
+        asyncio.run(
+            _server.run_compile_file_with_state(
+                file="resolved_path_test.v",
+                workspace=str(workspace),
+                timeout=60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
 
         assert captured["file_label"] == "resolved_path_test.v"
         assert captured["resolved_file"] == str(path.resolve())
@@ -378,13 +385,15 @@ class TestRocqCompileFileWrapper:
         mock_ctx = MagicMock()
         mock_ctx.lifespan_context = {"pet_client": None}
 
-        result = asyncio.run(rocq_compile_file(
-            file="proof.v",
-            workspace=str(tmp_path),
-            timeout=9,
-            include_warnings=False,
-            ctx=mock_ctx,
-        ))
+        result = asyncio.run(
+            rocq_compile_file(
+                file="proof.v",
+                workspace=str(tmp_path),
+                timeout=9,
+                include_warnings=False,
+                ctx=mock_ctx,
+            )
+        )
 
         assert result["success"] is True
         assert captured["file"] == "proof.v"

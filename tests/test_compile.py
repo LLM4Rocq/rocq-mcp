@@ -124,9 +124,7 @@ class TestCompileInputValidation:
 
     def test_oversized_source(self, workspace):
         """Source exceeding ROCQ_MAX_SOURCE_SIZE should be rejected early."""
-        result = _call_rocq_compile(
-            source="x" * 2_000_000, workspace=str(workspace)
-        )
+        result = _call_rocq_compile(source="x" * 2_000_000, workspace=str(workspace))
         assert result["success"] is False
         assert "size" in result["error"].lower()
 
@@ -369,16 +367,18 @@ class TestCompileErrorStateCapture:
     ):
         """Successful PET capture should enrich the compile error result."""
         from rocq_mcp import compile as _compile
+        from rocq_mcp import server as _server
 
         stderr = (
             'File "/tmp/tmp.v", line 2, characters 2-9:\n'
-            "Error: The term \"0\" has type \"nat\" while it is expected to have type \"True\".\n"
+            'Error: The term "0" has type "nat" while it is expected to have type "True".\n'
         )
         monkeypatch.setattr(
             _compile,
             "_run_coqc",
             lambda *a, **kw: self._make_fake_result(stderr),
         )
+
         async def _mock_capture_success(*args, **kwargs):
             return {
                 "state_id": 17,
@@ -389,17 +389,19 @@ class TestCompileErrorStateCapture:
             }
 
         monkeypatch.setattr(
-            _compile,
+            _server,
             "_capture_compile_error_state",
             _mock_capture_success,
         )
 
-        result = asyncio.run(_compile.run_compile_with_state(
-            "Theorem bad : True.\n  exact 0.\n",
-            str(workspace),
-            60,
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-        ))
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "Theorem bad : True.\n  exact 0.\n",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
 
         assert result["success"] is False
         assert result["state_id"] == 17
@@ -412,6 +414,7 @@ class TestCompileErrorStateCapture:
     def test_warning_before_error_uses_error_position(self, workspace, monkeypatch):
         """State capture must target the first Error, not a preceding Warning."""
         from rocq_mcp import compile as _compile
+        from rocq_mcp import server as _server
 
         stderr = (
             'File "/tmp/tmp.v", line 1, characters 0-5:\n'
@@ -431,14 +434,16 @@ class TestCompileErrorStateCapture:
             captured.update(kwargs)
             return None
 
-        monkeypatch.setattr(_compile, "_capture_compile_error_state", _mock_capture)
+        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture)
 
-        asyncio.run(_compile.run_compile_with_state(
-            "x",
-            str(workspace),
-            60,
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-        ))
+        asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
 
         assert captured["line"] == 4
         assert captured["character"] == 3
@@ -446,27 +451,28 @@ class TestCompileErrorStateCapture:
     def test_capture_failure_preserves_existing_hint(self, workspace, monkeypatch):
         """Failed PET capture should fall back to the original compile guidance."""
         from rocq_mcp import compile as _compile
+        from rocq_mcp import server as _server
 
-        stderr = (
-            'File "/tmp/tmp.v", line 2, characters 0-5:\n'
-            "Error: Real failure.\n"
-        )
+        stderr = 'File "/tmp/tmp.v", line 2, characters 0-5:\n' "Error: Real failure.\n"
         monkeypatch.setattr(
             _compile,
             "_run_coqc",
             lambda *a, **kw: self._make_fake_result(stderr),
         )
+
         async def _mock_capture_none(*args, **kwargs):
             return None
 
-        monkeypatch.setattr(_compile, "_capture_compile_error_state", _mock_capture_none)
+        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture_none)
 
-        result = asyncio.run(_compile.run_compile_with_state(
-            "x",
-            str(workspace),
-            60,
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-        ))
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
 
         assert result["success"] is False
         assert "state_id" not in result
@@ -507,7 +513,9 @@ class TestRocqCompileWrapper:
             return {"success": True, "output": "mock"}
 
         monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
-        monkeypatch.setattr(_server, "run_compile_with_state", mock_run_compile_with_state)
+        monkeypatch.setattr(
+            _server, "run_compile_with_state", mock_run_compile_with_state
+        )
 
         mock_ctx = MagicMock()
         mock_ctx.lifespan_context = {"pet_client": None}

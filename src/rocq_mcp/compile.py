@@ -199,6 +199,16 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
     return positions
 
 
+def _first_error_from_positions(
+    positions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first Error-level entry from parsed diagnostic positions."""
+    for pos in positions:
+        if pos["message"].startswith("Error:"):
+            return pos
+    return None
+
+
 # Regex to match coqc diagnostic blocks: File "path", line N, characters S-E:\n<body>
 _COQC_DIAG_RE = re.compile(
     r'(File "([^"]*)", line (\d+), characters (\d+)-(\d+):\s*\n)(.*?)(?=File "|$)',
@@ -417,7 +427,12 @@ def run_compile(
         return {"success": False, "error": forbidden}
 
     result = _run_coqc(source, workspace, timeout)
-    return _build_compile_result(result, source, timeout, include_warnings)
+    return _build_compile_result(
+        result,
+        source,
+        timeout,
+        include_warnings,
+    )
 
 
 # ---------------------------------------------------------------------------

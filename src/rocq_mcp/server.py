@@ -13,6 +13,7 @@ import asyncio
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -695,13 +696,13 @@ async def _run_with_pet(
 # defined, because compile and interactive import from this module.
 
 from rocq_mcp.compile import (  # noqa: E402
+    _first_error_from_positions,
     run_compile,
     run_compile_file,
-    run_compile_with_state,
-    run_compile_file_with_state,
     run_verify,
 )
 from rocq_mcp.interactive import (  # noqa: E402
+    capture_position_state,
     run_assumptions,
     run_query,
     run_start,
@@ -710,6 +711,154 @@ from rocq_mcp.interactive import (  # noqa: E402
     run_toc,
     run_notations,
 )
+
+# ---------------------------------------------------------------------------
+# Compile-error-state orchestration
+# ---------------------------------------------------------------------------
+# These helpers wrap the coqc-only run_compile / run_compile_file with
+# best-effort PET state capture at the error position.  They live here
+# (not in compile.py) so compile.py stays free of any pytanque dependency
+# for its core operation.
+
+
+async def _capture_compile_error_state(
+    source: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+    *,
+    line: int,
+    character: int,
+    file_label: str,
+    resolved_file: str | None = None,
+) -> dict[str, Any] | None:
+    """Best-effort PET lookup of the proof state at a compile error."""
+    lookup_file = resolved_file
+    temp_path: str | None = None
+
+    if lookup_file is None:
+        ws = Path(workspace).resolve()
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".v",
+                mode="w",
+                delete=False,
+                dir=str(ws),
+            ) as f:
+                f.write(source)
+                f.flush()
+                temp_path = f.name
+        except OSError:
+            return None
+        lookup_file = temp_path
+
+    try:
+        state_result = await capture_position_state(
+            file=file_label,
+            resolved_file=lookup_file,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+            line=line,
+            character=character,
+            description="Compile error state capture",
+            track_staleness=resolved_file is not None,
+        )
+    finally:
+        if temp_path is not None:
+            _cleanup_coqc_artifacts(temp_path)
+
+    if not isinstance(state_result, dict) or not state_result.get("success"):
+        return None
+    return state_result
+
+
+def _merge_compile_error_state(
+    result_dict: dict[str, Any],
+    state_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Attach captured proof-state fields to a compile failure result."""
+    for key in ("state_id", "goals", "file", "theorem", "proof_finished"):
+        result_dict[key] = state_result[key]
+    result_dict["hint"] = (
+        "Interactive proof state captured at the error position. "
+        f"Use rocq_check(from_state={state_result['state_id']}) or "
+        f"rocq_step_multi(from_state={state_result['state_id']}) "
+        "to explore fixes."
+    )
+    return result_dict
+
+
+async def run_compile_with_state(
+    source: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool = True,
+    lifespan_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Async wrapper for run_compile that enriches failures with PET state."""
+    result = run_compile(source, workspace, timeout, include_warnings)
+    if (
+        lifespan_state is None
+        or result.get("success")
+        or "error_positions" not in result
+    ):
+        return result
+
+    primary_error = _first_error_from_positions(result["error_positions"])
+    if primary_error is None:
+        return result
+
+    state_result = await _capture_compile_error_state(
+        source,
+        workspace,
+        lifespan_state,
+        line=primary_error["line"],
+        character=primary_error["character"],
+        file_label="<proof>",
+    )
+    if state_result is None:
+        return result
+    return _merge_compile_error_state(result, state_result)
+
+
+async def run_compile_file_with_state(
+    file: str,
+    workspace: str,
+    timeout: int,
+    include_warnings: bool = True,
+    lifespan_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Async wrapper for run_compile_file that enriches failures with PET state."""
+    try:
+        resolved_file = _resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError):
+        resolved_file = None
+
+    result = run_compile_file(file, workspace, timeout, include_warnings)
+    if (
+        lifespan_state is None
+        or result.get("success")
+        or "error_positions" not in result
+        or resolved_file is None
+    ):
+        return result
+
+    primary_error = _first_error_from_positions(result["error_positions"])
+    if primary_error is None:
+        return result
+
+    state_result = await _capture_compile_error_state(
+        "",
+        workspace,
+        lifespan_state,
+        line=primary_error["line"],
+        character=primary_error["character"],
+        file_label=file,
+        resolved_file=resolved_file,
+    )
+    if state_result is None:
+        return result
+    return _merge_compile_error_state(result, state_result)
+
 
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile

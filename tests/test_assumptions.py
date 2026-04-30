@@ -371,10 +371,9 @@ class TestRocqAssumptionsWrapper:
     @pytest.mark.asyncio
     async def test_invalid_workspace_returns_error(self):
         from rocq_mcp.server import rocq_assumptions
-        from unittest.mock import MagicMock
+        from tests.conftest import _MockContext
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {}
+        mock_ctx = _MockContext({})
         result = await rocq_assumptions(
             name="foo",
             file="test.v",
@@ -387,7 +386,7 @@ class TestRocqAssumptionsWrapper:
     async def test_params_forwarded(self, monkeypatch, tmp_path):
         """Wrapper should forward all params to run_assumptions."""
         from rocq_mcp.server import rocq_assumptions
-        from unittest.mock import MagicMock
+        from tests.conftest import _MockContext
         import rocq_mcp.server as _server
 
         captured = {}
@@ -399,8 +398,7 @@ class TestRocqAssumptionsWrapper:
         monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
         monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {"pet_client": None}
+        mock_ctx = _MockContext({"pet_client": None})
 
         await rocq_assumptions(
             name="my_thm",

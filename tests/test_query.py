@@ -553,10 +553,9 @@ class TestRocqQueryWrapper:
     @pytest.mark.asyncio
     async def test_invalid_workspace_returns_error(self):
         from rocq_mcp.server import rocq_query
-        from unittest.mock import MagicMock
+        from tests.conftest import _MockContext
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {}
+        mock_ctx = _MockContext({})
         result = await rocq_query(
             command="Check nat.",
             workspace="/nonexistent_rocq_workspace_xyz",
@@ -568,7 +567,7 @@ class TestRocqQueryWrapper:
     async def test_params_forwarded(self, monkeypatch, tmp_path):
         """Wrapper should forward all params to run_query."""
         from rocq_mcp.server import rocq_query
-        from unittest.mock import MagicMock
+        from tests.conftest import _MockContext
         import rocq_mcp.server as _server
 
         captured = {}
@@ -580,8 +579,7 @@ class TestRocqQueryWrapper:
         monkeypatch.setattr(_server, "run_query", mock_run_query)
         monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {"pet_client": None}
+        mock_ctx = _MockContext({"pet_client": None})
 
         await rocq_query(
             command="Check nat.",

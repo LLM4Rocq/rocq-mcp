@@ -12,11 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import glob as glob_mod
-from unittest.mock import MagicMock
-
 import pytest
 
-from tests.conftest import COQC_AVAILABLE
+from tests.conftest import (
+    COQC_AVAILABLE,
+    _DEFAULT_STDERR,
+    _MockContext,
+    _fake_coqc_result,
+    _patch_capture_position_state,
+    _patch_compile_error,
+)
 from rocq_mcp.server import rocq_compile
 
 pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -345,96 +350,45 @@ class TestCompileWarningsTruncation:
 
 # ---------------------------------------------------------------------------
 # Proof-state capture on compile errors
+#
+# These tests exercise the orchestration path
+#     run_compile_with_state -> _capture_compile_error_state
+#                              -> capture_position_state (mocked)
+#                              -> _merge_compile_error_state
+# All mocks attach at ``capture_position_state`` (the boundary between the
+# orchestrator and the PET subprocess) so that the status-derivation logic
+# inside ``_capture_compile_error_state`` is actually exercised.
+#
+# ``_fake_coqc_result``, ``_patch_compile_error``,
+# ``_patch_capture_position_state``, and ``_DEFAULT_STDERR`` live in
+# ``tests/conftest.py`` so they are reusable across compile / compile_file
+# test modules.
 # ---------------------------------------------------------------------------
 
 
-class TestCompileErrorStateCapture:
-    """Compile errors should include rocq_start-style state when available."""
+class TestStateCaptureStatus:
+    """Status-derivation tests: mock ``capture_position_state``, not higher."""
 
     pytestmark = []
 
-    @staticmethod
-    def _make_fake_result(stderr, returncode=1):
-        return {
-            "returncode": returncode,
-            "stdout": "",
-            "stderr": stderr,
-            "timed_out": False,
-        }
-
-    def test_compile_error_includes_state_when_capture_succeeds(
-        self, workspace, monkeypatch
-    ):
-        """Successful PET capture should enrich the compile error result."""
-        from rocq_mcp import compile as _compile
-        from rocq_mcp import server as _server
-
-        stderr = (
-            'File "/tmp/tmp.v", line 2, characters 2-9:\n'
-            'Error: The term "0" has type "nat" while it is expected to have type "True".\n'
-        )
-        monkeypatch.setattr(
-            _compile,
-            "_run_coqc",
-            lambda *a, **kw: self._make_fake_result(stderr),
-        )
-
-        async def _mock_capture_success(*args, **kwargs):
-            return {
-                "state_id": 17,
-                "goals": "|- True",
-                "file": "<proof>",
-                "theorem": "@pos(1,2)",
-                "proof_finished": False,
-            }
-
-        monkeypatch.setattr(
-            _server,
-            "_capture_compile_error_state",
-            _mock_capture_success,
-        )
-
-        result = asyncio.run(
-            _server.run_compile_with_state(
-                "Theorem bad : True.\n  exact 0.\n",
-                str(workspace),
-                60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["success"] is False
-        assert result["state_id"] == 17
-        assert result["goals"] == "|- True"
-        assert result["file"] == "<proof>"
-        assert result["theorem"] == "@pos(1,2)"
-        assert result["proof_finished"] is False
-        assert "rocq_check(from_state=17)" in result["hint"]
-
     def test_warning_before_error_uses_error_position(self, workspace, monkeypatch):
         """State capture must target the first Error, not a preceding Warning."""
-        from rocq_mcp import compile as _compile
-        from rocq_mcp import server as _server
-
         stderr = (
             'File "/tmp/tmp.v", line 1, characters 0-5:\n'
             "Warning: Deprecated.\n"
             'File "/tmp/tmp.v", line 5, characters 3-11:\n'
             "Error: Real failure.\n"
         )
-        captured = {}
+        _patch_compile_error(monkeypatch, stderr)
+        from rocq_mcp import server as _server
 
-        monkeypatch.setattr(
-            _compile,
-            "_run_coqc",
-            lambda *a, **kw: self._make_fake_result(stderr),
-        )
+        captured: dict = {}
 
-        async def _mock_capture(*args, **kwargs):
+        async def _mock_cps(**kwargs):
             captured.update(kwargs)
-            return None
+            return {"success": False, "error": "boom", "pet_restarted": True}
 
-        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture)
+        _patch_capture_position_state(monkeypatch, _mock_cps)
 
         asyncio.run(
             _server.run_compile_with_state(
@@ -445,25 +399,207 @@ class TestCompileErrorStateCapture:
             )
         )
 
+        # First Error is on the second diagnostic block: line 5 (1-based)
+        # -> 4 (0-based); character 3.
         assert captured["line"] == 4
         assert captured["character"] == 3
 
-    def test_capture_failure_preserves_existing_hint(self, workspace, monkeypatch):
-        """Failed PET capture should fall back to the original compile guidance."""
+    def test_status_timeout_when_pet_times_out(self, workspace, monkeypatch):
+        """capture_position_state returning a timeout dict -> status='timeout'."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        async def _mock_cps(**kwargs):
+            return {
+                "success": False,
+                "error": "Compile error state capture timed out after 5.0s.",
+                "pet_restarted": True,
+                "reason": "timeout",
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "timeout"
+        assert "state_id" not in result
+        assert "Real failure" in result["error"]
+        assert "Use rocq_start" in result["hint"]
+
+    def test_status_crashed_when_pet_restarts(self, workspace, monkeypatch):
+        """capture_position_state returning a crash dict -> status='crashed'."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        async def _mock_cps(**kwargs):
+            return {
+                "success": False,
+                "error": "Pet process died: BrokenPipeError",
+                "pet_restarted": True,
+                "reason": "crashed",
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "crashed"
+        assert "state_id" not in result
+        assert "Real failure" in result["error"]
+
+    def test_status_lock_contended_when_pet_busy(self, workspace, monkeypatch):
+        """capture_position_state returning a lock-contention dict -> status='lock_contended'."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        async def _mock_cps(**kwargs):
+            return {
+                "success": False,
+                "error": (
+                    "Compile error state capture: pet is busy "
+                    "(lock contention). Try again."
+                ),
+                "reason": "lock_contended",
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "lock_contended"
+        assert "state_id" not in result
+        assert "Real failure" in result["error"]
+        assert "Use rocq_start" in result["hint"]
+
+    def test_status_unavailable_when_pet_not_installed(self, workspace, monkeypatch):
+        """capture_position_state returning reason='unavailable' -> status='unavailable'."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        async def _mock_cps(**kwargs):
+            return {
+                "success": False,
+                "error": (
+                    "pytanque is not installed. "
+                    "Install with: pip install 'rocq-mcp[interactive]'"
+                ),
+                "reason": "unavailable",
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "unavailable"
+        assert "state_id" not in result
+
+    def test_status_defaults_to_crashed_when_no_reason(self, workspace, monkeypatch):
+        """A failure dict with no ``reason`` key falls back to status='crashed'."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        async def _mock_cps(**kwargs):
+            return {
+                "success": False,
+                "error": "Pet died unexpectedly",
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "crashed"
+        assert "state_id" not in result
+
+    def test_status_unavailable_when_import_fails(self, workspace, monkeypatch):
+        """Forced ImportError on rocq_mcp.interactive -> status='unavailable'."""
+        import sys
+
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        # Setting the module to None makes ``from rocq_mcp.interactive import ...``
+        # raise ImportError at runtime.
+        monkeypatch.setitem(sys.modules, "rocq_mcp.interactive", None)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "unavailable"
+        assert "state_id" not in result
+        assert "Use rocq_start" in result["hint"]
+
+    def test_status_no_position_when_no_error_positions(self, workspace, monkeypatch):
+        """When the coqc result lacks ``error_positions`` capture is not attempted."""
         from rocq_mcp import compile as _compile
         from rocq_mcp import server as _server
 
-        stderr = 'File "/tmp/tmp.v", line 2, characters 0-5:\n' "Error: Real failure.\n"
+        # stderr that produces no File-line entries -> _format_error returns
+        # empty -> _build_compile_result falls through to the no-position
+        # fallback (no ``error_positions`` key in the result dict).
         monkeypatch.setattr(
             _compile,
             "_run_coqc",
-            lambda *a, **kw: self._make_fake_result(stderr),
+            lambda *a, **kw: _fake_coqc_result(
+                "Toplevel: unstructured error, no File-line marker.\n"
+            ),
         )
 
-        async def _mock_capture_none(*args, **kwargs):
-            return None
+        called = {"hit": False}
 
-        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture_none)
+        async def _mock_cps(**kwargs):
+            called["hit"] = True
+            return {
+                "success": True,
+                "state_id": 1,
+                "goals": "|- True",
+                "file": "<proof>",
+                "theorem": "@pos(0,0)",
+                "proof_finished": False,
+            }
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
 
         result = asyncio.run(
             _server.run_compile_with_state(
@@ -475,8 +611,115 @@ class TestCompileErrorStateCapture:
         )
 
         assert result["success"] is False
+        assert result["state_capture_status"] == "no_position"
+        assert "state_id" not in result
+        assert called["hit"] is False, "capture must not run when no error_positions"
+
+    def test_status_crashed_when_temp_file_io_fails(self, workspace, monkeypatch):
+        """OSError on tempfile creation -> status='crashed', capture not invoked."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        called = {"hit": False}
+
+        async def _mock_cps(**kwargs):
+            called["hit"] = True
+            return {"success": True, "state_id": 1, "goals": "|- True"}
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        def _raise_oserror(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_server.tempfile, "NamedTemporaryFile", _raise_oserror)
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["state_capture_status"] == "crashed"
         assert "state_id" not in result
         assert "Use rocq_start" in result["hint"]
+        assert called["hit"] is False
+
+    def test_no_status_field_on_success(self, workspace, monkeypatch):
+        """Successful compile must not carry state_capture_status."""
+        from rocq_mcp import compile as _compile
+        from rocq_mcp import server as _server
+
+        monkeypatch.setattr(
+            _compile,
+            "_run_coqc",
+            lambda *a, **kw: _fake_coqc_result("", returncode=0),
+        )
+
+        result = asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["success"] is True
+        assert "state_capture_status" not in result
+
+    def test_enrichment_timeout_capped_at_5s(self, workspace, monkeypatch):
+        """The capture-side timeout must be min(pet_timeout, 5.0)."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        recorded: dict = {}
+
+        async def _mock_cps(**kwargs):
+            recorded["timeout"] = kwargs.get("timeout")
+            return {"success": False, "error": "boom", "pet_restarted": True}
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                # pet_timeout 30 must be capped to 5.0 by the orchestration.
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert recorded["timeout"] == 5.0
+
+    def test_enrichment_timeout_floor_when_pet_timeout_below_cap(
+        self, workspace, monkeypatch
+    ):
+        """When pet_timeout < 5.0, the recorded timeout is the lower pet_timeout."""
+        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
+        from rocq_mcp import server as _server
+
+        recorded: dict = {}
+
+        async def _mock_cps(**kwargs):
+            recorded["timeout"] = kwargs.get("timeout")
+            return {"success": False, "error": "boom", "pet_restarted": True}
+
+        _patch_capture_position_state(monkeypatch, _mock_cps)
+
+        asyncio.run(
+            _server.run_compile_with_state(
+                "x",
+                str(workspace),
+                60,
+                lifespan_state={"pet_client": None, "pet_timeout": 2.0},
+            )
+        )
+
+        assert recorded["timeout"] == 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +760,7 @@ class TestRocqCompileWrapper:
             _server, "run_compile_with_state", mock_run_compile_with_state
         )
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {"pet_client": None}
+        mock_ctx = _MockContext({"pet_client": None})
 
         result = _call_rocq_compile(
             source="Check nat.",

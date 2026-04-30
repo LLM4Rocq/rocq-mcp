@@ -747,9 +747,11 @@ _ENRICHMENT_TIMEOUT_CAP: float = float(
 
 # Status enum for proof-state capture on compile errors.  Used as the
 # value type of the ``state_capture_status`` key returned by the
-# ``run_compile_*_with_state`` orchestrators.  The same set of strings is
-# also produced inside ``_run_with_pet`` under the dict key ``"reason"``
-# (see _CaptureResult below and the comment on _run_with_pet's return shape).
+# ``run_compile_*_with_state`` orchestrators.  A subset
+# (``"timeout"``, ``"crashed"``, ``"lock_contended"``, ``"unavailable"``)
+# is also produced inside ``_run_with_pet`` under the dict key
+# ``"reason"``; the remaining values (``"ok"``, ``"outside_proof"``,
+# ``"no_position"``) are derived in the orchestrator.
 _StateCaptureStatus = Literal[
     "ok",
     "outside_proof",
@@ -1000,10 +1002,21 @@ async def rocq_compile(
     rocq_check (faster, cached imports, returns state for recovery)
     or rocq_step_multi (try multiple tactics at once).
 
-    On structured errors, returns error_positions for jumping to the
-    failure via rocq_start(file=..., line=..., character=...). When
-    coq-lsp is available in the active MCP session, also captures the
-    current proof state at the error position automatically.
+    On failure, the result includes ``error_positions`` and a ``hint``.
+    When coq-lsp is available in the active MCP session, the result
+    also includes ``state_capture_status``:
+
+      - ``"ok"``: proof state was captured at the error position; the
+        result also includes ``state_id``, ``goals``, ``file``,
+        ``theorem``, and ``proof_finished``.  Recover via
+        ``rocq_check(from_state=state_id)`` or
+        ``rocq_step_multi(from_state=state_id)``.
+      - ``"outside_proof"``: error is outside any open proof; no
+        ``state_id`` is returned.  Follow the original ``hint``.
+      - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
+        ``"unavailable"`` / ``"no_position"``: enrichment did not
+        succeed; follow the original ``hint`` (typically
+        ``rocq_start(file=..., line=..., character=...)``).
 
     Args:
         source: Complete Rocq (.v) file content to compile.
@@ -1048,10 +1061,21 @@ async def rocq_compile_file(
     More efficient for large files (avoids transmitting full source).
     The file must already exist within the workspace.
 
-    On structured errors, returns error_positions for jumping to the
-    failure via rocq_start(file=..., line=..., character=...). When
-    coq-lsp is available in the active MCP session, also captures the
-    current proof state at the error position automatically.
+    On failure, the result includes ``error_positions`` and a ``hint``.
+    When coq-lsp is available in the active MCP session, the result
+    also includes ``state_capture_status``:
+
+      - ``"ok"``: proof state was captured at the error position; the
+        result also includes ``state_id``, ``goals``, ``file``,
+        ``theorem``, and ``proof_finished``.  Recover via
+        ``rocq_check(from_state=state_id)`` or
+        ``rocq_step_multi(from_state=state_id)``.
+      - ``"outside_proof"``: error is outside any open proof; no
+        ``state_id`` is returned.  Follow the original ``hint``.
+      - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
+        ``"unavailable"`` / ``"no_position"``: enrichment did not
+        succeed; follow the original ``hint`` (typically
+        ``rocq_start(file=..., line=..., character=...)``).
 
     Args:
         file: Path to the .v file (relative to workspace).

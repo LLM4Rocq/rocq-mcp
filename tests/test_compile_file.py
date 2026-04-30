@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import glob as glob_mod
-from unittest.mock import MagicMock, patch
-
 import pytest
 
-from tests.conftest import COQC_AVAILABLE
+from tests.conftest import COQC_AVAILABLE, _MockContext, _fake_coqc_result
 from rocq_mcp.compile import run_compile_file
 
 pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -242,70 +240,20 @@ class TestCompileFileStructuredErrors:
 
 
 class TestCompileFileErrorStateCapture:
-    """Compile-file errors should include rocq_start-style state when available."""
+    """Compile-file orchestration: only the file-path-specific behaviours.
+
+    Status-derivation logic is exercised by ``test_compile.TestStateCaptureStatus``
+    via the inline-source path; the file-path code path shares the same
+    ``_capture_compile_error_state`` machinery, so we only assert here the
+    file-resolution glue (resolved_file, file_label).
+    """
 
     pytestmark = []
 
-    @staticmethod
-    def _make_fake_result(stderr, returncode=1):
-        return {
-            "returncode": returncode,
-            "stdout": "",
-            "stderr": stderr,
-            "timed_out": False,
-        }
-
-    def test_compile_file_error_includes_state_when_capture_succeeds(
-        self, workspace, monkeypatch
-    ):
-        import rocq_mcp.compile as _compile
-        import rocq_mcp.server as _server
-
-        path = workspace / "capture_test.v"
-        path.write_text("Theorem bad : True.\n  exact 0.\n")
-        stderr = (
-            'File "capture_test.v", line 2, characters 2-9:\n'
-            'Error: The term "0" has type "nat" while it is expected to have type "True".\n'
-        )
-
-        monkeypatch.setattr(
-            _compile,
-            "_run_coqc_file",
-            lambda *a, **kw: self._make_fake_result(stderr),
-        )
-
-        async def _mock_capture_success(*args, **kwargs):
-            return {
-                "state_id": 23,
-                "goals": "|- True",
-                "file": "capture_test.v",
-                "theorem": "@pos(1,2)",
-                "proof_finished": False,
-            }
-
-        monkeypatch.setattr(
-            _server,
-            "_capture_compile_error_state",
-            _mock_capture_success,
-        )
-
-        result = asyncio.run(
-            _server.run_compile_file_with_state(
-                file="capture_test.v",
-                workspace=str(workspace),
-                timeout=60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["success"] is False
-        assert result["state_id"] == 23
-        assert result["file"] == "capture_test.v"
-        assert result["theorem"] == "@pos(1,2)"
-        assert "rocq_check(from_state=23)" in result["hint"]
-
     def test_compile_file_capture_receives_resolved_path(self, workspace, monkeypatch):
+        """The resolved path and file_label flow through to capture_position_state."""
         import rocq_mcp.compile as _compile
+        import rocq_mcp.interactive as _interactive
         import rocq_mcp.server as _server
 
         path = workspace / "resolved_path_test.v"
@@ -319,14 +267,14 @@ class TestCompileFileErrorStateCapture:
         monkeypatch.setattr(
             _compile,
             "_run_coqc_file",
-            lambda *a, **kw: self._make_fake_result(stderr),
+            lambda *a, **kw: _fake_coqc_result(stderr),
         )
 
-        async def _mock_capture(*args, **kwargs):
+        async def _mock_cps(**kwargs):
             captured.update(kwargs)
-            return None
+            return {"success": False, "error": "boom", "pet_restarted": True}
 
-        monkeypatch.setattr(_server, "_capture_compile_error_state", _mock_capture)
+        monkeypatch.setattr(_interactive, "capture_position_state", _mock_cps)
 
         asyncio.run(
             _server.run_compile_file_with_state(
@@ -337,8 +285,45 @@ class TestCompileFileErrorStateCapture:
             )
         )
 
-        assert captured["file_label"] == "resolved_path_test.v"
+        assert captured["file"] == "resolved_path_test.v"
         assert captured["resolved_file"] == str(path.resolve())
+
+    def test_status_no_position_when_path_resolution_fails(
+        self, workspace, monkeypatch
+    ):
+        """A path that escapes the workspace short-circuits with status='no_position'."""
+        import rocq_mcp.compile as _compile
+        import rocq_mcp.interactive as _interactive
+        import rocq_mcp.server as _server
+
+        stderr = "Error: nonsense.\n"
+        cps_called = {"called": False}
+
+        monkeypatch.setattr(
+            _compile,
+            "_run_coqc_file",
+            lambda *a, **kw: _fake_coqc_result(stderr),
+        )
+
+        async def _mock_cps(**kwargs):
+            cps_called["called"] = True
+            return {"success": False, "error": "should not be reached"}
+
+        monkeypatch.setattr(_interactive, "capture_position_state", _mock_cps)
+
+        result = asyncio.run(
+            _server.run_compile_file_with_state(
+                file="../escaping_path.v",
+                workspace=str(workspace),
+                timeout=60,
+                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            )
+        )
+
+        assert result["success"] is False
+        assert result["state_capture_status"] == "no_position"
+        assert "state_id" not in result
+        assert cps_called["called"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +367,7 @@ class TestRocqCompileFileWrapper:
             mock_run_compile_file_with_state,
         )
 
-        mock_ctx = MagicMock()
-        mock_ctx.lifespan_context = {"pet_client": None}
+        mock_ctx = _MockContext({"pet_client": None})
 
         result = asyncio.run(
             rocq_compile_file(

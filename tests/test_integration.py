@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE
+from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE, _MockContext
 
 
 def _call_rocq_compile(**kwargs):
@@ -324,13 +324,6 @@ class TestCompileVerifyWorkflow:
 # =========================================================================
 
 
-class _MockContext:
-    """Minimal mock for FastMCP Context to inject lifespan_state."""
-
-    def __init__(self, lifespan_state):
-        self.lifespan_context = lifespan_state
-
-
 @pytest.mark.skipif(
     not (COQC_AVAILABLE and PET_AVAILABLE),
     reason="coqc and pet required for compile error state capture",
@@ -347,7 +340,7 @@ class TestCompileErrorStateWorkflow:
         _invalidate_pet(state)
 
     async def test_compile_includes_error_state(self, lifespan_state, workspace):
-        """rocq_compile should attach a recoverable state at the error position."""
+        """rocq_compile attaches a recoverable state with status ``ok``."""
         from rocq_mcp.server import rocq_compile
 
         source = "Theorem bad : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n"
@@ -356,6 +349,7 @@ class TestCompileErrorStateWorkflow:
         result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
 
         assert result["success"] is False
+        assert result["state_capture_status"] == "ok"
         assert isinstance(result["state_id"], int)
         assert "|-True" in result["goals"]
         assert result["file"] == "<proof>"
@@ -363,9 +357,11 @@ class TestCompileErrorStateWorkflow:
         # the column is set by coqc and may shift across Rocq versions.
         assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
+        # Hint must be rewritten when capture is actionable.
+        assert f"rocq_check(from_state={result['state_id']})" in result["hint"]
 
     async def test_compile_file_includes_error_state(self, lifespan_state, workspace):
-        """rocq_compile_file should attach a recoverable state at the error position."""
+        """rocq_compile_file attaches a recoverable state with status ``ok``."""
         from rocq_mcp.server import rocq_compile_file
 
         path = workspace / "error_state_test.v"
@@ -379,11 +375,95 @@ class TestCompileErrorStateWorkflow:
         )
 
         assert result["success"] is False
+        assert result["state_capture_status"] == "ok"
         assert isinstance(result["state_id"], int)
         assert "|-True" in result["goals"]
         assert result["file"] == "error_state_test.v"
         assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
+        assert f"rocq_check(from_state={result['state_id']})" in result["hint"]
+
+    async def test_state_id_is_consumable_by_rocq_check(
+        self, lifespan_state, workspace
+    ):
+        """The state_id from a real compile failure is usable by rocq_check."""
+        from rocq_mcp.server import rocq_compile, rocq_check
+
+        source = "Theorem bad : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n"
+        ctx = _MockContext(lifespan_state)
+
+        compile_result = await rocq_compile(
+            source=source, workspace=str(workspace), ctx=ctx
+        )
+        assert compile_result["success"] is False
+        assert compile_result["state_capture_status"] == "ok"
+        state_id = compile_result["state_id"]
+
+        check_result = await rocq_check(
+            body="exact I.",
+            from_state=state_id,
+            ctx=ctx,
+        )
+        assert check_result["success"] is True
+        assert check_result["proof_finished"] is True
+        # rocq_check should advance to a fresh state after the recovery.
+        assert check_result["state_id"] != state_id
+
+    async def test_outside_proof_status_for_bad_definition(
+        self, lifespan_state, workspace
+    ):
+        """A bad ``Definition`` outside any proof yields a non-actionable status.
+
+        Pet/Rocq may either return cleanly with no open goals
+        (``outside_proof``) or raise (``crashed``); both are non-``"ok"``.
+        Either way, no ``state_id`` should leak and the original
+        ``Use rocq_start(...)`` guidance must be preserved.
+        """
+        from rocq_mcp.server import rocq_compile
+
+        source = "Definition bad : nat := wrong_term.\n"
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
+
+        assert result["success"] is False
+        assert result["state_capture_status"] in {"outside_proof", "crashed"}
+        assert "state_id" not in result
+        assert "Use rocq_start" in result["hint"]
+        assert "rocq_check(from_state=" not in result["hint"]
+
+    async def test_multi_theorem_second_fails_captures_at_second(
+        self, lifespan_state, workspace
+    ):
+        """First theorem compiles, second fails: capture must point inside the second."""
+        from rocq_mcp.server import rocq_compile
+
+        source = (
+            "Theorem ok : True.\n"
+            "Proof. exact I. Qed.\n"
+            "\n"
+            "Theorem broken : True.\n"
+            "Proof.\n"
+            "  exact 0.\n"
+            "Qed.\n"
+        )
+        ctx = _MockContext(lifespan_state)
+
+        result = await rocq_compile(source=source, workspace=str(workspace), ctx=ctx)
+
+        assert result["success"] is False
+        assert result["state_capture_status"] == "ok"
+        m = re.match(r"@pos\((\d+),(\d+)\)", result["theorem"])
+        assert m, f"theorem should be @pos(line,col), got {result['theorem']!r}"
+        line = int(m.group(1))
+        # The "exact 0." line of the second theorem is line 5 (0-indexed).
+        # Allow some flexibility for coqc reporting variance, but it must land
+        # in the broken theorem's body (line >= 4 = "Theorem broken : True.").
+        assert line >= 4, (
+            f"capture should land inside the failing second theorem; "
+            f"got line={line}"
+        )
+        assert "|-True" in result["goals"]
 
     async def test_compile_with_assumption_includes_goal_context(
         self, lifespan_state, workspace

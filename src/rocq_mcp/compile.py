@@ -47,6 +47,7 @@ import rocq_mcp.server as _server
 
 _MAX_ERROR_LENGTH: int = 4000
 _MAX_FORMAT_WARNINGS: int = 3
+_PROOF_FILE_LABEL: str = "<proof>"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +228,7 @@ def _format_error(
     proof_str: str,
     *,
     include_warnings: bool = True,
-    file_label: str = "<proof>",
+    file_label: str = _PROOF_FILE_LABEL,
 ) -> str:
     """Reformat a raw coqc stderr string into LLM-friendly feedback.
 
@@ -339,7 +340,7 @@ def _build_compile_result(
     timeout: int,
     include_warnings: bool,
     *,
-    file_label: str = "<proof>",
+    file_label: str = _PROOF_FILE_LABEL,
     clean_tmp_paths: bool = True,
 ) -> dict[str, Any]:
     """Build a structured result dict from a coqc subprocess result.
@@ -940,7 +941,7 @@ def _run_phase1_module_m(
     if not phase1_error:
         raw = phase1_stderr.strip()
         phase1_error = _TMP_PATH_RE.sub(
-            '"<proof>"',
+            f'"{_PROOF_FILE_LABEL}"',
             raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
         ).strip()
         if not phase1_error:

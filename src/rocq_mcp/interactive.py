@@ -329,6 +329,14 @@ def _state_get(state_id: int) -> _StateEntry | None:
     return _state_table.get(state_id)
 
 
+def _state_remove(state_id: int) -> None:
+    """Drop a state from the table; clear ``_state_current_id`` if it pointed here."""
+    global _state_current_id
+    _state_table.pop(state_id, None)
+    if _state_current_id == state_id:
+        _state_current_id = None
+
+
 def _state_get_or_error(state_id: int) -> tuple[_StateEntry | None, str | None]:
     """Look up a state by ID, returning (entry, None) or (None, error_msg)."""
     entry = _state_table.get(state_id)
@@ -774,8 +782,13 @@ async def capture_position_state(
     character: int,
     description: str,
     track_staleness: bool = True,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Capture a position-based proof state via the async PET helper."""
+    """Capture a position-based proof state via the async PET helper.
+
+    ``timeout`` (seconds) is forwarded to ``_run_with_pet``; when ``None``
+    the lifespan default is used.
+    """
 
     def _execute(pet: Any) -> dict[str, Any]:
         return _build_position_start_result(
@@ -793,6 +806,7 @@ async def capture_position_state(
         _execute,
         lifespan_state,
         description,
+        timeout=timeout,
     )
 
 

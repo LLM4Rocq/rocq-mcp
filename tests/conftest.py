@@ -19,6 +19,51 @@ PET_AVAILABLE: bool = shutil.which("pet") is not None
 
 
 # ---------------------------------------------------------------------------
+# Shared test helpers (used across compile / compile_file / integration suites)
+# ---------------------------------------------------------------------------
+
+# Canonical "Real failure" stderr fixture used by status-derivation tests.
+_DEFAULT_STDERR = (
+    'File "/tmp/tmp.v", line 2, characters 0-5:\n' "Error: Real failure.\n"
+)
+
+
+def _fake_coqc_result(stderr, returncode=1):
+    """Build a fake ``_run_coqc`` / ``_run_coqc_file`` return dict."""
+    return {
+        "returncode": returncode,
+        "stdout": "",
+        "stderr": stderr,
+        "timed_out": False,
+    }
+
+
+def _patch_compile_error(monkeypatch, stderr):
+    """Force ``_run_coqc`` to produce a failing fake result with *stderr*."""
+    from rocq_mcp import compile as _compile
+
+    monkeypatch.setattr(
+        _compile,
+        "_run_coqc",
+        lambda *a, **kw: _fake_coqc_result(stderr),
+    )
+
+
+def _patch_capture_position_state(monkeypatch, async_fn):
+    """Replace the lazy-imported ``capture_position_state`` symbol."""
+    from rocq_mcp import interactive as _interactive
+
+    monkeypatch.setattr(_interactive, "capture_position_state", async_fn)
+
+
+class _MockContext:
+    """Minimal mock for FastMCP Context to inject lifespan_state."""
+
+    def __init__(self, lifespan_state):
+        self.lifespan_context = lifespan_state
+
+
+# ---------------------------------------------------------------------------
 # Workspace fixture
 # ---------------------------------------------------------------------------
 

@@ -661,6 +661,150 @@ class TestParseDuneFlags:
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-R", ".", "mylib"]
 
+    def test_multi_theory_unions_per_theory_flags(self, tmp_path):
+        """Workspace with N coq.theory dirs queries each, unions all -Q lines."""
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        # Two theory roots, mirroring bn-peters' rocq-lsp-dune example.
+        (tmp_path / "thA").mkdir()
+        (tmp_path / "thA" / "dune").write_text(
+            "(coq.theory (name thA) (theories Stdlib))\n"
+        )
+        (tmp_path / "thA" / "a.v").write_text("")
+        (tmp_path / "thB").mkdir()
+        (tmp_path / "thB" / "dune").write_text(
+            "(coq.theory (name thB) (theories Stdlib))\n"
+        )
+        (tmp_path / "thB" / "b.v").write_text("")
+
+        # Per-call dune coq top output: each theory yields its own -Q
+        # line plus a shared -w flag (which must be deduped).
+        def fake_run(cmd, *_a, **_kw):
+            v_arg = cmd[-1]
+            assert v_arg.endswith(".v"), cmd
+            if v_arg.startswith("thA"):
+                stdout = "-Q _build/default/thA thA -w -shared"
+            else:
+                stdout = "-Q _build/default/thB thB -w -shared"
+            return mock.Mock(returncode=0, stdout=stdout)
+
+        with mock.patch("rocq_mcp.server.subprocess.run", side_effect=fake_run):
+            flags = _parse_dune_flags(tmp_path)
+
+        # Both theory roots present.
+        assert flags is not None
+        assert "_build/default/thA" in flags and "thA" in flags
+        assert "_build/default/thB" in flags and "thB" in flags
+        # The shared -w flag appears once, not twice.
+        assert flags.count("-shared") == 1
+
+        # Generated _RocqProject has both -Q lines.
+        proj = (tmp_path / "_RocqProject").read_text()
+        assert "-Q _build/default/thA thA" in proj
+        assert "-Q _build/default/thB thB" in proj
+        # And the deduped -w line appears once.
+        assert proj.count("-arg -shared") == 1
+
+    def test_multi_theory_invokes_dune_once_per_theory(self, tmp_path):
+        """Sanity: N=2 theory roots -> exactly 2 dune coq top calls."""
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        for name in ("thA", "thB"):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "dune").write_text(f"(coq.theory (name {name}))\n")
+            (d / "x.v").write_text("")
+
+        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="-Q . X")
+            _parse_dune_flags(tmp_path)
+        assert mock_run.call_count == 2
+
+    def test_single_theory_uses_single_query(self, tmp_path):
+        """N<=1 theory root preserves the original single-file behaviour."""
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        # Only one coq.theory stanza.
+        d = tmp_path / "only"
+        d.mkdir()
+        (d / "dune").write_text("(coq.theory (name only))\n")
+        (d / "x.v").write_text("")
+
+        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=0, stdout="-Q _build/default/only only"
+            )
+            flags = _parse_dune_flags(tmp_path)
+        assert mock_run.call_count == 1
+        assert flags == ["-Q", "_build/default/only", "only"]
+
+    def test_coq_theory_in_line_comment_not_matched(self, tmp_path):
+        """A ``;``-commented `(coq.theory ...)` line must not be treated as a stanza.
+
+        Anchored regex protects against false positives in commented-out
+        stanzas; without anchoring, the substring scan would count this dir.
+        """
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        # One real theory + one with the stanza commented out.
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / "dune").write_text("(coq.theory (name real))\n")
+        (tmp_path / "real" / "x.v").write_text("")
+        (tmp_path / "fake").mkdir()
+        (tmp_path / "fake" / "dune").write_text("; (coq.theory (name fake))\n")
+        (tmp_path / "fake" / "x.v").write_text("")
+
+        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="-Q . real")
+            _parse_dune_flags(tmp_path)
+        # Only the real stanza counts -> exactly one dune coq top call.
+        assert mock_run.call_count == 1
+
+    def test_pick_v_file_skips_build_dir(self, tmp_path):
+        """_pick_v_file ignores .v files under _build/."""
+        from rocq_mcp.server import _pick_v_file
+
+        # Only .v files under _build -> should return None.
+        build = tmp_path / "_build" / "default"
+        build.mkdir(parents=True)
+        (build / "foo.v").write_text("")
+        assert _pick_v_file(tmp_path) is None
+
+        # Adding a real source .v elsewhere -> _pick_v_file returns it.
+        src = tmp_path / "src"
+        src.mkdir()
+        real = src / "real.v"
+        real.write_text("")
+        assert _pick_v_file(tmp_path) == real
+
+    def test_pick_v_file_prefers_shallow(self, tmp_path):
+        """_pick_v_file prefers a top-level .v over a deeper one."""
+        from rocq_mcp.server import _pick_v_file
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        deep = sub / "deep.v"
+        deep.write_text("")
+        shallow = tmp_path / "shallow.v"
+        shallow.write_text("")
+        assert _pick_v_file(tmp_path) == shallow
+
+    def test_multi_theory_one_failure_others_succeed(self, tmp_path):
+        """If one theory's dune coq top fails, the others still produce flags."""
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        for name in ("thA", "thB"):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "dune").write_text(f"(coq.theory (name {name}))\n")
+            (d / "x.v").write_text("")
+
+        def fake_run(cmd, *_a, **_kw):
+            v_arg = cmd[-1]
+            if v_arg.startswith("thA"):
+                # thA fails (e.g., dune build cache missing for that theory).
+                return mock.Mock(returncode=1, stdout="")
+            return mock.Mock(returncode=0, stdout="-Q _build/default/thB thB")
+
+        with mock.patch("rocq_mcp.server.subprocess.run", side_effect=fake_run):
+            flags = _parse_dune_flags(tmp_path)
+        assert flags == ["-Q", "_build/default/thB", "thB"]
+
 
 # =========================================================================
 # _find_project_root_from_file — workspace auto-detection
@@ -1372,6 +1516,67 @@ class TestStateTableEviction:
         assert entry is None
         assert err is not None
         assert "does not exist" in err.lower()
+
+
+# =========================================================================
+# _set_workspace_if_needed -- triggers _parse_project_flags side effect
+# =========================================================================
+
+
+class TestSetWorkspaceIfNeededDuneSideEffect:
+    """The pet path must trigger _parse_project_flags so dune-derived
+    _RocqProject is on disk before pet.set_workspace runs."""
+
+    def test_writes_rocqproject_for_dune_workspace(self, tmp_path):
+        """First call on a fresh dune workspace: _parse_project_flags
+        runs (writing _RocqProject) before pet.set_workspace."""
+        from rocq_mcp.server import _set_workspace_if_needed
+
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        (tmp_path / "dune").write_text("(coq.theory (name only))\n")
+        (tmp_path / "x.v").write_text("")
+        # Pet stub records call ordering.
+        order: list[str] = []
+
+        class _MockPet:
+            def set_workspace(self, debug=False, dir=None):
+                order.append("set_workspace")
+                # By the time pet.set_workspace runs, _RocqProject must
+                # already be on disk so coq-lsp picks it up.
+                assert (tmp_path / "_RocqProject").is_file()
+
+        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=0, stdout="-Q _build/default/only only"
+            )
+            state: dict = {}
+            _set_workspace_if_needed(_MockPet(), str(tmp_path), state)
+        assert order == ["set_workspace"]
+        assert (tmp_path / "_RocqProject").is_file()
+
+    def test_idempotent_for_unchanged_workspace(self, tmp_path):
+        """Repeat calls with the same workspace skip pet.set_workspace
+        (and therefore the dune side effect runs only once)."""
+        from rocq_mcp.server import _set_workspace_if_needed
+
+        (tmp_path / "dune-project").write_text("(lang dune 3.8)\n")
+        (tmp_path / "dune").write_text("(coq.theory (name only))\n")
+        (tmp_path / "x.v").write_text("")
+        calls: list = []
+
+        class _MockPet:
+            def set_workspace(self, debug=False, dir=None):
+                calls.append(dir)
+
+        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=0, stdout="-Q _build/default/only only"
+            )
+            state: dict = {}
+            _set_workspace_if_needed(_MockPet(), str(tmp_path), state)
+            _set_workspace_if_needed(_MockPet(), str(tmp_path), state)
+        # Second call short-circuits via the current_workspace cache.
+        assert len(calls) == 1
 
 
 # =========================================================================

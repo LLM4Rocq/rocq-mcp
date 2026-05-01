@@ -1231,6 +1231,7 @@ version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "pytanque" },
 ]
 
 [package.optional-dependencies]
@@ -1239,19 +1240,16 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
-interactive = [
-    { name = "pytanque" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0" },
     { name = "fastmcp", specifier = ">=3.1.0" },
-    { name = "pytanque", marker = "extra == 'interactive'", git = "https://github.com/LLM4Rocq/pytanque" },
+    { name = "pytanque", git = "https://github.com/LLM4Rocq/pytanque" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25" },
 ]
-provides-extras = ["interactive", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "rpds-py"

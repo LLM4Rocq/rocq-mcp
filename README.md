@@ -53,11 +53,13 @@ The server exposes eleven MCP tools:
 
 > **Stale file warning:** Interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`) read the `.v` file at session start and do not track subsequent edits. If another process or agent modifies the file while a session is active, the proof state becomes stale and tactics may fail or produce wrong results. In multi-agent setups, **work on a copy of the file** for interactive proving, or restart the session with `rocq_start` after edits. A `stale_warning` field is returned when a file modification is detected.
 
+> **Workspace auto-detection:** When a file-accepting tool (`rocq_compile_file`, `rocq_query`, `rocq_assumptions`, `rocq_toc`, `rocq_start`) is called without an explicit `workspace`, the server walks up from the file's directory looking for `_RocqProject`, `_CoqProject`, or `dune-project` markers and uses the directory of the innermost match. Falls back to `ROCQ_WORKSPACE` if no marker is found. Pass `workspace=` explicitly to override (e.g. for monorepos with nested project files).
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROCQ_WORKSPACE` | current directory | Working directory for Rocq compilation. When set, all workspace parameters are constrained to this directory or its subdirectories. |
+| `ROCQ_WORKSPACE` | current directory | Working directory for Rocq compilation; used as the final fallback when no project marker is found by walking up from the file. When set explicitly, all workspace parameters are constrained to this directory or its subdirectories. |
 | `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` |
 | `ROCQ_VERIFY_TIMEOUT` | `120` | Timeout (seconds) for `rocq_verify` |
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for pytanque-based tools |

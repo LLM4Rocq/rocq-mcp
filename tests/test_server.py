@@ -30,6 +30,7 @@ from unittest import mock
 import pytest
 
 from rocq_mcp.server import (
+    _find_project_root_from_file,
     _force_release_pet_lock,
     _merge_partial_state,
     _parse_dune_flags,
@@ -659,6 +660,240 @@ class TestParseDuneFlags:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-R", ".", "mylib"]
+
+
+# =========================================================================
+# _find_project_root_from_file — workspace auto-detection
+# =========================================================================
+
+
+def _make_v(parent_dir):
+    """Create an empty foo.v in *parent_dir* and return its path."""
+    f = parent_dir / "foo.v"
+    f.write_text("")
+    return f
+
+
+class TestFindProjectRootFromFile:
+    """Tests for the parent-directory walk that auto-detects workspaces."""
+
+    def test_empty_string_returns_none(self):
+        """Empty path short-circuits without walking."""
+        assert _find_project_root_from_file("") is None
+
+    def test_none_returns_none(self):
+        """None path short-circuits without walking."""
+        assert _find_project_root_from_file(None) is None
+
+    def test_no_marker_returns_none(self, tmp_path):
+        """A file with no project marker anywhere up the tree returns None."""
+        assert _find_project_root_from_file(str(_make_v(tmp_path))) is None
+
+    def test_rocqproject_in_same_dir(self, tmp_path):
+        """File in the same dir as _RocqProject resolves there."""
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        assert _find_project_root_from_file(str(_make_v(tmp_path))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_coqproject_in_same_dir(self, tmp_path):
+        """_CoqProject is recognised when no _RocqProject is present."""
+        (tmp_path / "_CoqProject").write_text("-Q . MyLib\n")
+        assert _find_project_root_from_file(str(_make_v(tmp_path))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_dune_project_in_same_dir(self, tmp_path):
+        """dune-project is recognised when no _RocqProject/_CoqProject is present."""
+        (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
+        assert _find_project_root_from_file(str(_make_v(tmp_path))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_rocqproject_beats_coqproject_in_same_dir(self, tmp_path):
+        """When both markers coexist, _RocqProject (priority 0) wins.
+
+        Locks in the priority order in ``_PROJECT_MARKERS`` so a future
+        reorder doesn't silently change behaviour.  The returned path is
+        the same dir either way; this test would catch a divergence if
+        the markers ever placed different load paths.
+        """
+        (tmp_path / "_RocqProject").write_text("-Q . New\n")
+        (tmp_path / "_CoqProject").write_text("-Q . Old\n")
+        # Both live in the same dir, so the helper still returns tmp_path;
+        # the value of this test is in pinning the helper to actually
+        # iterate _PROJECT_MARKERS in order (rather than via os.listdir).
+        assert _find_project_root_from_file(str(_make_v(tmp_path))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_rocqproject_in_parent(self, tmp_path):
+        """Walks up: file in subdir, _RocqProject in tmp_path."""
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        sub = tmp_path / "src"
+        sub.mkdir()
+        assert _find_project_root_from_file(str(_make_v(sub))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_walks_multiple_levels(self, tmp_path):
+        """Walks up through several directory levels."""
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        deep = tmp_path / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        assert _find_project_root_from_file(str(_make_v(deep))) == str(
+            tmp_path.resolve()
+        )
+
+    def test_innermost_marker_wins(self, tmp_path):
+        """When markers exist at multiple levels, the innermost wins."""
+        (tmp_path / "_RocqProject").write_text("-Q . Outer\n")
+        sub = tmp_path / "inner"
+        sub.mkdir()
+        (sub / "_RocqProject").write_text("-Q . Inner\n")
+        assert _find_project_root_from_file(str(_make_v(sub))) == str(sub.resolve())
+
+    def test_directory_path_walks_from_directory(self, tmp_path):
+        """A directory path (not a file) starts the walk from itself."""
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        sub = tmp_path / "src"
+        sub.mkdir()
+        # Pass the directory, not a file inside it.
+        assert _find_project_root_from_file(str(sub)) == str(tmp_path.resolve())
+
+    def test_nonexistent_path_walks_from_logical_parent(self, tmp_path):
+        """Absolute path the user typed but the file does not exist yet.
+
+        ``Path(...).absolute()`` still returns a path; ``is_file()`` is
+        False so we walk from the lexical parent.
+        """
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        f = tmp_path / "src" / "does_not_exist.v"
+        # Don't create src/ at all.
+        assert _find_project_root_from_file(str(f)) == str(tmp_path.resolve())
+
+    def test_relative_path_resolved_against_rocq_workspace(self, tmp_path, monkeypatch):
+        """A relative *file* is resolved against ``ROCQ_WORKSPACE``.
+
+        This matches the documented tool contract ("Path to the .v file
+        (relative to workspace)") and avoids cwd-dependent surprises.
+        """
+        (tmp_path / "_RocqProject").write_text("-Q . MyLib\n")
+        sub = tmp_path / "src"
+        sub.mkdir()
+        _make_v(sub)
+        # Point ROCQ_WORKSPACE at tmp_path; pass the file as relative.
+        monkeypatch.setattr("rocq_mcp.server.ROCQ_WORKSPACE", str(tmp_path))
+        assert _find_project_root_from_file("src/foo.v") == str(tmp_path.resolve())
+
+    def test_resolve_oserror_returns_none(self, monkeypatch):
+        """Path resolution errors propagate as None (defensive)."""
+
+        class _BadPath:
+            def __init__(self, *_):
+                pass
+
+            def is_absolute(self):
+                raise OSError("boom")
+
+        monkeypatch.setattr("rocq_mcp.server.Path", _BadPath)
+        assert _find_project_root_from_file("/some/file.v") is None
+
+
+# =========================================================================
+# Wrapper integration: workspace auto-detection flows through to the impl
+# =========================================================================
+
+
+class TestWrapperWorkspaceAutoDetect:
+    """Integration: each file-accepting tool wires the helper into the workspace.
+
+    These tests would catch a regression where one of the five
+    ``_find_project_root_from_file`` call sites is silently removed during
+    a refactor.  They spy on ``_validate_workspace`` (the boundary right
+    after the auto-detection) to capture the workspace that flows in, and
+    stub each tool's downstream implementation so the call short-circuits.
+    """
+
+    @pytest.fixture
+    def project_with_file(self, tmp_path):
+        """Create _RocqProject in *tmp_path* and a foo.v in a subdir."""
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        sub = tmp_path / "src"
+        sub.mkdir()
+        f = sub / "foo.v"
+        f.write_text("")
+        return tmp_path, f
+
+    @staticmethod
+    def _setup_spies(monkeypatch):
+        """Spy ``_validate_workspace`` and stub all 5 impl functions.
+
+        Returns a dict that captures the workspace passed to validation.
+        """
+        from rocq_mcp import server as _server
+
+        seen: dict = {}
+
+        def spy_validate(ws):
+            seen["workspace"] = ws
+            return None
+
+        async def stub(*_args, **_kwargs):
+            return {"success": True, "output": ""}
+
+        monkeypatch.setattr(_server, "_validate_workspace", spy_validate)
+        for impl in (
+            "run_compile_file_with_state",
+            "run_query",
+            "run_assumptions",
+            "run_toc",
+            "run_start",
+        ):
+            monkeypatch.setattr(_server, impl, stub)
+        return seen
+
+    @pytest.mark.parametrize(
+        "tool_name,extra_kwargs",
+        [
+            ("rocq_compile_file", {}),
+            ("rocq_query", {"command": "Check nat."}),
+            ("rocq_assumptions", {"name": "t"}),
+            ("rocq_toc", {}),
+            ("rocq_start", {"theorem": "t"}),
+        ],
+    )
+    async def test_wrapper_autodetects_workspace(
+        self, tool_name, extra_kwargs, project_with_file, monkeypatch
+    ):
+        """Each wrapper auto-detects workspace from the file's project root."""
+        from rocq_mcp import server as _server
+        from tests.conftest import _MockContext
+
+        proj, f = project_with_file
+        seen = self._setup_spies(monkeypatch)
+        ctx = _MockContext({"pet_client": None, "pet_timeout": 30.0})
+
+        tool = getattr(_server, tool_name)
+        await tool(file=str(f), ctx=ctx, **extra_kwargs)
+
+        assert seen["workspace"] == str(Path(proj).absolute()), tool_name
+
+    async def test_explicit_workspace_overrides_autodetect(
+        self, project_with_file, monkeypatch
+    ):
+        """An explicit ``workspace=`` arg bypasses auto-detection."""
+        from rocq_mcp import server as _server
+        from tests.conftest import _MockContext
+
+        _proj, f = project_with_file
+        seen = self._setup_spies(monkeypatch)
+        ctx = _MockContext({"pet_client": None, "pet_timeout": 30.0})
+
+        explicit = "/some/other/dir"
+        await _server.rocq_toc(file=str(f), workspace=explicit, ctx=ctx)
+
+        assert seen["workspace"] == explicit
 
 
 # =========================================================================

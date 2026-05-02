@@ -11,12 +11,25 @@ from enum import Enum, auto
 # ---------------------------------------------------------------------------
 
 _ROCQ_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*")
+_ROCQ_QUALIFIED_NAME_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_']*(\.[A-Za-z_][A-Za-z0-9_']*)*"
+)
 
 
 def _validate_rocq_identifier(name: str, label: str = "problem_name") -> None:
     """Raise ValueError if *name* is not a valid Rocq identifier."""
     if not _ROCQ_IDENT_RE.fullmatch(name):
         raise ValueError(f"{label} must be a valid Rocq identifier. Got: {name!r}")
+
+
+def is_rocq_qualified_name(name: str) -> bool:
+    """Return True if *name* is a valid Rocq qualified identifier.
+
+    Accepts either a bare identifier (``add_comm``) or a dotted
+    qualified name (``Nat.add_comm``, ``Coq.Init.Logic.eq``).  Used
+    by tools that take a theorem reference as input.
+    """
+    return bool(_ROCQ_QUALIFIED_NAME_RE.fullmatch(name))
 
 
 # Block to reset printing flags after Module M, ensuring Print Assumptions

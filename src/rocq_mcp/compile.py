@@ -570,6 +570,98 @@ def _deduplicate_toc_elements(all_elements: list[Any]) -> list[Any]:
     return deduped_elements
 
 
+def _toc_result_to_problem_structure(
+    toc_result: Any, problem_statement: str
+) -> ProblemStructure | None:
+    """Pure transformation from pytanque toc output to a ``ProblemStructure``.
+
+    Flattens / dedupes the toc tree, classifies each element, extracts
+    source text per definition, and computes the preamble (everything
+    before the first definition or theorem).  Returns ``None`` if the
+    toc result is empty.
+
+    Pure (no pet, no I/O) so it can be unit-tested in isolation and
+    runs *outside* the pet lock.
+    """
+    if not toc_result:
+        return None
+
+    lines = problem_statement.splitlines()
+
+    all_elements: list[Any] = []
+    for _section_name, elements in toc_result:
+        all_elements.extend(_flatten_toc_elements(elements))
+    deduped_elements = _deduplicate_toc_elements(all_elements)
+
+    definitions: list[DefinitionInfo] = []
+    theorem_source: str = ""
+    theorem_name: str | None = None
+    first_def_line: int | None = None
+
+    for elem in deduped_elements:
+        name = elem.name.v if elem.name else None
+        detail = elem.detail
+        category = classify_toc_detail(detail)
+
+        start_line = elem.range.start.line if elem.range else 0
+        start_char = elem.range.start.character if elem.range else 0
+        end_line = elem.range.end.line if elem.range else 0
+        end_char = elem.range.end.character if elem.range else 0
+
+        try:
+            source_text = _extract_source_range(
+                lines, start_line, start_char, end_line, end_char
+            )
+        except (IndexError, ValueError):
+            continue
+
+        if category == DefCategory.THEOREM:
+            # toc range for theorem includes only the statement, not
+            # Proof...Qed.  We need just the statement for the template.
+            theorem_source = source_text
+            theorem_name = name
+        elif category in (DefCategory.SHARED_DEF, DefCategory.NOTATION):
+            if first_def_line is None:
+                first_def_line = start_line
+            definitions.append(
+                DefinitionInfo(
+                    name=name,
+                    detail=detail,
+                    category=category,
+                    source_text=source_text,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
+            )
+
+    # Extract preamble: everything before the first definition or theorem.
+    # This captures Require Import / Open Scope lines that must be placed
+    # outside Module M in Phase 2.
+    first_significant_line = first_def_line
+    if first_significant_line is None and theorem_source:
+        # No shared defs -- use the theorem line as the boundary.
+        for elem in deduped_elements:
+            cat = classify_toc_detail(elem.detail)
+            if cat == DefCategory.THEOREM and elem.range:
+                first_significant_line = elem.range.start.line
+                break
+    if first_significant_line is not None and first_significant_line > 0:
+        preamble_source = "\n".join(lines[:first_significant_line])
+    else:
+        preamble_source = ""
+
+    has_shared = any(d.category == DefCategory.SHARED_DEF for d in definitions)
+
+    return ProblemStructure(
+        preamble_source=preamble_source,
+        definitions=definitions,
+        theorem_source=theorem_source,
+        theorem_name=theorem_name,
+        has_shared_defs=has_shared,
+        full_source=problem_statement,
+    )
+
+
 async def _extract_problem_structure(
     problem_statement: str,
     workspace: str,
@@ -577,140 +669,54 @@ async def _extract_problem_structure(
 ) -> ProblemStructure | None:
     """Extract the structure of a problem statement using pytanque toc.
 
-    Writes the problem_statement to a temp file, runs toc, then parses the
-    toc entries into a ProblemStructure with preamble, shared definitions,
-    and the theorem source text.
+    Writes the problem_statement to a temp file, runs toc under the pet
+    lock, releases the lock, then transforms the toc result into a
+    ``ProblemStructure``.  The transformation is pure
+    (:func:`_toc_result_to_problem_structure`) and runs outside the
+    lock, keeping pet contention bounded.
 
     Returns None if pet is not available or toc fails.
     """
-    lines = problem_statement.splitlines()
     _temp_files: list[str] = []
 
-    def _do_toc(pet: Any) -> ProblemStructure | None:
+    def _do_toc(pet: Any) -> Any:
         ws = str(Path(workspace).resolve())
         pet.set_workspace(debug=False, dir=ws)
-
-        # Write problem statement to temp file
         with tempfile.NamedTemporaryFile(
-            suffix=".v",
-            mode="w",
-            delete=False,
-            dir=ws,
+            suffix=".v", mode="w", delete=False, dir=ws
         ) as f:
             f.write(problem_statement)
             f.flush()
             tmp_path = f.name
         _temp_files.append(tmp_path)
-
         try:
             from pytanque import PetanqueError
         except ImportError:
             PetanqueError = Exception  # type: ignore[assignment,misc]
         try:
-            toc_result = pet.toc(tmp_path)
+            return pet.toc(tmp_path)
         except (PetanqueError, OSError):
             return None
         finally:
             _server._cleanup_coqc_artifacts(tmp_path)
 
-        if not toc_result:
-            return None
-
-        # Flatten all toc elements from all sections
-        all_elements: list[Any] = []
-        for _section_name, elements in toc_result:
-            all_elements.extend(_flatten_toc_elements(elements))
-
-        deduped_elements = _deduplicate_toc_elements(all_elements)
-
-        # Parse into DefinitionInfo objects
-        definitions: list[DefinitionInfo] = []
-        theorem_source: str = ""
-        theorem_name: str | None = None
-        first_def_line: int | None = None
-
-        for elem in deduped_elements:
-            name = elem.name.v if elem.name else None
-            detail = elem.detail
-            category = classify_toc_detail(detail)
-
-            start_line = elem.range.start.line if elem.range else 0
-            start_char = elem.range.start.character if elem.range else 0
-            end_line = elem.range.end.line if elem.range else 0
-            end_char = elem.range.end.character if elem.range else 0
-
-            # Extract source text for this element
-            try:
-                source_text = _extract_source_range(
-                    lines, start_line, start_char, end_line, end_char
-                )
-            except (IndexError, ValueError):
-                continue
-
-            if category == DefCategory.THEOREM:
-                # toc range for theorem includes only the statement, not
-                # Proof...Qed.  We need just the statement for the template.
-                theorem_source = source_text
-                theorem_name = name
-            elif category in (
-                DefCategory.SHARED_DEF,
-                DefCategory.NOTATION,
-            ):
-                if first_def_line is None:
-                    first_def_line = start_line
-                definitions.append(
-                    DefinitionInfo(
-                        name=name,
-                        detail=detail,
-                        category=category,
-                        source_text=source_text,
-                        start_line=start_line,
-                        end_line=end_line,
-                    )
-                )
-
-        # Extract preamble: everything before the first definition or theorem.
-        # This captures Require Import / Open Scope lines that must be placed
-        # outside Module M in Phase 2.
-        first_significant_line = first_def_line
-        if first_significant_line is None and theorem_source:
-            # No shared defs — use the theorem line as the boundary
-            for elem in deduped_elements:
-                cat = classify_toc_detail(elem.detail)
-                if cat == DefCategory.THEOREM and elem.range:
-                    first_significant_line = elem.range.start.line
-                    break
-        if first_significant_line is not None and first_significant_line > 0:
-            preamble_source = "\n".join(lines[:first_significant_line])
-        else:
-            preamble_source = ""
-
-        has_shared = any(d.category == DefCategory.SHARED_DEF for d in definitions)
-
-        return ProblemStructure(
-            preamble_source=preamble_source,
-            definitions=definitions,
-            theorem_source=theorem_source,
-            theorem_name=theorem_name,
-            has_shared_defs=has_shared,
-            full_source=problem_statement,
-        )
-
     def _on_timeout() -> None:
         for p in _temp_files:
             _server._cleanup_coqc_artifacts(p)
 
-    result = await _server._run_with_pet(
+    toc_result = await _server._run_with_pet(
         _do_toc,
         lifespan_state,
         "Problem structure extraction",
         on_timeout=_on_timeout,
     )
 
-    # _run_with_pet may return an error dict instead of a ProblemStructure
-    if isinstance(result, dict):
+    # _run_with_pet may return an error dict instead of toc data; treat
+    # that the same as no result.  toc_result may also be None when toc
+    # itself failed (e.g. PetanqueError).
+    if toc_result is None or isinstance(toc_result, dict):
         return None
-    return result
+    return _toc_result_to_problem_structure(toc_result, problem_statement)
 
 
 # ---------------------------------------------------------------------------

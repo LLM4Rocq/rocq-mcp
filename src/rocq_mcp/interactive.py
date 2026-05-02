@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -547,19 +546,17 @@ async def run_assumptions(
     from that file are in scope.  This eliminates shadowing ambiguity that
     plagued the old preamble-based approach.
     """
-    from rocq_mcp.verify import parse_and_classify_assumptions
+    from rocq_mcp.verify import is_rocq_qualified_name, parse_and_classify_assumptions
 
     # Validate file parameter
     if not file or not file.strip():
         return {"success": False, "error": "File parameter is required."}
 
-    # Validate: non-empty, valid Rocq identifier or qualified name
+    # Validate: non-empty, valid Rocq identifier or qualified name.
     clean_name = name.strip() if name else ""
     if not clean_name:
         return {"success": False, "error": "Theorem name must not be empty."}
-    if not re.fullmatch(
-        r"[A-Za-z_][A-Za-z0-9_']*(\.[A-Za-z_][A-Za-z0-9_']*)*", clean_name
-    ):
+    if not is_rocq_qualified_name(clean_name):
         return {
             "success": False,
             "error": f"Invalid identifier: {clean_name!r}. "

@@ -80,13 +80,24 @@ _CLEANUP_EXTENSIONS: tuple[str, ...] = (
 )
 
 
+def _path_within(needle: Path, haystack: Path) -> bool:
+    """Return True if *needle* is *haystack* or a path inside it.
+
+    Both arguments must already be resolved/absolute; this function
+    does NOT call ``resolve()`` itself (callers sometimes need
+    different resolution semantics, e.g. avoiding symlink-following).
+    Single source of truth for the path-containment security boundary.
+    """
+    return needle == haystack or str(needle).startswith(str(haystack) + os.sep)
+
+
 def _validate_workspace(workspace: str) -> str | None:
     """Return error message if workspace is invalid, None if OK."""
     ws = Path(workspace).resolve()
     # Only enforce containment when ROCQ_WORKSPACE was explicitly set
     if _ROCQ_WORKSPACE_EXPLICIT:
         root = Path(ROCQ_WORKSPACE).resolve()
-        if ws != root and not str(ws).startswith(str(root) + os.sep):
+        if not _path_within(ws, root):
             return f"Workspace must be within {root}"
     if not ws.is_dir():
         return f"Workspace directory does not exist: {ws}"
@@ -129,9 +140,7 @@ def _check_path_containment(ws: Path, dir_arg: str) -> str | None:
     """Resolve dir_arg relative to ws and return it if within ws, else None."""
     if os.path.isabs(dir_arg):
         return None
-    resolved = (ws / dir_arg).resolve()
-    ws_resolved = ws.resolve()
-    if resolved == ws_resolved or str(resolved).startswith(str(ws_resolved) + os.sep):
+    if _path_within((ws / dir_arg).resolve(), ws.resolve()):
         return dir_arg
     return None
 
@@ -145,13 +154,13 @@ def _resolve_file_in_workspace(file: str, workspace: str) -> str:
         ValueError: If the resolved path escapes the workspace.
         FileNotFoundError: If the file does not exist on disk.
     """
-    resolved = str((Path(workspace).resolve() / file).resolve())
-    ws_resolved = str(Path(workspace).resolve())
-    if not resolved.startswith(ws_resolved + os.sep) and resolved != ws_resolved:
+    ws_resolved = Path(workspace).resolve()
+    resolved = (ws_resolved / file).resolve()
+    if not _path_within(resolved, ws_resolved):
         raise ValueError("File path must be within workspace.")
-    if not Path(resolved).is_file():
+    if not resolved.is_file():
         raise FileNotFoundError(f"File not found: {file}")
-    return resolved
+    return str(resolved)
 
 
 _PROJECT_MARKERS: tuple[str, ...] = ("_RocqProject", "_CoqProject", "dune-project")
@@ -641,6 +650,10 @@ def _try_close_pet(pet: Any) -> None:
             if stream:
                 stream.close()
         except Exception:
+            # Best-effort FD cleanup -- the pipe may already be closed,
+            # the peer may be dead, or the buffer may be in any state.
+            # Any further error here is uninteresting; we only care that
+            # we tried to close every FD we hold.
             pass
 
 

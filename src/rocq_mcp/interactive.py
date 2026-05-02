@@ -358,6 +358,31 @@ def _state_invalidate_all() -> None:
     _state_current_id = None
 
 
+def _resolve_check_base_state(
+    from_state: int | None,
+) -> tuple["_StateEntry | None", int | None, str | None]:
+    """Resolve the base state for ``run_check`` / friends.
+
+    Returns ``(entry, base_state_id, error_message)``.  Exactly one of
+    *error_message* / ``(entry, base_state_id)`` is set.  When
+    *from_state* is ``None``, falls back to ``_state_current_id``
+    (the most recently mutated state).
+    """
+    if from_state is not None:
+        entry, err = _state_get_or_error(from_state)
+        if err:
+            return None, None, err
+        return entry, from_state, None
+
+    cur_id = _state_current_id
+    if cur_id is None:
+        return None, None, "No active state. Use rocq_start first."
+    entry = _state_get(cur_id)
+    if entry is None:
+        return None, None, "No active state. Use rocq_start first."
+    return entry, cur_id, None
+
+
 def _check_staleness(entry: _StateEntry) -> str | None:
     """Check if a state's backing file has been modified since session start.
 
@@ -981,6 +1006,82 @@ async def run_start(
 # ---------------------------------------------------------------------------
 
 
+def _build_check_failure_dict(
+    *,
+    error_message: str,
+    failed_command: str,
+    command_index: int,
+    last_valid_state_id: int | None,
+    goals_at_failure: str | None,
+    feedback_pairs: list[list[str]],
+    stale_warning: str | None,
+) -> dict[str, Any]:
+    """Assemble the result dict for a mid-batch ``run_check`` failure."""
+    result: dict[str, Any] = {
+        "success": False,
+        "error": error_message,
+        "failed_command": failed_command,
+        "command_index": command_index,
+        "commands_run": command_index,
+        "last_valid_state_id": last_valid_state_id,
+        "goals_at_failure": goals_at_failure,
+    }
+    if feedback_pairs:
+        result["feedback"] = feedback_pairs
+    if stale_warning:
+        result["stale_warning"] = stale_warning
+    if last_valid_state_id is not None:
+        result["hint"] = (
+            f"Use rocq_check(body='...', from_state={last_valid_state_id}) "
+            f"or rocq_step_multi(tactics=[...], from_state={last_valid_state_id})."
+        )
+    return result
+
+
+def _build_check_success_dict(
+    *,
+    goals_text: str,
+    proof_finished: bool,
+    commands_run: int,
+    check_time_ms: int,
+    state_id: int,
+    parent_state_id: int,
+    feedback_pairs: list[list[str]],
+    stale_warning: str | None,
+    complete: Any,
+) -> dict[str, Any]:
+    """Assemble the result dict for a successful ``run_check`` batch."""
+    result: dict[str, Any] = {
+        "success": True,
+        "goals": goals_text or "No goals remaining.",
+        "proof_finished": proof_finished,
+        "commands_run": commands_run,
+        "check_time_ms": check_time_ms,
+        "state_id": state_id,
+        "parent_state_id": parent_state_id,
+    }
+    if feedback_pairs:
+        result["feedback"] = feedback_pairs
+    if stale_warning:
+        result["stale_warning"] = stale_warning
+    if complete and complete.shelf:
+        result["shelved_goals"] = len(complete.shelf)
+    if complete and complete.given_up:
+        result["given_up_goals"] = len(complete.given_up)
+    if proof_finished and state_id is not None:
+        tactics, chain_complete = _reconstruct_tactic_path(state_id)
+        if tactics:
+            result["proof_tactics"] = tactics
+        if not chain_complete:
+            result["proof_tactics_complete"] = False
+        result["proof_hint"] = (
+            "Proof complete! Assemble imports + theorem statement "
+            "+ Proof. + tactics + Qed. then validate with "
+            "rocq_compile and rocq_verify."
+        )
+    return result
+
+
 async def run_check(
     body: str,
     timeout: float,
@@ -1005,29 +1106,12 @@ async def run_check(
 
     commands = _split_rocq_sentences(body) if body.strip() else []
 
-    # Resolve base state
-    if from_state is not None:
-        entry, err = _state_get_or_error(from_state)
-        if err:
-            return {"success": False, "error": err}
-        base_state_id = from_state
-    else:
-        cur_id = _state_current_id
-        if cur_id is not None:
-            entry = _state_get(cur_id)
-            if entry is None:
-                return {
-                    "success": False,
-                    "error": "No active state. Use rocq_start first.",
-                }
-            base_state_id = cur_id
-        else:
-            return {
-                "success": False,
-                "error": "No active state. Use rocq_start first.",
-            }
+    entry, base_state_id, err = _resolve_check_base_state(from_state)
+    if err:
+        return {"success": False, "error": err}
+    assert entry is not None and base_state_id is not None  # err is None here
 
-    # Empty body — return early
+    # Empty body — return early.
     if not commands:
         return {
             "success": True,
@@ -1057,15 +1141,13 @@ async def run_check(
                 ),
             }
 
-        # Re-validate state under lock (pet may have restarted since outer check)
-        re_entry, re_err = _state_get_or_error(base_state_id)
-        if re_err:
-            return {"success": False, "error": re_err}
-        entry_to_use = re_entry
+        # Re-validate under the lock — pet may have restarted between the
+        # outer check and now, invalidating the entry.
+        entry_to_use, _re_base_id, re_err = _resolve_check_base_state(base_state_id)
+        if re_err or entry_to_use is None:
+            return {"success": False, "error": re_err or "Internal: state lost."}
 
-        # Check for file staleness (non-blocking warning)
         stale_warning = _check_staleness(entry_to_use)
-
         start_time = time.monotonic()
         _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
 
@@ -1116,26 +1198,15 @@ async def run_check(
                 # and returns pet_restarted=True to the client.
                 if not _server._pet_alive(lifespan_state.get("pet_client")):
                     raise
-                goals = _try_get_goals(pet, state)
-                result: dict[str, Any] = {
-                    "success": False,
-                    "error": e.message,
-                    "failed_command": cmd,
-                    "command_index": i,
-                    "commands_run": i,
-                    "last_valid_state_id": prev_state_id,
-                    "goals_at_failure": goals,
-                }
-                if feedback_pairs:
-                    result["feedback"] = feedback_pairs
-                if stale_warning:
-                    result["stale_warning"] = stale_warning
-                if prev_state_id is not None:
-                    result["hint"] = (
-                        f"Use rocq_check(body='...', from_state={prev_state_id}) "
-                        f"or rocq_step_multi(tactics=[...], from_state={prev_state_id})."
-                    )
-                return result
+                return _build_check_failure_dict(
+                    error_message=e.message,
+                    failed_command=cmd,
+                    command_index=i,
+                    last_valid_state_id=prev_state_id,
+                    goals_at_failure=_try_get_goals(pet, state),
+                    feedback_pairs=feedback_pairs,
+                    stale_warning=stale_warning,
+                )
 
         elapsed = time.monotonic() - start_time
 
@@ -1148,35 +1219,17 @@ async def run_check(
             goals_text = "(goals unavailable)"
             complete = None
 
-        result: dict[str, Any] = {
-            "success": True,
-            "goals": goals_text or "No goals remaining.",
-            "proof_finished": state.proof_finished,
-            "commands_run": len(commands),
-            "check_time_ms": int(elapsed * 1000),
-            "state_id": prev_state_id,
-            "parent_state_id": base_state_id,
-        }
-        if feedback_pairs:
-            result["feedback"] = feedback_pairs
-        if stale_warning:
-            result["stale_warning"] = stale_warning
-        if complete and complete.shelf:
-            result["shelved_goals"] = len(complete.shelf)
-        if complete and complete.given_up:
-            result["given_up_goals"] = len(complete.given_up)
-        if state.proof_finished and prev_state_id is not None:
-            tactics, chain_complete = _reconstruct_tactic_path(prev_state_id)
-            if tactics:
-                result["proof_tactics"] = tactics
-            if not chain_complete:
-                result["proof_tactics_complete"] = False
-            result["proof_hint"] = (
-                "Proof complete! Assemble imports + theorem statement "
-                "+ Proof. + tactics + Qed. then validate with "
-                "rocq_compile and rocq_verify."
-            )
-        return result
+        return _build_check_success_dict(
+            goals_text=goals_text,
+            proof_finished=state.proof_finished,
+            commands_run=len(commands),
+            check_time_ms=int(elapsed * 1000),
+            state_id=prev_state_id,
+            parent_state_id=base_state_id,
+            feedback_pairs=feedback_pairs,
+            stale_warning=stale_warning,
+            complete=complete,
+        )
 
     # Timeout strategy: both single and multi-command use two-tier when eligible
     if _timeout >= 1:
@@ -1228,12 +1281,9 @@ async def run_step_multi(
 
     # Quick pre-check to avoid acquiring lock for invalid states.
     # Re-validated inside _execute (state may be invalidated between checks).
-    if from_state is not None:
-        entry, err = _state_get_or_error(from_state)
-        if err:
-            return {"success": False, "error": err}
-    elif _state_current_id is None:
-        return {"success": False, "error": "No active state. Use rocq_start first."}
+    _, _, err = _resolve_check_base_state(from_state)
+    if err:
+        return {"success": False, "error": err}
 
     # Shared list so partial results survive a timeout via partial_state
     partial_state: dict[str, Any] = {"partial_results": []}
@@ -1250,24 +1300,10 @@ async def run_step_multi(
                 ),
             }
 
-        # Determine the base state
-        entry_to_use: _StateEntry | None = None
-        base_state_id: int | None = None
-        if from_state is not None:
-            entry_to_use, err = _state_get_or_error(from_state)
-            if err:
-                return {"success": False, "error": err}
-            base_state_id = from_state
-        else:
-            if _state_current_id is not None:
-                entry_to_use = _state_get(_state_current_id)
-            base_state_id = _state_current_id
-
-        if entry_to_use is None:
-            return {
-                "success": False,
-                "error": "No active state. Use rocq_start first.",
-            }
+        # Re-validate under lock — pet may have restarted since the outer check.
+        entry_to_use, base_state_id, err = _resolve_check_base_state(from_state)
+        if err or entry_to_use is None:
+            return {"success": False, "error": err or "Internal: state lost."}
 
         _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
         parent_state = entry_to_use.state

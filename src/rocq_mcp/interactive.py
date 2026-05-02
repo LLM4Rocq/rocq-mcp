@@ -772,6 +772,76 @@ def _build_position_start_result(
     }
 
 
+def _build_theorem_start_result(
+    pet: Any,
+    *,
+    file: str,
+    resolved_file: str,
+    theorem: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the rocq_start-style payload for a theorem-based state."""
+    _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+    state = pet.start(resolved_file, theorem)
+    # Capture mtime after pet.start to avoid TOCTOU gap.
+    try:
+        file_mtime: float | None = os.path.getmtime(resolved_file)
+    except OSError:
+        file_mtime = None
+    state_id = _state_add(
+        state=state,
+        file=file,
+        theorem=theorem,
+        workspace=workspace,
+        parent_id=None,
+        tactic=None,
+        step=0,
+        file_mtime=file_mtime,
+        resolved_file=resolved_file,
+    )
+    goals = _try_get_goals(pet, state) or ""
+    return {
+        "success": True,
+        "state_id": state_id,
+        "goals": goals,
+        "file": file,
+        "theorem": theorem,
+        "proof_finished": getattr(state, "proof_finished", False),
+    }
+
+
+def _build_preamble_start_result(
+    pet: Any,
+    *,
+    preamble: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the rocq_start-style payload for a preamble-based state."""
+    preamble_cmds = _split_rocq_sentences(preamble) if preamble.strip() else []
+    import_state = _get_or_create_import_state(
+        pet, workspace, preamble_cmds, lifespan_state
+    )
+    state_id = _state_add(
+        state=import_state,
+        file="<preamble>",
+        theorem="<preamble>",
+        workspace=workspace,
+        parent_id=None,
+        tactic=None,
+        step=0,
+    )
+    return {
+        "success": True,
+        "state_id": state_id,
+        "goals": "",
+        "file": "<preamble>",
+        "theorem": "<preamble>",
+        "proof_finished": getattr(import_state, "proof_finished", False),
+    }
+
+
 async def capture_position_state(
     *,
     file: str,
@@ -871,34 +941,15 @@ async def run_start(
 
     def _execute(pet: Any) -> dict[str, Any]:
         if _start_by_theorem:
-            _server._set_workspace_if_needed(pet, workspace, lifespan_state)
-            state = pet.start(resolved_file, theorem)
-            # Capture mtime after pet.start to avoid TOCTOU gap
-            try:
-                file_mtime = os.path.getmtime(resolved_file)
-            except OSError:
-                file_mtime = None
-            state_id = _state_add(
-                state=state,
+            return _build_theorem_start_result(
+                pet,
                 file=file,
+                resolved_file=resolved_file,
                 theorem=theorem,
                 workspace=workspace,
-                parent_id=None,
-                tactic=None,
-                step=0,
-                file_mtime=file_mtime,
-                resolved_file=resolved_file,
+                lifespan_state=lifespan_state,
             )
-            goals = _try_get_goals(pet, state) or ""
-            return {
-                "success": True,
-                "state_id": state_id,
-                "goals": goals,
-                "file": file,
-                "theorem": theorem,
-                "proof_finished": getattr(state, "proof_finished", False),
-            }
-        elif _start_by_pos:
+        if _start_by_pos:
             return _build_position_start_result(
                 pet,
                 file=file,
@@ -908,29 +959,12 @@ async def run_start(
                 line=line,
                 character=character,
             )
-        else:
-            # Preamble mode
-            preamble_cmds = _split_rocq_sentences(preamble) if preamble.strip() else []
-            import_state = _get_or_create_import_state(
-                pet, workspace, preamble_cmds, lifespan_state
-            )
-            state_id = _state_add(
-                state=import_state,
-                file="<preamble>",
-                theorem="<preamble>",
-                workspace=workspace,
-                parent_id=None,
-                tactic=None,
-                step=0,
-            )
-            return {
-                "success": True,
-                "state_id": state_id,
-                "goals": "",
-                "file": "<preamble>",
-                "theorem": "<preamble>",
-                "proof_finished": getattr(import_state, "proof_finished", False),
-            }
+        return _build_preamble_start_result(
+            pet,
+            preamble=preamble,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+        )
 
     if force_restart:
         _server._invalidate_pet(lifespan_state)

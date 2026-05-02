@@ -572,7 +572,6 @@ def _deduplicate_toc_elements(all_elements: list[Any]) -> list[Any]:
 
 async def _extract_problem_structure(
     problem_statement: str,
-    problem_name: str,
     workspace: str,
     lifespan_state: dict[str, Any],
 ) -> ProblemStructure | None:
@@ -604,8 +603,12 @@ async def _extract_problem_structure(
         _temp_files.append(tmp_path)
 
         try:
+            from pytanque import PetanqueError
+        except ImportError:
+            PetanqueError = Exception  # type: ignore[assignment,misc]
+        try:
             toc_result = pet.toc(tmp_path)
-        except Exception:
+        except (PetanqueError, OSError):
             return None
         finally:
             _server._cleanup_coqc_artifacts(tmp_path)
@@ -889,7 +892,6 @@ def _run_phase1_module_m(
     workspace: str,
     timeout: int,
     include_warnings: bool,
-    t0: float,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Phase 1: Standard Module M sandbox (strongest security).
 
@@ -981,7 +983,7 @@ async def _run_phase2_shared_defs(
         )
 
     structure = await _extract_problem_structure(
-        problem_statement, problem_name, workspace, lifespan_state
+        problem_statement, workspace, lifespan_state
     )
 
     if structure is None:
@@ -1090,7 +1092,6 @@ async def run_verify(
         workspace,
         timeout,
         include_warnings,
-        t0,
     )
     if phase1_result is not None:
         return phase1_result

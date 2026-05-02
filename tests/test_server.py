@@ -46,6 +46,7 @@ from rocq_mcp.compile import (
     _MAX_FORMAT_WARNINGS,
 )
 from rocq_mcp.interactive import _format_goals
+from tests.conftest import add_mock_state
 
 # =========================================================================
 # _format_error
@@ -1145,38 +1146,12 @@ class TestForceReleasePetLock:
 class TestReconstructTacticPath:
     """Tests for _reconstruct_tactic_path (state table chain walk)."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_state_table(self):
-        """Reset state table before/after each test."""
-        from rocq_mcp.interactive import _state_invalidate_all
-
-        _state_invalidate_all()
-        yield
-        _state_invalidate_all()
-
-    def _add_state(self, parent_id, tactic, step=0):
-        """Helper: add a mock state entry to the table."""
-        from rocq_mcp.interactive import _state_add
-        from unittest.mock import MagicMock
-
-        state = MagicMock()
-        state.proof_finished = False
-        return _state_add(
-            state=state,
-            file="test.v",
-            theorem="t",
-            workspace="/tmp",
-            parent_id=parent_id,
-            tactic=tactic,
-            step=step,
-        )
-
     def test_single_tactic(self):
         """Chain: root → tactic1."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        root = self._add_state(None, None, step=0)
-        s1 = self._add_state(root, "intros.", step=1)
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
         tactics, complete = _reconstruct_tactic_path(s1)
         assert tactics == ["intros."]
         assert complete is True
@@ -1185,10 +1160,10 @@ class TestReconstructTacticPath:
         """Chain: root → t1 → t2 → t3."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        root = self._add_state(None, None, step=0)
-        s1 = self._add_state(root, "intros.", step=1)
-        s2 = self._add_state(s1, "induction n.", step=2)
-        s3 = self._add_state(s2, "reflexivity.", step=3)
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "induction n.", step=2)
+        s3 = add_mock_state(s2, "reflexivity.", step=3)
         tactics, complete = _reconstruct_tactic_path(s3)
         assert tactics == [
             "intros.",
@@ -1201,7 +1176,7 @@ class TestReconstructTacticPath:
         """Root state (tactic=None) returns empty list."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
         tactics, complete = _reconstruct_tactic_path(root)
         assert tactics == []
         assert complete is True
@@ -1210,13 +1185,13 @@ class TestReconstructTacticPath:
         """Two branches from root — each returns only its own path."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
         # Branch A
-        a1 = self._add_state(root, "intros.", step=1)
-        a2 = self._add_state(a1, "auto.", step=2)
+        a1 = add_mock_state(root, "intros.", step=1)
+        a2 = add_mock_state(a1, "auto.", step=2)
         # Branch B
-        b1 = self._add_state(root, "intro n.", step=1)
-        b2 = self._add_state(b1, "lia.", step=2)
+        b1 = add_mock_state(root, "intro n.", step=1)
+        b2 = add_mock_state(b1, "lia.", step=2)
 
         tactics_a, complete_a = _reconstruct_tactic_path(a2)
         assert tactics_a == ["intros.", "auto."]
@@ -1240,9 +1215,9 @@ class TestReconstructTacticPath:
             _state_table,
         )
 
-        root = self._add_state(None, None, step=0)
-        s1 = self._add_state(root, "intros.", step=1)
-        s2 = self._add_state(s1, "auto.", step=2)
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "auto.", step=2)
         # Simulate eviction of root and s1
         del _state_table[root]
         del _state_table[s1]
@@ -1258,7 +1233,7 @@ class TestReconstructTacticPath:
             _state_table,
         )
 
-        s1 = self._add_state(None, "intros.", step=0)
+        s1 = add_mock_state(None, "intros.", step=0)
         # Manually create a cycle: s1's parent_id points to itself
         _state_table[s1].parent_id = s1
         tactics, complete = _reconstruct_tactic_path(s1)
@@ -1270,9 +1245,9 @@ class TestReconstructTacticPath:
         """A normal chain root->s1->s2 returns (tactics, True)."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        root = self._add_state(None, None, step=0)
-        s1 = self._add_state(root, "t1.", step=1)
-        s2 = self._add_state(s1, "t2.", step=2)
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "t1.", step=1)
+        s2 = add_mock_state(s1, "t2.", step=2)
         tactics, complete = _reconstruct_tactic_path(s2)
         assert tactics == ["t1.", "t2."]
         assert complete is True
@@ -1284,9 +1259,9 @@ class TestReconstructTacticPath:
             _state_table,
         )
 
-        root = self._add_state(None, None, step=0)
-        s1 = self._add_state(root, "intros.", step=1)
-        s2 = self._add_state(s1, "auto.", step=2)
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "auto.", step=2)
         # Evict root
         del _state_table[root]
         tactics, complete = _reconstruct_tactic_path(s2)
@@ -1372,32 +1347,6 @@ class TestFormatGoals:
 class TestRunCheckBodySizeLimit:
     """Test that run_check rejects bodies larger than ROCQ_MAX_SOURCE_SIZE."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_state_table(self):
-        """Reset state table before/after each test."""
-        from rocq_mcp.interactive import _state_invalidate_all
-
-        _state_invalidate_all()
-        yield
-        _state_invalidate_all()
-
-    def _add_state(self, parent_id, tactic, step=0):
-        """Helper: add a mock state entry to the table."""
-        from rocq_mcp.interactive import _state_add
-        from unittest.mock import MagicMock
-
-        state = MagicMock()
-        state.proof_finished = False
-        return _state_add(
-            state=state,
-            file="test.v",
-            theorem="t",
-            workspace="/tmp",
-            parent_id=parent_id,
-            tactic=tactic,
-            step=step,
-        )
-
     @pytest.mark.asyncio
     async def test_body_too_large(self, monkeypatch):
         """run_check with body exceeding ROCQ_MAX_SOURCE_SIZE returns error."""
@@ -1408,7 +1357,7 @@ class TestRunCheckBodySizeLimit:
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 100)
 
         # Create a state so that from_state lookup would succeed
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
 
         lifespan_state = {
             "pet_client": None,
@@ -1440,32 +1389,6 @@ class TestRunCheckBodySizeLimit:
 class TestStateTableEviction:
     """Test state table eviction when _MAX_STATES is exceeded."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_state_table(self):
-        """Reset state table before/after each test."""
-        from rocq_mcp.interactive import _state_invalidate_all
-
-        _state_invalidate_all()
-        yield
-        _state_invalidate_all()
-
-    def _add_state(self, parent_id, tactic, step=0):
-        """Helper: add a mock state entry to the table."""
-        from rocq_mcp.interactive import _state_add
-        from unittest.mock import MagicMock
-
-        state = MagicMock()
-        state.proof_finished = False
-        return _state_add(
-            state=state,
-            file="test.v",
-            theorem="t",
-            workspace="/tmp",
-            parent_id=parent_id,
-            tactic=tactic,
-            step=step,
-        )
-
     def test_eviction_removes_oldest(self, monkeypatch):
         """When more states than _MAX_STATES are added, oldest are evicted."""
         import rocq_mcp.interactive as intermod
@@ -1474,7 +1397,7 @@ class TestStateTableEviction:
 
         ids = []
         for i in range(7):
-            sid = self._add_state(None, f"tactic_{i}.", step=i)
+            sid = add_mock_state(None, f"tactic_{i}.", step=i)
             ids.append(sid)
 
         from rocq_mcp.interactive import _state_table
@@ -1497,7 +1420,7 @@ class TestStateTableEviction:
 
         ids = []
         for i in range(5):
-            sid = self._add_state(None, f"tactic_{i}.", step=i)
+            sid = add_mock_state(None, f"tactic_{i}.", step=i)
             ids.append(sid)
 
         # ids[0] and ids[1] should have been evicted
@@ -1698,32 +1621,6 @@ class TestPetInvalidationHooks:
 class TestRunCheckBodyWithinLimit:
     """Test that run_check does NOT reject bodies within ROCQ_MAX_SOURCE_SIZE."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_state_table(self):
-        """Reset state table before/after each test."""
-        from rocq_mcp.interactive import _state_invalidate_all
-
-        _state_invalidate_all()
-        yield
-        _state_invalidate_all()
-
-    def _add_state(self, parent_id, tactic, step=0):
-        """Helper: add a mock state entry to the table."""
-        from rocq_mcp.interactive import _state_add
-        from unittest.mock import MagicMock
-
-        state = MagicMock()
-        state.proof_finished = False
-        return _state_add(
-            state=state,
-            file="test.v",
-            theorem="t",
-            workspace="/tmp",
-            parent_id=parent_id,
-            tactic=tactic,
-            step=step,
-        )
-
     @pytest.mark.asyncio
     async def test_body_within_limit(self, monkeypatch):
         """run_check with body within ROCQ_MAX_SOURCE_SIZE passes the size check."""
@@ -1732,7 +1629,7 @@ class TestRunCheckBodyWithinLimit:
 
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 1000)
 
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
         lifespan_state = {
             "pet_client": None,
             "pet_timeout": 30.0,
@@ -1760,7 +1657,7 @@ class TestRunCheckBodyWithinLimit:
 
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
 
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
         lifespan_state = {
             "pet_client": None,
             "pet_timeout": 30.0,
@@ -1787,7 +1684,7 @@ class TestRunCheckBodyWithinLimit:
 
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
 
-        root = self._add_state(None, None, step=0)
+        root = add_mock_state(None, None, step=0)
         lifespan_state = {
             "pet_client": None,
             "pet_timeout": 30.0,

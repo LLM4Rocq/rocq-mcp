@@ -63,6 +63,43 @@ class _MockContext:
         self.lifespan_context = lifespan_state
 
 
+@pytest.fixture(autouse=True)
+def _clean_state_table():
+    """Reset ``_state_table`` before/after every test for isolation.
+
+    Cheap (just clears a module-level dict) and keeps unit tests that
+    populate the state table from leaking entries into each other.
+    """
+    from rocq_mcp.interactive import _state_invalidate_all
+
+    _state_invalidate_all()
+    yield
+    _state_invalidate_all()
+
+
+def add_mock_state(parent_id, tactic, step=0):
+    """Add a mock state entry to ``_state_table`` and return its id.
+
+    Convenience helper for unit tests that exercise the state-table
+    bookkeeping (chain reconstruction, eviction, body-size limits, ...).
+    """
+    from unittest.mock import MagicMock
+
+    from rocq_mcp.interactive import _state_add
+
+    state = MagicMock()
+    state.proof_finished = False
+    return _state_add(
+        state=state,
+        file="test.v",
+        theorem="t",
+        workspace="/tmp",
+        parent_id=parent_id,
+        tactic=tactic,
+        step=step,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Workspace fixture
 # ---------------------------------------------------------------------------

@@ -404,18 +404,70 @@ class TestStateCaptureStatus:
         assert captured["line"] == 4
         assert captured["character"] == 3
 
-    def test_status_timeout_when_pet_times_out(self, workspace, monkeypatch):
-        """capture_position_state returning a timeout dict -> status='timeout'."""
+    @pytest.mark.parametrize(
+        "test_id, mock_return, expected_status",
+        [
+            (
+                "timeout",
+                {
+                    "success": False,
+                    "error": "Compile error state capture timed out after 5.0s.",
+                    "pet_restarted": True,
+                    "reason": "timeout",
+                },
+                "timeout",
+            ),
+            (
+                "crashed_pet_restarted",
+                {
+                    "success": False,
+                    "error": "Pet process died: BrokenPipeError",
+                    "pet_restarted": True,
+                    "reason": "crashed",
+                },
+                "crashed",
+            ),
+            (
+                "lock_contended",
+                {
+                    "success": False,
+                    "error": (
+                        "Compile error state capture: pet is busy "
+                        "(lock contention). Try again."
+                    ),
+                    "reason": "lock_contended",
+                },
+                "lock_contended",
+            ),
+            (
+                "unavailable",
+                {
+                    "success": False,
+                    "error": (
+                        "pytanque is not installed. "
+                        "Install with: pip install 'rocq-mcp[interactive]'"
+                    ),
+                    "reason": "unavailable",
+                },
+                "unavailable",
+            ),
+            (
+                "default_to_crashed_when_no_reason",
+                {"success": False, "error": "Pet died unexpectedly"},
+                "crashed",
+            ),
+        ],
+        ids=lambda v: v if isinstance(v, str) else None,
+    )
+    def test_status_from_capture_failure(
+        self, workspace, monkeypatch, test_id, mock_return, expected_status
+    ):
+        """Failure dicts returned by capture_position_state map to status."""
         _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
         from rocq_mcp import server as _server
 
-        async def _mock_cps(**kwargs):
-            return {
-                "success": False,
-                "error": "Compile error state capture timed out after 5.0s.",
-                "pet_restarted": True,
-                "reason": "timeout",
-            }
+        async def _mock_cps(**_kwargs):
+            return mock_return
 
         _patch_capture_position_state(monkeypatch, _mock_cps)
 
@@ -428,123 +480,12 @@ class TestStateCaptureStatus:
             )
         )
 
-        assert result["state_capture_status"] == "timeout"
+        assert result["state_capture_status"] == expected_status
         assert "state_id" not in result
+        # Original compile error and rocq_start hint must survive any
+        # non-"ok" capture outcome.
         assert "Real failure" in result["error"]
         assert "Use rocq_start" in result["hint"]
-
-    def test_status_crashed_when_pet_restarts(self, workspace, monkeypatch):
-        """capture_position_state returning a crash dict -> status='crashed'."""
-        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
-        from rocq_mcp import server as _server
-
-        async def _mock_cps(**kwargs):
-            return {
-                "success": False,
-                "error": "Pet process died: BrokenPipeError",
-                "pet_restarted": True,
-                "reason": "crashed",
-            }
-
-        _patch_capture_position_state(monkeypatch, _mock_cps)
-
-        result = asyncio.run(
-            _server.run_compile_with_state(
-                "x",
-                str(workspace),
-                60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["state_capture_status"] == "crashed"
-        assert "state_id" not in result
-        assert "Real failure" in result["error"]
-
-    def test_status_lock_contended_when_pet_busy(self, workspace, monkeypatch):
-        """capture_position_state returning a lock-contention dict -> status='lock_contended'."""
-        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
-        from rocq_mcp import server as _server
-
-        async def _mock_cps(**kwargs):
-            return {
-                "success": False,
-                "error": (
-                    "Compile error state capture: pet is busy "
-                    "(lock contention). Try again."
-                ),
-                "reason": "lock_contended",
-            }
-
-        _patch_capture_position_state(monkeypatch, _mock_cps)
-
-        result = asyncio.run(
-            _server.run_compile_with_state(
-                "x",
-                str(workspace),
-                60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["state_capture_status"] == "lock_contended"
-        assert "state_id" not in result
-        assert "Real failure" in result["error"]
-        assert "Use rocq_start" in result["hint"]
-
-    def test_status_unavailable_when_pet_not_installed(self, workspace, monkeypatch):
-        """capture_position_state returning reason='unavailable' -> status='unavailable'."""
-        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
-        from rocq_mcp import server as _server
-
-        async def _mock_cps(**kwargs):
-            return {
-                "success": False,
-                "error": (
-                    "pytanque is not installed. "
-                    "Install with: pip install 'rocq-mcp[interactive]'"
-                ),
-                "reason": "unavailable",
-            }
-
-        _patch_capture_position_state(monkeypatch, _mock_cps)
-
-        result = asyncio.run(
-            _server.run_compile_with_state(
-                "x",
-                str(workspace),
-                60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["state_capture_status"] == "unavailable"
-        assert "state_id" not in result
-
-    def test_status_defaults_to_crashed_when_no_reason(self, workspace, monkeypatch):
-        """A failure dict with no ``reason`` key falls back to status='crashed'."""
-        _patch_compile_error(monkeypatch, _DEFAULT_STDERR)
-        from rocq_mcp import server as _server
-
-        async def _mock_cps(**kwargs):
-            return {
-                "success": False,
-                "error": "Pet died unexpectedly",
-            }
-
-        _patch_capture_position_state(monkeypatch, _mock_cps)
-
-        result = asyncio.run(
-            _server.run_compile_with_state(
-                "x",
-                str(workspace),
-                60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
-            )
-        )
-
-        assert result["state_capture_status"] == "crashed"
-        assert "state_id" not in result
 
     def test_status_unavailable_when_import_fails(self, workspace, monkeypatch):
         """Forced ImportError on rocq_mcp.interactive -> status='unavailable'."""

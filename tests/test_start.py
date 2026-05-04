@@ -699,3 +699,422 @@ class TestForceRestart(_MockPetBase):
             assert result2["success"] is True
             # Old state ID should have been cleared by _invalidate_pet hooks
             assert old_id not in _state_table
+
+
+# ---------------------------------------------------------------------------
+# TestStartNotFoundEnrichment: ``available_in_file`` on theorem-not-found
+# ---------------------------------------------------------------------------
+
+
+def _make_toc_elem(name: str, detail: str = "Theorem", line: int = 0):
+    """Mimic pytanque's TocElement for tests."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name=SimpleNamespace(v=name),
+        detail=detail,
+        kind=0,
+        range=SimpleNamespace(
+            start=SimpleNamespace(line=line, character=0),
+            end=SimpleNamespace(line=line + 1, character=0),
+        ),
+        children=None,
+    )
+
+
+def _make_failing_pet(toc_return):
+    """Build a MagicMock pet whose ``start`` raises ``PetanqueError`` and
+    whose ``toc`` returns *toc_return*.
+    """
+    from unittest.mock import MagicMock
+    from pytanque import PetanqueError
+
+    mock_pet = MagicMock()
+    mock_pet.process = MagicMock()
+    mock_pet.process.poll.return_value = None
+    mock_pet._own_pgrp = False
+    mock_pet.start.side_effect = PetanqueError(1, "Reference not found.")
+    mock_pet.toc.return_value = toc_return
+    return mock_pet
+
+
+@pytest.fixture
+def failing_pet_workspace(tmp_path):
+    """Yield ``(tmp_path, test_file_path, lifespan_state_template)``.
+
+    Tests build a mock pet with ``_make_failing_pet`` and inject it into
+    ``lifespan_state`` plus ``patch.object(server, '_ensure_pet', ...)``.
+    """
+    test_file = tmp_path / "test.v"
+    test_file.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+    return tmp_path, test_file
+
+
+class TestStartNotFoundAvailableInFile(_MockPetBase):
+    """rocq_start: when pet.start raises (theorem not found), attach
+    ``available_in_file`` populated from pet.toc.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_toc_cache(self):
+        from rocq_mcp.interactive import _TOC_CACHE
+
+        _TOC_CACHE.clear()
+        yield
+        _TOC_CACHE.clear()
+
+    @staticmethod
+    def _lifespan_state(mock_pet):
+        return {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+    @pytest.mark.asyncio
+    async def test_not_found_attaches_available_in_file(self, failing_pet_workspace):
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        mock_pet = _make_failing_pet(
+            [
+                (
+                    "main",
+                    [
+                        _make_toc_elem("alpha"),
+                        _make_toc_elem("my_thm"),
+                        _make_toc_elem("zeta"),
+                    ],
+                )
+            ]
+        )
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="my_thm_typoed",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert result["success"] is False
+        assert result["reason"] == "not_found"
+        assert result["available_in_file"] == ["alpha", "my_thm", "zeta"]
+        assert "available_in_file_truncated" not in result
+        assert "available_in_file_total" not in result
+
+    @pytest.mark.asyncio
+    async def test_available_in_file_is_sorted(self, failing_pet_workspace):
+        """The returned ``available_in_file`` list must be sorted."""
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        # Insert names out-of-order so the only way the result is sorted
+        # is if the cache helper sorts.
+        mock_pet = _make_failing_pet(
+            [
+                (
+                    "main",
+                    [
+                        _make_toc_elem("zeta"),
+                        _make_toc_elem("alpha"),
+                        _make_toc_elem("my_thm"),
+                        _make_toc_elem("beta"),
+                    ],
+                )
+            ]
+        )
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="missing",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        names = result["available_in_file"]
+        assert names == sorted(names)
+        assert names == ["alpha", "beta", "my_thm", "zeta"]
+
+    @pytest.mark.asyncio
+    async def test_truncation_marker_when_over_limit(self, failing_pet_workspace):
+        """File with > 500 names → ``available_in_file_truncated`` set,
+        ``available_in_file_total`` reports the actual count, list capped
+        at 500.
+        """
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        names = [f"name_{i:04d}" for i in range(750)]
+        mock_pet = _make_failing_pet([("main", [_make_toc_elem(n) for n in names])])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="missing",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        from rocq_mcp.interactive import _DEFAULT_TOC_LIMIT
+
+        assert result["success"] is False
+        assert result["available_in_file_truncated"] is True
+        assert result["available_in_file_total"] == 750
+        assert len(result["available_in_file"]) == 500
+        # The active cap surfaces in the response so the agent doesn't
+        # have to guess it.
+        assert result["available_in_file_limit"] == _DEFAULT_TOC_LIMIT
+        assert result["available_in_file_limit"] == 500
+        # Capped to the first 500 *sorted* names.
+        assert result["available_in_file"][0] == "name_0000"
+        assert result["available_in_file"][-1] == "name_0499"
+
+    @pytest.mark.asyncio
+    async def test_truncation_marker_absent_when_under_limit(
+        self, failing_pet_workspace
+    ):
+        """File with ≤ 500 names → no truncation marker fields, including
+        no ``available_in_file_limit`` (the cap is only reported when it
+        actually fired).
+        """
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        names = [f"name_{i:03d}" for i in range(200)]
+        mock_pet = _make_failing_pet([("main", [_make_toc_elem(n) for n in names])])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="missing",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert result["success"] is False
+        assert "available_in_file_truncated" not in result
+        assert "available_in_file_total" not in result
+        assert "available_in_file_limit" not in result
+        assert len(result["available_in_file"]) == 200
+
+    @pytest.mark.asyncio
+    async def test_not_found_reason_is_not_found(self, failing_pet_workspace):
+        """The ``reason`` for theorem-not-found must be ``"not_found"``,
+        not ``"crashed"`` (which conflates pet death with name lookup)."""
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        mock_pet = _make_failing_pet([("main", [_make_toc_elem("a")])])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="missing",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert result["success"] is False
+        assert result["reason"] == "not_found"
+
+    @pytest.mark.asyncio
+    async def test_toc_cache_hit_avoids_re_call(self, failing_pet_workspace):
+        """Two failures against the same file (same mtime) → pet.toc once."""
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, _ = failing_pet_workspace
+        mock_pet = _make_failing_pet(
+            [("main", [_make_toc_elem("a"), _make_toc_elem("b")])]
+        )
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            await _interactive.run_start(
+                file="test.v",
+                theorem="missing1",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+            await _interactive.run_start(
+                file="test.v",
+                theorem="missing2",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert mock_pet.toc.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_toc_cache_invalidation_on_mtime_change(self, failing_pet_workspace):
+        """Mtime change → cache miss → pet.toc called again."""
+        import os
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        ws, test_file = failing_pet_workspace
+        mock_pet = _make_failing_pet([("main", [_make_toc_elem("a")])])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            await _interactive.run_start(
+                file="test.v",
+                theorem="missing1",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+            # Bump mtime far enough that the new value is distinguishable
+            # from the original on filesystems with low mtime resolution.
+            stat = os.stat(test_file)
+            os.utime(str(test_file), (stat.st_atime + 5, stat.st_mtime + 5))
+
+            await _interactive.run_start(
+                file="test.v",
+                theorem="missing2",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert mock_pet.toc.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_toc_pet_raises_returns_empty(self, failing_pet_workspace):
+        """When ``pet.toc`` raises, ``_toc_names_cached`` returns ``[]``
+        and no entry is cached (so a later retry can succeed).
+        """
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+        from rocq_mcp.interactive import _TOC_CACHE
+
+        ws, _ = failing_pet_workspace
+        mock_pet = _make_failing_pet([])
+        # Override toc to raise.
+        mock_pet.toc.side_effect = RuntimeError("boom")
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_start(
+                file="test.v",
+                theorem="missing",
+                workspace=str(ws),
+                lifespan_state=self._lifespan_state(mock_pet),
+            )
+
+        assert result["success"] is False
+        assert "available_in_file" not in result
+        # Failure must not be cached — retries should be possible.
+        assert _TOC_CACHE == {}
+
+    def test_toc_cache_eviction_at_max(self):
+        """Insert ``_TOC_CACHE_MAX + 1`` entries; oldest must be evicted."""
+        from rocq_mcp.interactive import (
+            _TOC_CACHE,
+            _TOC_CACHE_MAX,
+            _toc_names_cached,
+        )
+        import os
+        import tempfile
+        from unittest.mock import MagicMock
+
+        _TOC_CACHE.clear()
+        try:
+            tmpdir = tempfile.mkdtemp()
+            paths = []
+            try:
+                # Create _TOC_CACHE_MAX + 1 distinct files so each gets a
+                # distinct (file, mtime) cache key.
+                for i in range(_TOC_CACHE_MAX + 1):
+                    p = os.path.join(tmpdir, f"f{i:03d}.v")
+                    with open(p, "w") as fh:
+                        fh.write("(* test *)\n")
+                    paths.append(p)
+
+                # The first file's key is what should be evicted after the
+                # 51st insertion.
+                first_path = paths[0]
+                first_mtime = os.path.getmtime(first_path)
+                first_key = (first_path, first_mtime)
+
+                pet = MagicMock()
+                pet.toc.return_value = []
+
+                for p in paths:
+                    _toc_names_cached(pet, p)
+
+                assert len(_TOC_CACHE) == _TOC_CACHE_MAX
+                assert first_key not in _TOC_CACHE
+            finally:
+                for p in paths:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(tmpdir)
+                except OSError:
+                    pass
+        finally:
+            _TOC_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# TestTruncateNames: pure helper unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateNames:
+    """Unit tests for the _truncate_names helper (pure, no pet)."""
+
+    def test_returns_all_when_under_limit(self):
+        from rocq_mcp.interactive import _truncate_names
+
+        names = ["a", "b", "c", "d"]
+        capped, truncated = _truncate_names(names)
+        assert capped == names
+        assert truncated is False
+
+    def test_returns_all_when_exactly_at_limit(self):
+        from rocq_mcp.interactive import _truncate_names
+
+        names = [f"n{i:04d}" for i in range(500)]
+        capped, truncated = _truncate_names(names)
+        assert capped == names
+        assert truncated is False
+
+    def test_truncates_when_over_limit(self):
+        from rocq_mcp.interactive import _truncate_names
+
+        names = [f"n{i:04d}" for i in range(750)]
+        capped, truncated = _truncate_names(names)
+        assert len(capped) == 500
+        assert capped == names[:500]
+        assert truncated is True
+
+    def test_custom_limit(self):
+        from rocq_mcp.interactive import _truncate_names
+
+        names = ["a", "b", "c", "d", "e"]
+        capped, truncated = _truncate_names(names, limit=3)
+        assert capped == ["a", "b", "c"]
+        assert truncated is True

@@ -10,15 +10,18 @@ implementation functions in :mod:`rocq_mcp.compile` and
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import re
 import signal
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Literal, TypedDict, get_args
 
+import psutil
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 
@@ -31,8 +34,28 @@ _ROCQ_WORKSPACE_EXPLICIT: bool = "ROCQ_WORKSPACE" in os.environ
 ROCQ_COQC_TIMEOUT: int = int(os.environ.get("ROCQ_COQC_TIMEOUT", "60"))
 ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
 ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
+ROCQ_QUERY_TIMEOUT_CAP: int = int(os.environ.get("ROCQ_QUERY_TIMEOUT_CAP", "300"))
 ROCQ_COQC_BINARY: str = os.environ.get("ROCQ_COQC_BINARY", "coqc")
 ROCQ_MAX_SOURCE_SIZE: int = int(os.environ.get("ROCQ_MAX_SOURCE_SIZE", "1000000"))
+
+
+def _default_max_pet_rss_mb() -> int:
+    """Default pet RSS cap: 50% of system RAM, hard-capped at 16 GB.
+
+    Tuned to fire well above legitimate ``vm_compute`` ceilings (~2-4 GB)
+    but well below the OOM-killer / swap-thrash zone.  On a 32 GB Mac
+    this resolves to 16 GB; on a 16 GB host, 8 GB; on a 64 GB+ host the
+    16 GB cap kicks in.
+    """
+    total_mb = psutil.virtual_memory().total // (1024 * 1024)
+    return min(int(0.50 * total_mb), 16_384)
+
+
+ROCQ_MAX_PET_RSS_MB: int = int(
+    os.environ.get("ROCQ_MAX_PET_RSS_MB", str(_default_max_pet_rss_mb()))
+)
+_MEMORY_WATCHDOG_INTERVAL: float = 0.5
+_RECENT_ERRORS_MAX: int = 20
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -47,6 +70,16 @@ async def app_lifespan(server: Any) -> Any:
         "workspace": ROCQ_WORKSPACE,
         "pet_timeout": ROCQ_PET_TIMEOUT,
         "current_workspace": None,
+        # Diagnostics (rocq_diag tool, see _build_diag_snapshot).
+        "pet_started_at": None,
+        # Count of successful spawns; pet_restarts is derived as
+        # max(0, total_spawns - 1).  Counting only successful spawns
+        # ensures a fresh server reports 0 restarts even if the very
+        # first spawn attempt raised.
+        "total_spawns": 0,
+        "peak_pet_rss_mb": 0.0,
+        "pet_generation": 0,
+        "recent_errors": collections.deque(maxlen=_RECENT_ERRORS_MAX),
     }
     try:
         yield state
@@ -594,7 +627,21 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
                 pet._own_pgrp = False
         else:
             pet._own_pgrp = False
+        # Count *only* successful spawns so a fresh server reports
+        # pet_restarts=0 even if a previous spawn raised before reaching
+        # this point.  The bookkeeping below is the canonical "spawn
+        # succeeded" point.
+        prev_spawns: int = int(lifespan_state.get("total_spawns", 0))
+        if prev_spawns > 0:
+            # Reset peak RSS so "headroom before vm_compute" reflects the
+            # live pet, not a long-dead predecessor that may have pushed
+            # the peak high.  Reset *before* assigning ``pet_client`` so
+            # the watchdog cannot sample the new pet's RSS, write it to
+            # ``peak_pet_rss_mb``, and then have us wipe it.
+            lifespan_state["peak_pet_rss_mb"] = 0.0
         lifespan_state["pet_client"] = pet
+        lifespan_state["pet_started_at"] = time.time()
+        lifespan_state["total_spawns"] = prev_spawns + 1
     return pet
 
 
@@ -677,6 +724,7 @@ def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
         _kill_pet(pet)
     lifespan_state["pet_client"] = None
     lifespan_state["current_workspace"] = None
+    lifespan_state["pet_generation"] = lifespan_state.get("pet_generation", 0) + 1
     for hook in _pet_invalidation_hooks:
         hook()
 
@@ -731,10 +779,175 @@ def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
             resp[k] = v
 
 
+_RECENT_ERROR_MESSAGE_LIMIT: int = 500
+
+# Allowed values for the ``reason`` field on ``recent_errors`` entries.
+# A superset of :data:`_StateCaptureStatus`'s failure modes plus
+# ``"validation"`` for early-return validation failures.
+_RECENT_ERROR_REASONS: frozenset[str] = frozenset(
+    {
+        "timeout",
+        "crashed",
+        "memory_exhausted",
+        "lock_contended",
+        "unavailable",
+        "validation",
+        "not_found",
+    }
+)
+
+
+def _record_error(
+    lifespan_state: dict[str, Any] | None,
+    tool: str,
+    message: str,
+    reason: str,
+) -> None:
+    """Append an entry to the ``recent_errors`` ring buffer.
+
+    Stores absolute ``occurred_at`` timestamps; ``ago_seconds`` is computed
+    lazily by ``_build_diag_snapshot`` so values stay fresh when the buffer
+    is read.
+
+    *tool* is the canonical MCP tool name (e.g. ``"rocq_check"``) and
+    matches the output schema key in ``_build_diag_snapshot``.
+
+    *reason* is one of :data:`_RECENT_ERROR_REASONS` — typically a
+    :data:`_StateCaptureStatus` value for pet-level failures, or
+    ``"validation"`` for early-return validation failures.
+
+    Long *message* strings are truncated to
+    ``_RECENT_ERROR_MESSAGE_LIMIT`` chars + ``"..."`` to keep the
+    ``rocq_diag`` payload bounded; the full message is preserved in the
+    immediate response of the failing tool call.
+
+    Tolerates ``lifespan_state is None`` (no recording) and missing
+    ``recent_errors`` key (no recording) — both happen when the failing
+    tool call has no MCP context.
+    """
+    if lifespan_state is None:
+        return
+    buf = lifespan_state.get("recent_errors")
+    if buf is None:
+        return
+    if message is not None and len(message) > _RECENT_ERROR_MESSAGE_LIMIT:
+        message = message[:_RECENT_ERROR_MESSAGE_LIMIT] + "..."
+    buf.append(
+        {
+            "tool": tool,
+            "message": message,
+            "reason": reason,
+            "occurred_at": time.time(),
+        }
+    )
+
+
+def _fail(
+    lifespan_state: dict[str, Any] | None,
+    tool: str,
+    message: str,
+    reason: str = "validation",
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a failure response dict and record it in ``recent_errors``.
+
+    Convenience for the ``return {"success": False, "error": msg}`` pattern
+    that also needs to push the error onto the diag ring buffer.  Skips
+    recording when *lifespan_state* is ``None`` (no MCP context) so test
+    helpers and pre-context paths stay simple.
+    """
+    _record_error(lifespan_state, tool=tool, message=message, reason=reason)
+    return {"success": False, "error": message, **extra}
+
+
+async def _build_memory_abort_response(
+    lifespan_state: dict[str, Any],
+    tool: str,
+    on_timeout: Callable[[], None] | None,
+    partial_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Run the memory-abort recovery path and return the response dict.
+
+    Mirrors the timeout recovery: invalidate pet, release the lock, fire
+    ``on_timeout``, merge ``partial_state``.  Reason ``"memory_exhausted"``
+    discriminates from timeout/crashed; no separate boolean flag.
+    """
+    _invalidate_pet(lifespan_state)
+    await _force_release_pet_lock()
+    if on_timeout:
+        on_timeout()
+    resp: dict[str, Any] = {
+        "success": False,
+        "error": (
+            f"{tool} aborted: pet RSS exceeded "
+            f"{ROCQ_MAX_PET_RSS_MB} MB. The proof state was lost; "
+            "pet has been restarted. Retry with a smaller term, "
+            "avoid vm_compute on large inputs, or split the work."
+        ),
+        "pet_restarted": True,
+        "reason": "memory_exhausted",
+    }
+    if partial_state:
+        _merge_partial_state(resp, partial_state)
+    _record_error(lifespan_state, tool, resp["error"], reason="memory_exhausted")
+    return resp
+
+
+async def _memory_watchdog(
+    lifespan_state: dict[str, Any],
+    max_rss_mb: int,
+    main_task: asyncio.Task,
+    event: asyncio.Event,
+    interval: float | None = None,
+) -> None:
+    """Sample pet RSS; on threshold breach, set *event* and cancel *main_task*.
+
+    Runs concurrently with ``_run_with_pet``'s main thread.  When the pet
+    subprocess RSS exceeds ``max_rss_mb`` MB, signals memory exhaustion via
+    *event* and cancels the main task so the existing timeout-class recovery
+    path can reclaim the lock and respawn pet.
+
+    Tolerates:
+    - ``psutil`` not installed -- exits silently (no monitoring).
+    - pet not yet spawned (``lifespan_state["pet_client"] is None``) --
+      keeps polling.
+    - pet exits between samples (``psutil.NoSuchProcess``) -- treated as
+      transient; keeps polling.
+    """
+    if interval is None:
+        interval = _MEMORY_WATCHDOG_INTERVAL
+
+    try:
+        while not main_task.done():
+            await asyncio.sleep(interval)
+            if main_task.done():
+                return
+            client = lifespan_state.get("pet_client")
+            if client is None or client.process is None:
+                continue
+            try:
+                pid = client.process.pid
+                rss_bytes = psutil.Process(pid).memory_info().rss
+            except (psutil.Error, AttributeError, OSError):
+                # psutil.Error covers NoSuchProcess / AccessDenied / ZombieProcess;
+                # OSError catches raw ProcessLookupError if pet died between
+                # Process() construction and memory_info().
+                continue
+            rss_mb = rss_bytes // (1024 * 1024)
+            if rss_mb > lifespan_state.get("peak_pet_rss_mb", 0):
+                lifespan_state["peak_pet_rss_mb"] = float(rss_mb)
+            if rss_mb > max_rss_mb:
+                event.set()
+                main_task.cancel()
+                return
+    except asyncio.CancelledError:
+        return
+
+
 async def _run_with_pet(
     fn: Callable[[Any], Any],
     lifespan_state: dict[str, Any],
-    description: str,
+    tool: str,
     on_timeout: Callable[[], None] | None = None,
     timeout: float | None = None,
     partial_state: dict[str, Any] | None = None,
@@ -755,6 +968,12 @@ async def _run_with_pet(
     It runs inside a background thread with _pet_lock held; the lock is
     released automatically when *fn* returns or raises.
 
+    *tool* is the canonical MCP tool name (e.g. ``"rocq_check"``) and is
+    used both as the prefix in user-facing error messages
+    (``"rocq_check timed out after 30s."``) and as the ``tool`` field on
+    ``recent_errors`` entries.  Pass exactly the public tool name, not a
+    human phrase.
+
     When pet crashes (timeout, broken pipe), the return dict includes
     ``"pet_restarted": True`` so callers can decide whether to retry.
 
@@ -767,17 +986,19 @@ async def _run_with_pet(
     ``partial_state`` merges, etc.) and a TypedDict would be unwieldy.
     The ``"reason"`` key, when present on a failure, is a
     :data:`_StateCaptureStatus` (one of ``"timeout"``, ``"crashed"``,
-    ``"lock_contended"``, ``"unavailable"``).
+    ``"memory_exhausted"``, ``"lock_contended"``, ``"unavailable"``).
     """
     try:
         from pytanque import PetanqueError
     except ImportError:
+        msg = (
+            "pytanque is not installed. "
+            "Install with: pip install 'rocq-mcp[interactive]'"
+        )
+        _record_error(lifespan_state, tool, msg, reason="unavailable")
         return {
             "success": False,
-            "error": (
-                "pytanque is not installed. "
-                "Install with: pip install 'rocq-mcp[interactive]'"
-            ),
+            "error": msg,
             "reason": "unavailable",
         }
 
@@ -800,30 +1021,58 @@ async def _run_with_pet(
 
     sem = _get_pet_semaphore()
     async with sem:
+        main_task = asyncio.create_task(asyncio.to_thread(_execute))
+        mem_event = asyncio.Event()
+        monitor_task = asyncio.create_task(
+            _memory_watchdog(lifespan_state, ROCQ_MAX_PET_RSS_MB, main_task, mem_event)
+        )
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(_execute),
-                timeout=_timeout,
-            )
-            return result
+            try:
+                result = await asyncio.wait_for(main_task, timeout=_timeout)
+                return result
+            finally:
+                if not monitor_task.done():
+                    monitor_task.cancel()
+                    try:
+                        await monitor_task
+                    except asyncio.CancelledError:
+                        pass
+        except asyncio.CancelledError:
+            # If mem_event is set, the watchdog cancelled main_task because
+            # pet RSS exceeded the threshold; otherwise this is an external
+            # cancel that should propagate.
+            if mem_event.is_set():
+                return await _build_memory_abort_response(
+                    lifespan_state, tool, on_timeout, partial_state
+                )
+            raise
         except asyncio.TimeoutError:
+            # If the wait_for timer and the watchdog raced, mem_event may
+            # already be set; prefer the more specific memory_exhausted label.
+            if mem_event.is_set():
+                return await _build_memory_abort_response(
+                    lifespan_state, tool, on_timeout, partial_state
+                )
             _invalidate_pet(lifespan_state)
             await _force_release_pet_lock()
             if on_timeout:
                 on_timeout()
             resp = {
                 "success": False,
-                "error": f"{description} timed out after {_timeout}s.",
+                "error": f"{tool} timed out after {_timeout}s.",
                 "pet_restarted": True,
                 "reason": "timeout",
             }
             if partial_state:
                 _merge_partial_state(resp, partial_state)
+            _record_error(lifespan_state, tool, resp["error"], reason="timeout")
             return resp
         except _PetLockTimeout:
+            msg = f"{tool}: pet is busy (lock contention). Try again."
+            _record_error(lifespan_state, tool, msg, reason="lock_contended")
             return {
                 "success": False,
-                "error": (f"{description}: pet is busy (lock contention). Try again."),
+                "error": msg,
                 "reason": "lock_contended",
             }
         except PetanqueError as e:
@@ -838,7 +1087,9 @@ async def _run_with_pet(
                 }
                 if partial_state:
                     _merge_partial_state(resp, partial_state)
+                _record_error(lifespan_state, tool, resp["error"], reason="crashed")
                 return resp
+            _record_error(lifespan_state, tool, e.message, reason="crashed")
             return {"success": False, "error": e.message, "reason": "crashed"}
         except (BrokenPipeError, ConnectionError) as e:
             _invalidate_pet(lifespan_state)
@@ -853,11 +1104,14 @@ async def _run_with_pet(
             }
             if partial_state:
                 _merge_partial_state(resp, partial_state)
+            _record_error(lifespan_state, tool, resp["error"], reason="crashed")
             return resp
         except FileNotFoundError:
+            msg = "pet binary not found on PATH. Install coq-lsp."
+            _record_error(lifespan_state, tool, msg, reason="unavailable")
             return {
                 "success": False,
-                "error": "pet binary not found on PATH. Install coq-lsp.",
+                "error": msg,
                 "reason": "unavailable",
             }
         except (OSError, RuntimeError, ValueError, TypeError) as e:
@@ -868,7 +1122,133 @@ async def _run_with_pet(
             }
             if partial_state:
                 _merge_partial_state(resp, partial_state)
+            _record_error(lifespan_state, tool, resp["error"], reason="crashed")
             return resp
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics (rocq_diag tool)
+# ---------------------------------------------------------------------------
+
+
+# Maximum number of ``live_states`` entries returned by ``rocq_diag``.
+# Caps the response payload; ``live_states_total`` reports the full count.
+_DIAG_LIVE_STATES_CAP: int = 50
+
+
+_RssSampleStatus = Literal["ok", "no_pet", "psutil_error"]
+
+
+def _sample_pet_rss_mb(
+    lifespan_state: dict[str, Any],
+) -> tuple[float | None, _RssSampleStatus]:
+    """Best-effort live RSS sample of the pet subprocess.
+
+    Returns a ``(rss_mb, status)`` tuple where *status* discriminates the
+    ``rss_mb is None`` cases:
+
+    - ``"ok"``: psutil returned a sample; ``rss_mb`` is the live RSS in MB.
+    - ``"no_pet"``: pet is not running (no ``pet_client`` or no
+      ``.process``); no sample was attempted.
+    - ``"psutil_error"``: psutil raised (NoSuchProcess / AccessDenied /
+      ZombieProcess / OSError / AttributeError); ``rss_mb`` is ``None``.
+    """
+    client = lifespan_state.get("pet_client")
+    if client is None or getattr(client, "process", None) is None:
+        return None, "no_pet"
+    try:
+        pid = client.process.pid
+        rss_bytes = psutil.Process(pid).memory_info().rss
+    except (psutil.Error, AttributeError, OSError):
+        return None, "psutil_error"
+    return rss_bytes / (1024 * 1024), "ok"
+
+
+def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
+    """Build the response dict for the ``rocq_diag`` tool.
+
+    Reads diagnostic state without spawning pet.  See ``rocq_diag`` for the
+    output schema.  ``recent_errors`` entries are converted from the deque's
+    ``occurred_at`` timestamp to a relative ``ago_seconds`` here so values
+    stay fresh on every call.
+
+    ``live_states`` is capped at :data:`_DIAG_LIVE_STATES_CAP` (most recent
+    by ``created_at``); ``live_states_total`` reports the full count.
+    """
+    now = time.time()
+    client = lifespan_state.get("pet_client")
+    pet_pid: int | None = None
+    if client is not None and getattr(client, "process", None) is not None:
+        pet_pid = client.process.pid
+
+    started = lifespan_state.get("pet_started_at")
+    if started is None or pet_pid is None:
+        uptime = 0.0
+    else:
+        uptime = max(0.0, now - float(started))
+
+    pet_rss_mb, sample_status = _sample_pet_rss_mb(lifespan_state)
+    peak = float(lifespan_state.get("peak_pet_rss_mb", 0.0) or 0.0)
+
+    # Lazy import to avoid the server -> interactive -> server cycle at
+    # module load time.
+    try:
+        from rocq_mcp.interactive import _state_table
+    except ImportError:
+        _state_table = {}  # type: ignore[assignment]
+
+    # Sort by created_at descending (most recent first), then take cap.
+    all_entries = list(_state_table.items())
+    all_entries.sort(key=lambda kv: getattr(kv[1], "created_at", 0.0), reverse=True)
+    live_states_total = len(all_entries)
+    capped_entries = all_entries[:_DIAG_LIVE_STATES_CAP]
+
+    live_states: list[dict[str, Any]] = []
+    for sid, entry in capped_entries:
+        created = getattr(entry, "created_at", now)
+        age = max(0.0, now - created)
+        live_states.append(
+            {
+                "state_id": sid,
+                "parent": getattr(entry, "parent_id", None),
+                "file": getattr(entry, "file", None) or None,
+                "theorem": getattr(entry, "theorem", None) or None,
+                "age_seconds": age,
+            }
+        )
+
+    raw_errors = lifespan_state.get("recent_errors") or []
+    recent_errors: list[dict[str, Any]] = []
+    for entry in raw_errors:
+        occurred = float(entry.get("occurred_at", now))
+        recent_errors.append(
+            {
+                "tool": entry.get("tool"),
+                "message": entry.get("message"),
+                "reason": entry.get("reason"),
+                "ago_seconds": max(0.0, now - occurred),
+            }
+        )
+
+    total_spawns = int(lifespan_state.get("total_spawns", 0))
+    return {
+        "success": True,
+        "pet": {
+            "pid": pet_pid,
+            "uptime_seconds": uptime,
+            "restarts": max(0, total_spawns - 1),
+            "generation": int(lifespan_state.get("pet_generation", 0)),
+        },
+        "memory": {
+            "pet_rss_mb": pet_rss_mb,
+            "peak_pet_rss_mb": peak,
+            "max_rss_mb_threshold": float(ROCQ_MAX_PET_RSS_MB),
+            "sample_status": sample_status,
+        },
+        "live_states": live_states,
+        "live_states_total": live_states_total,
+        "recent_errors": recent_errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +1265,7 @@ from rocq_mcp.compile import (  # noqa: E402
     run_verify,
 )
 from rocq_mcp.interactive import (  # noqa: E402
+    _DEFAULT_TOC_LIMIT,
     _state_remove,
     run_assumptions,
     run_query,
@@ -922,9 +1303,11 @@ _StateCaptureStatus = Literal[
     "outside_proof",
     "timeout",
     "crashed",
+    "memory_exhausted",
     "unavailable",
     "lock_contended",
     "no_position",
+    "not_found",
 ]
 
 _VALID_STATE_CAPTURE_STATUSES: frozenset[str] = frozenset(get_args(_StateCaptureStatus))
@@ -945,6 +1328,7 @@ async def _capture_compile_error_state(
     line: int,
     character: int,
     file_label: str,
+    parent_tool: str,
     resolved_file: str | None = None,
     timeout: float | None = None,
 ) -> _CaptureResult:
@@ -995,7 +1379,7 @@ async def _capture_compile_error_state(
                 lifespan_state=lifespan_state,
                 line=line,
                 character=character,
-                description="Compile error state capture",
+                tool=parent_tool,
                 track_staleness=resolved_file is not None,
                 timeout=timeout,
             )
@@ -1059,6 +1443,7 @@ async def _enrich_compile_failure(
     workspace: str,
     lifespan_state: dict[str, Any],
     file_label: str,
+    parent_tool: str,
     resolved_file: str | None = None,
 ) -> dict[str, Any]:
     """Apply state-capture enrichment to a failed compile result.
@@ -1067,6 +1452,11 @@ async def _enrich_compile_failure(
     (a :data:`_StateCaptureStatus`) on every path: ``"no_position"`` when
     there is no usable error position, otherwise the status returned by
     :func:`_capture_compile_error_state`.
+
+    *parent_tool* is the public MCP tool name of the calling tool
+    (``"rocq_compile"`` or ``"rocq_compile_file"``); it is forwarded to
+    ``_run_with_pet`` so any pet-level failure during enrichment is
+    attributed to the right tool in ``recent_errors``.
 
     The caller is responsible for the mode-specific short-circuits
     (``lifespan_state is None``, ``result.get("success")``, and missing
@@ -1088,6 +1478,7 @@ async def _enrich_compile_failure(
         line=primary_error["line"],
         character=primary_error["character"],
         file_label=file_label,
+        parent_tool=parent_tool,
         resolved_file=resolved_file,
         timeout=_enrichment_timeout(lifespan_state),
     )
@@ -1107,14 +1498,22 @@ async def run_compile_with_state(
 ) -> dict[str, Any]:
     """Async wrapper for run_compile that enriches failures with PET state."""
     result = run_compile(source, workspace, timeout, include_warnings)
-    if lifespan_state is None or result.get("success"):
+    if lifespan_state is None:
         return result
+    if result.get("success"):
+        return result
+    # Record the coqc-level failure (validation / forbidden / size /
+    # actual compile error) before optional pet enrichment.
+    _record_error(
+        lifespan_state, "rocq_compile", result.get("error", ""), reason="validation"
+    )
     return await _enrich_compile_failure(
         result,
         source=source,
         workspace=workspace,
         lifespan_state=lifespan_state,
         file_label=_PROOF_FILE_LABEL,
+        parent_tool="rocq_compile",
     )
 
 
@@ -1132,8 +1531,16 @@ async def run_compile_file_with_state(
         resolved_file = None
 
     result = run_compile_file(file, workspace, timeout, include_warnings)
-    if lifespan_state is None or result.get("success"):
+    if lifespan_state is None:
         return result
+    if result.get("success"):
+        return result
+    _record_error(
+        lifespan_state,
+        "rocq_compile_file",
+        result.get("error", ""),
+        reason="validation",
+    )
     if resolved_file is None:
         result["state_capture_status"] = "no_position"
         return result
@@ -1144,6 +1551,7 @@ async def run_compile_file_with_state(
         lifespan_state=lifespan_state,
         file_label=file,
         resolved_file=resolved_file,
+        parent_tool="rocq_compile_file",
     )
 
 
@@ -1196,7 +1604,9 @@ async def rocq_compile(
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None, "rocq_compile", err, "validation"
+        )
 
     return await run_compile_with_state(
         source=source,
@@ -1259,7 +1669,12 @@ async def rocq_compile_file(
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None,
+            "rocq_compile_file",
+            err,
+            "validation",
+        )
 
     return await run_compile_file_with_state(
         file=file,
@@ -1308,9 +1723,15 @@ async def rocq_verify(
 
     err = _validate_workspace(workspace)
     if err:
+        _record_error(
+            ctx.lifespan_context if ctx else None,
+            "rocq_verify",
+            err,
+            reason="validation",
+        )
         return {"verified": False, "error": err}
 
-    return await run_verify(
+    result = await run_verify(
         proof=proof,
         problem_name=problem_name,
         problem_statement=problem_statement,
@@ -1319,6 +1740,23 @@ async def rocq_verify(
         include_warnings=include_warnings,
         lifespan_state=ctx.lifespan_context if ctx else None,
     )
+    # Record verification failures (verified=False with an error message)
+    # so rocq_diag surfaces them.  Successful verifications and pet-level
+    # crashes routed through run_verify -> _run_with_pet are already
+    # recorded inside that helper.
+    if (
+        ctx is not None
+        and isinstance(result, dict)
+        and result.get("verified") is False
+        and result.get("error")
+    ):
+        _record_error(
+            ctx.lifespan_context,
+            "rocq_verify",
+            str(result["error"]),
+            reason="validation",
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1333,6 +1771,9 @@ async def rocq_query(
     file: str = "",
     workspace: str = "",
     max_results: int | None = None,
+    include_warnings: bool = True,
+    timeout: int = 0,
+    from_state: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Search the Rocq environment — find lemmas, check types, inspect definitions.
@@ -1343,18 +1784,40 @@ async def rocq_query(
       command="Print Nat.add."               — see a definition
       command="About plus."                  — summary of a name
 
-    Two context modes (mutually exclusive):
-    - **preamble mode** (default): pass import commands as a string.
+    Three context modes (mutually exclusive in practice):
+    - **preamble mode** (default): pass import / scope commands as a
+      string.  Scope and import statements like ``Require Import``,
+      ``From X Require Y``, ``Open Scope``, ``Set``, ``Unset``,
+      ``Local``, and ``Section`` belong here — NOT inside ``command=``.
+      ``command=`` runs each statement in isolation, so e.g. an
+      ``Open Scope`` placed in ``command`` would not propagate to a
+      following ``Search``.  See README "Recommended usage patterns →
+      Imports and scopes in rocq_query".
     - **file mode**: pass a ``.v`` file path; the query runs with all
       definitions from that file in scope.  More reliable than preamble
-      because it captures ``Open Scope``, ``Set`` options, etc.
+      because it captures ``Open Scope``, ``Set`` options, etc., in the
+      exact order the file declares them.
+    - **from_state mode**: pass a ``state_id`` from a live ``rocq_check``
+      session to query against the live proof context — opened scopes,
+      hypotheses, and local definitions are all visible to ``Search`` /
+      ``Print`` / ``About`` / ``Locate``.  The query runs against a
+      transient child state which is discarded; the parent state is
+      unchanged.  Canonical pattern::
+
+          state_id = (await rocq_check(body=..., from_state=...))["state_id"]
+          await rocq_query(command="Search _.", from_state=state_id)
+
+      Prefer this over ``rocq_check(from_state=N, body="Search ...")``
+      for pure queries — no new ``state_id`` is allocated and the
+      state-table is not polluted.
 
     Args:
         command: The Rocq query command to execute.
         preamble: Optional import lines needed for the query context
                   (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
         file: Path to a .v file (relative to workspace) whose definitions
-            should be in scope. Mutually exclusive with preamble.
+            should be in scope. Mutually exclusive with preamble and
+            from_state.
         workspace: Workspace directory.  If omitted, auto-detected by walking
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
@@ -1362,24 +1825,54 @@ async def rocq_query(
         max_results: Optional maximum number of results to return.
             Useful for broad Search patterns. If omitted, all results are
             returned (subject to character limit).
+        include_warnings: If True (default), include all feedback returned
+            by the query.  If False, drop entries at LSP Warning severity
+            so warning noise does not crowd out tool output.
+        timeout: Per-call timeout in seconds for expensive computations
+            like ``Time Eval vm_compute in ...``.  ``0`` (default) means
+            use ``ROCQ_PET_TIMEOUT``.  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP``
+            (default 300s); when clamping fires the response includes
+            ``clamped_timeout: <cap>`` so the caller can diagnose unexpected
+            timeouts.
+        from_state: A live state_id (from ``rocq_start`` / ``rocq_check`` /
+            ``rocq_step_multi``) to query against.  Mutually exclusive with
+            *file*.  When set, *preamble* is ignored.
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
+    effective_timeout: int | None
+    if timeout and timeout > 0:
+        effective_timeout = min(timeout, ROCQ_QUERY_TIMEOUT_CAP)
+    else:
+        effective_timeout = None
+    clamped = effective_timeout is not None and timeout > ROCQ_QUERY_TIMEOUT_CAP
+
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None, "rocq_query", err, "validation"
+        )
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
 
-    return await run_query(
+    result = await run_query(
         command=command,
         preamble=preamble,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
         file=file,
         max_results=max_results,
+        include_warnings=include_warnings,
+        timeout=effective_timeout,
+        from_state=from_state,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1396,10 +1889,10 @@ async def rocq_assumptions(
 ) -> dict[str, Any]:
     """Check what axioms a theorem depends on.
 
-    Runs Print Assumptions on the given theorem/lemma name and classifies
-    the result. Returns whether the proof is closed (no axioms),
-    uses only standard axioms (classical logic, Reals, etc.), or has
-    suspicious/unproved assumptions.
+    Runs ``Print Assumptions`` on the given theorem/lemma name and returns
+    three categorized name lists — ``admitted``, ``classical_axioms``, and
+    ``user_axioms`` — so an agent can decide what (if anything) still needs
+    to be discharged.  Together the lists partition the cone of assumptions.
 
     The theorem must be defined in the given file.  The tool reads the file
     to set up the full Rocq environment (imports, scopes, definitions),
@@ -1413,12 +1906,64 @@ async def rocq_assumptions(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
+
+    Returns (key fields):
+        admitted:         list[str] of names the caller has externally
+                          identified as ``Admitted``/``admit``.  **Currently
+                          always ``[]``** in this flow because
+                          ``Print Assumptions`` does not distinguish
+                          ``Admitted`` from ``Axiom``/``Parameter``/
+                          ``Conjecture``.  Future enrichment may populate
+                          this from a source-file scan.  **Do not treat empty
+                          ``admitted`` as evidence of an admit-free proof.**
+        classical_axioms: list[str] of axiom names matched against a static
+                          whitelist of classical-logic axioms
+                          (``Excluded_middle``, ``FunctionalExtensionality``,
+                          ``ProofIrrelevance``, primitive ints/floats/arrays/
+                          strings, …).  Match is by **exact qualified name**;
+                          user-defined axioms with whitelisted names (e.g. a
+                          custom ``classic`` outside
+                          ``Coq.Logic.Classical_Prop``) would currently be
+                          auto-trusted.
+        user_axioms:      list[str] of user-declared axiom names (``Axiom``,
+                          ``Parameter``, ``Conjecture``) *not* in the whitelist.
+                          ``Admitted`` lemmas also land here (until
+                          ``admitted`` is populated by a future phase).
+        assumptions:      detailed strings (legacy shape).
+        standard_assumptions: present when ``verdict == "suspicious"`` and the
+                          cone also contains classical/whitelisted axioms;
+                          mirrors the classical entries in detailed-string form.
+
+    **Trusted closed proof**: ``not user_axioms and not admitted`` (with
+    ``classical_axioms`` allowed if you accept classical logic).
+
+    Notes:
+        ``verdict`` is **DEPRECATED**; prefer the structured lists above.
+        See :func:`rocq_mcp.verify.parse_and_classify_assumptions` for the
+        deprecation predicates.
+
+    On theorem-not-found errors: response includes ``available_in_file:
+    list[str]`` with the file's defined names (sorted, capped — see
+    ``available_in_file_limit`` in the response when truncated).  When the
+    file has more names than the cap, ``available_in_file_truncated:
+    true``, ``available_in_file_total: <int>`` (uncapped count), and
+    ``available_in_file_limit: <int>`` (the active cap) are also
+    included; call ``rocq_toc`` for the full list.  Agents can fuzzy-
+    match the requested name against this list to recover from typos.
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None,
+            "rocq_assumptions",
+            err,
+            "validation",
+        )
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
@@ -1456,12 +2001,17 @@ async def rocq_toc(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None, "rocq_toc", err, "validation"
+        )
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
@@ -1500,12 +2050,17 @@ async def rocq_notations(
         statement: The proposition/type to analyze.
         preamble: Import lines for context (e.g., "Require Import QArith.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     workspace = workspace or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None, "rocq_notations", err, "validation"
+        )
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
@@ -1568,12 +2123,26 @@ async def rocq_start(
             cached state before starting.  Use when PET is alive but in a
             bad state (e.g., coq-lsp indexing corruption).  You rarely need
             this — PET auto-restarts on crash/timeout.  Default: False.
+
+    On theorem-not-found errors: response includes ``available_in_file:
+    list[str]`` with the file's defined names (sorted, capped — see
+    ``available_in_file_limit`` in the response when truncated).  When the
+    file has more names than the cap, ``available_in_file_truncated:
+    true``, ``available_in_file_total: <int>`` (uncapped count), and
+    ``available_in_file_limit: <int>`` (the active cap) are also
+    included; call ``rocq_toc`` for the full list.  Agents can fuzzy-
+    match the requested name against this list to recover from typos.
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
     if err:
-        return {"success": False, "error": err}
+        return _fail(
+            ctx.lifespan_context if ctx else None, "rocq_start", err, "validation"
+        )
 
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
@@ -1599,6 +2168,7 @@ async def rocq_start(
 async def rocq_step_multi(
     tactics: list[str],
     from_state: int | None = None,
+    include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try multiple tactics at once — find what works without guessing.
@@ -1625,9 +2195,24 @@ async def rocq_step_multi(
 
     Requires an active state from rocq_start or rocq_check (or use from_state).
 
+    **Canonical exploration pattern:** if the first few steps of a proof
+    are a confident prefix, advance with ``rocq_check`` first and pass
+    the resulting ``state_id`` as ``from_state`` here — don't repeat the
+    prefix inside every entry of ``tactics``.  See README
+    "Recommended usage patterns → Multi-tactic exploration".
+
     Args:
         tactics: List of tactics to try (max 20).
         from_state: Try from a specific state (default: current state).
+            For exploring alternatives, prefer advancing the prefix via
+            ``rocq_check(from_state=S, body=prefix)`` and passing that
+            new ``state_id`` here over re-running the prefix inside each
+            tactic.
+        include_warnings: If True (default), per-tactic ``feedback`` includes
+            all severities.  If False, drop entries at LSP Warning severity.
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     if ctx is None:
         return {"success": False, "error": "Internal error: no MCP context."}
@@ -1636,6 +2221,7 @@ async def rocq_step_multi(
         tactics=tactics,
         lifespan_state=ctx.lifespan_context,
         from_state=from_state,
+        include_warnings=include_warnings,
     )
 
 
@@ -1650,6 +2236,7 @@ async def rocq_check(
     from_state: int | None = None,
     workspace: str = "",
     timeout: int = 0,
+    include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Run proof commands from cached imports — fast iterative checking.
@@ -1683,6 +2270,11 @@ async def rocq_check(
         from_state: Execute from a specific state ID (default: current state).
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
         timeout: Timeout in seconds (default: ROCQ_PET_TIMEOUT env var).
+        include_warnings: If True (default), per-step ``feedback`` includes
+            all severities.  If False, drop entries at LSP Warning severity.
+
+    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
+    recent error history.
     """
     # Note: workspace param is accepted for API compatibility but unused;
     # the active workspace comes from the state entry set by rocq_start.
@@ -1696,7 +2288,44 @@ async def rocq_check(
         timeout=float(timeout),
         lifespan_state=ctx.lifespan_context,
         from_state=from_state,
+        include_warnings=include_warnings,
     )
+
+
+@mcp.tool
+async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
+    """Operational diagnostics: pet health, memory headroom, recent errors.
+
+    Use this when:
+    - A tool returned ``pet_restarted: True`` and you want to see what
+      happened.
+    - You're considering a long ``vm_compute`` and want to check memory
+      headroom against ``max_rss_mb_threshold``.
+    - You want to know which proof states are currently live in pet's
+      state table.
+
+    Does NOT spawn pet if it's not running; just reports state.
+
+    Response shape:
+
+    - ``pet``: ``{pid, uptime_seconds, restarts, generation}``
+    - ``memory``: ``{pet_rss_mb, peak_pet_rss_mb, max_rss_mb_threshold,
+      sample_status}`` where ``sample_status`` is one of ``"ok"`` /
+      ``"no_pet"`` / ``"psutil_error"`` and disambiguates a ``None``
+      ``pet_rss_mb``.
+    - ``live_states``: capped at 50 most-recent entries (by
+      ``created_at``) to keep the payload bounded.  Each entry has
+      ``{state_id, parent, file, theorem, age_seconds}``.
+    - ``live_states_total``: full count of entries in the state table
+      (use this to detect that ``live_states`` was truncated).
+    - ``recent_errors``: ring buffer of the last 20 errors, each
+      ``{tool, message, reason, ago_seconds}``.  ``reason`` is one of
+      ``"timeout"``, ``"crashed"``, ``"memory_exhausted"``,
+      ``"lock_contended"``, ``"unavailable"``, or ``"validation"``.
+    """
+    if ctx is None:
+        return {"success": False, "error": "Internal error: no MCP context."}
+    return _build_diag_snapshot(ctx.lifespan_context)
 
 
 # ---------------------------------------------------------------------------

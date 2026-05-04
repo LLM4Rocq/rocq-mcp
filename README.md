@@ -29,7 +29,7 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes eleven MCP tools:
+The server exposes twelve MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
@@ -43,17 +43,62 @@ The server exposes eleven MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Two context modes: **preamble** (import commands as a string) or **file** (a `.v` file path whose definitions are in scope). Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
-| **`rocq_assumptions`** | Check what axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns `"closed"` (no axioms), `"standard_only"` (classical logic, Reals, etc.), or `"suspicious"` (unproved assumptions). |
+| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Three context modes: **preamble** (import commands as a string), **file** (a `.v` file path whose definitions are in scope), or **from_state** (a live `state_id` from a `rocq_check` session — the query sees opened scopes, hypotheses, and local definitions). Use `from_state=<state_id>` to introspect mid-proof without re-specifying preamble. Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
+| **`rocq_assumptions`** | Check what axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns three categorized name lists — `admitted`, `classical_axioms`, `user_axioms` — that partition the cone of assumptions; a trusted closed proof has empty `user_axioms` and `admitted` (with `classical_axioms` allowed if you accept classical logic). The legacy `verdict` field (`"closed"`/`"standard_only"`/`"suspicious"`) is **deprecated** and retained only for back-compat. |
 | **`rocq_start`** | Start an interactive proof session and return proof goals. Three modes: (1) by theorem name, (2) by position — jump to any point in a file to inspect proof goals there (e.g., error positions from `rocq_compile`), (3) from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. Optional `force_restart=True` kills the PET process and clears all cached state before starting (use when PET is in a bad state). |
 | **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. Includes `stale_warning` if the source file was modified since session start. |
 | **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
 | **`rocq_toc`** | Get the structure of a `.v` file: all definitions, lemmas, theorems, and sections as a hierarchical outline. Does not require an active session. |
 | **`rocq_notations`** | List all notations in a Rocq statement and how they resolve (which scope, which module). Helps debug notation ambiguity (e.g., is `+` in `nat_scope` or `Z_scope`?). |
+| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, recent errors. Use after `pet_restarted: True` to diagnose what happened, or before a long `vm_compute` to check memory headroom. |
 
 > **Stale file warning:** Interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`) read the `.v` file at session start and do not track subsequent edits. If another process or agent modifies the file while a session is active, the proof state becomes stale and tactics may fail or produce wrong results. In multi-agent setups, **work on a copy of the file** for interactive proving, or restart the session with `rocq_start` after edits. A `stale_warning` field is returned when a file modification is detected.
 
 > **Workspace auto-detection:** When a file-accepting tool (`rocq_compile_file`, `rocq_query`, `rocq_assumptions`, `rocq_toc`, `rocq_start`) is called without an explicit `workspace`, the server walks up from the file's directory looking for `_RocqProject`, `_CoqProject`, or `dune-project` markers and uses the directory of the innermost match. Falls back to `ROCQ_WORKSPACE` if no marker is found. Pass `workspace=` explicitly to override (e.g. for monorepos with nested project files).
+
+## Recommended usage patterns
+
+### Multi-tactic exploration: `rocq_check` then `rocq_step_multi`
+
+To explore N alternative tactics from a known good state, advance the
+state with `rocq_check` first, then branch with `rocq_step_multi`:
+
+    # Step 1: confirm the prefix and advance.
+    result = rocq_check(from_state=S, body="intros n m H.")
+    new_state = result["state_id"]
+
+    # Step 2: try alternatives from that state.
+    rocq_step_multi(from_state=new_state, tactics=[
+        "by ring.",
+        "by lia.",
+        "by reflexivity.",
+    ])
+
+This is more efficient than passing the prefix repeatedly inside
+`tactics=[...]` (each tactic would re-run the prefix).  It also makes
+the agent's intent — "I'm confident in the prefix; explore the next
+step" — explicit.
+
+### Imports and scopes in `rocq_query`
+
+Statements like `Require Import`, `From X Require Y`, `Open Scope`,
+`Set`, `Unset`, `Local`, and `Section` must go in the `preamble=`
+parameter (a multi-line string), not in `body=`:
+
+    rocq_query(
+        preamble="From Coq Require Import Reals.\nOpen Scope R_scope.",
+        command="Search (_ + _).",
+    )
+
+Why: each statement in `body=` runs in isolation, so `Open Scope`
+in body would not propagate to the next statement.  For multi-import
+preambles, prefer `file=<path>` to a `.v` file containing the imports
+— more reliable when the imports include `Set` / `Unset` directives
+that may need a specific ordering.
+
+For mid-proof queries — e.g. `Search` against the live proof state —
+use `from_state=<state_id>` instead of preamble; the live state
+already has all imports and scopes set up.
 
 ## Environment Variables
 
@@ -63,7 +108,9 @@ The server exposes eleven MCP tools:
 | `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` |
 | `ROCQ_VERIFY_TIMEOUT` | `120` | Timeout (seconds) for `rocq_verify` |
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for pytanque-based tools |
+| `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of `rocq_query`; larger values are clamped and the response carries `clamped_timeout: <cap>` |
 | `ROCQ_ENRICHMENT_TIMEOUT_CAP` | `5.0` | Cap (seconds) on per-call proof-state capture after a `rocq_compile` / `rocq_compile_file` failure |
+| `ROCQ_MAX_PET_RSS_MB` | `min(50% of system RAM, 16384)` | Maximum pet subprocess RSS (MB). On breach, the call aborts via the timeout recovery path; response includes `reason: "memory_exhausted"` and `pet_restarted: True`. |
 | `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
 | `ROCQ_MAX_SOURCE_SIZE` | `1000000` | Maximum source size in bytes |
 

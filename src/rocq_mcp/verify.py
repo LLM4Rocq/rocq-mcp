@@ -762,37 +762,128 @@ def _is_standard_axiom(name: str) -> bool:
 
 def parse_and_classify_assumptions(
     stdout: str,
+    admitted_names: set[str] | None = None,
 ) -> tuple[str, dict]:
     """Parse Print Assumptions output and classify axioms.
 
+    The primary output is the three categorized name lists (``admitted``,
+    ``classical_axioms``, ``user_axioms``) returned in ``details``.  Together
+    they partition the assumptions: every parsed name appears in exactly one
+    of the three lists.
+
+    Args:
+        stdout: Raw ``Print Assumptions`` output to parse.
+        admitted_names: Optional set of names that the caller knows correspond
+            to ``Admitted`` lemmas (or proofs ending in ``admit.``/``Admit.``).
+            ``Print Assumptions`` does not distinguish ``Admitted`` from
+            ``Axiom`` in its output — both appear under the ``Axioms:``
+            header — so callers with extra context (e.g., access to the
+            source file) can pass this set to surface admits separately
+            from user-declared axioms.  Names in ``admitted_names`` that are
+            *not* present in the parsed assumptions are silently ignored.
+
     Returns:
-        ("closed", {})  -- no assumptions
-        ("standard_only", {"standard": [...]})  -- only known safe axioms
-        ("suspicious", {"suspicious": [...], "suspicious_names": [...], "standard": [...]})
+        ``(verdict, details)`` where ``details`` always contains the three
+        categorized lists:
+
+            * ``"admitted"`` (list[str]) — names the caller has externally
+              identified as ``Admitted``/``admit`` (passed via
+              ``admitted_names``).  **Currently always ``[]`` in the standard
+              ``rocq_assumptions`` flow** because ``Print Assumptions`` does
+              not distinguish ``Admitted`` from ``Axiom``/``Parameter``/
+              ``Conjecture``.  Future enrichment may populate this from a
+              source-file scan.  **Do not treat empty ``admitted`` as
+              evidence of an admit-free proof.**
+            * ``"classical_axioms"`` (list[str]) — axiom names matched
+              against :data:`_KNOWN_SAFE_AXIOMS`, a static whitelist of
+              classical-logic axioms (``Excluded_middle``,
+              ``FunctionalExtensionality``, ``ProofIrrelevance``, primitive
+              ints/floats/arrays/strings, …).  Match is by **exact qualified
+              name**; user-defined axioms with whitelisted names (e.g. a
+              custom ``classic`` outside ``Coq.Logic.Classical_Prop``) would
+              currently be auto-trusted.
+            * ``"user_axioms"`` (list[str]) — non-classical axiom names
+              *not* known to be admits.  Anything user-declared
+              (``Axiom``, ``Parameter``, ``Conjecture``) outside the
+              whitelist lands here, and so do ``Admitted`` lemmas (until
+              ``admitted`` is populated by a future phase).
+
+        **Trusted closed proof**: ``not user_axioms and not admitted``
+        (with ``classical_axioms`` allowed if you accept classical logic).
+
+        Notes:
+            ``verdict`` is **DEPRECATED**; prefer the structured lists above.
+            For back-compat, it is one of:
+
+                - ``"closed"``        ≡ ``not admitted and not classical_axioms
+                                          and not user_axioms``
+                - ``"standard_only"`` ≡ has ``classical_axioms`` only
+                - ``"suspicious"``    ≡ has ``admitted`` or ``user_axioms``
+
+            The ``verdict`` field is retained for back-compat; it will be
+            removed in a future major version when the legacy callers have
+            migrated.
+
+            Legacy keys also preserved on ``details`` for back-compat:
+                * ``"closed"``         -> ``{}`` (plus the new lists)
+                * ``"standard_only"``  -> ``{"standard": [...]}``
+                * ``"suspicious"``     -> ``{"standard": [...],
+                                              "suspicious": [...],
+                                              "suspicious_names": [...]}``
     """
     assumptions = _parse_assumptions_raw(stdout)
-    if not assumptions:
-        return "closed", {}
+    admitted_set = set(admitted_names) if admitted_names else set()
+
+    admitted: list[str] = []
+    classical_axioms: list[str] = []
+    user_axioms: list[str] = []
 
     standard: list[str] = []
     suspicious: list[str] = []
     suspicious_names: list[str] = []
 
     for name, ty in assumptions:
-        if _is_standard_axiom(name):
+        is_classical = _is_standard_axiom(name)
+        # Admitted classification takes precedence over classical: a lemma
+        # the caller flagged as admitted is admitted, full stop.
+        if name in admitted_set:
+            admitted.append(name)
+        elif is_classical:
+            classical_axioms.append(name)
+        else:
+            user_axioms.append(name)
+        # Legacy classification (for back-compat keys).
+        if is_classical:
             standard.append(f"{name} : {ty}")
         else:
             suspicious.append(f"{name} : {ty}")
             suspicious_names.append(name)
 
-    if not suspicious:
-        return "standard_only", {"standard": standard}
-    else:
+    new_lists = {
+        "admitted": admitted,
+        "classical_axioms": classical_axioms,
+        "user_axioms": user_axioms,
+    }
+
+    if not assumptions:
+        return "closed", {**new_lists}
+    # An admit overrides classical-only classification: the legacy verdict
+    # must be consistent with the new ``admitted`` list.
+    if admitted:
         return "suspicious", {
             "standard": standard,
             "suspicious": suspicious,
             "suspicious_names": suspicious_names,
+            **new_lists,
         }
+    if not suspicious:
+        return "standard_only", {"standard": standard, **new_lists}
+    return "suspicious", {
+        "standard": standard,
+        "suspicious": suspicious,
+        "suspicious_names": suspicious_names,
+        **new_lists,
+    }
 
 
 def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:

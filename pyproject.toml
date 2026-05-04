@@ -6,6 +6,7 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.1.0",
+    "psutil>=5.9",
     "pytanque @ git+https://github.com/LLM4Rocq/pytanque",
 ]
 

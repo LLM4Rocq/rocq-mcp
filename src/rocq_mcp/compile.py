@@ -177,11 +177,19 @@ _COQC_POS_RE = re.compile(
 )
 
 
-def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
+def _parse_coqc_error_positions(
+    stderr: str,
+    *,
+    include_warnings: bool = True,
+) -> list[dict[str, Any]]:
     """Parse coqc stderr into structured error positions.
 
     coqc uses 1-based lines, 0-based characters.
     Returns 0-based line numbers (for pytanque compatibility).
+
+    The regex matches both ``Error:`` and ``Warning:`` diagnostics; when
+    ``include_warnings=False``, ``Warning:`` entries are filtered out so
+    callers don't surface warning bodies via this structured channel.
     """
     positions = []
     for m in _COQC_POS_RE.finditer(stderr):
@@ -189,6 +197,8 @@ def _parse_coqc_error_positions(stderr: str) -> list[dict[str, Any]]:
         char_start = int(m.group(2))
         char_end = int(m.group(3))
         message = m.group(4).strip()
+        if not include_warnings and message.startswith("Warning:"):
+            continue
         positions.append(
             {
                 "line": line_1based - 1,
@@ -221,6 +231,21 @@ _KIND_RE = re.compile(r"^(Error|Warning)\b")
 
 # Regex to replace tmp file paths with <proof>
 _TMP_PATH_RE = re.compile(r'"[^"]*tmp[^"]*\.v"')
+
+_WARNING_PREFIX = "Warning:"
+
+
+def _drop_warning_lines(text: str) -> str:
+    """Drop lines that begin with `Warning:` (after leading whitespace).
+
+    Used as the unstructured fallback when a coqc stderr block has no
+    `File "..."` header to anchor structured `_format_error` parsing.
+    """
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith(_WARNING_PREFIX)
+    ).strip()
 
 
 def _format_error(
@@ -257,6 +282,8 @@ def _format_error(
 
     if not diagnostics:
         cleaned = _TMP_PATH_RE.sub(f'"{file_label}"', error_str).strip()
+        if not include_warnings:
+            cleaned = _drop_warning_lines(cleaned)
         # Cap output so unstructured errors don't drown LLM context
         if len(cleaned) > _MAX_ERROR_LENGTH:
             cleaned = cleaned[-_MAX_ERROR_LENGTH:]
@@ -381,11 +408,15 @@ def _build_compile_result(
             fallback = _TMP_PATH_RE.sub(f'"{file_label}"', fallback).strip()
         else:
             fallback = fallback.strip()
+        if not include_warnings:
+            fallback = _drop_warning_lines(fallback)
         if not fallback:
             fallback = f"coqc exited with code {result['returncode']} (no stderr)."
         return {"success": False, "error": fallback}
 
-    positions = _parse_coqc_error_positions(result["stderr"])
+    positions = _parse_coqc_error_positions(
+        result["stderr"], include_warnings=include_warnings
+    )
     result_dict: dict[str, Any] = {"success": False, "error": error_text}
     if positions:
         result_dict["error_positions"] = positions
@@ -707,7 +738,7 @@ async def _extract_problem_structure(
     toc_result = await _server._run_with_pet(
         _do_toc,
         lifespan_state,
-        "Problem structure extraction",
+        "rocq_verify",
         on_timeout=_on_timeout,
     )
 
@@ -952,6 +983,8 @@ def _run_phase1_module_m(
             f'"{_PROOF_FILE_LABEL}"',
             raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw,
         ).strip()
+        if not include_warnings:
+            phase1_error = _drop_warning_lines(phase1_error)
         if not phase1_error:
             phase1_error = f"coqc exited with code {result['returncode']}."
     phase1_failure: dict[str, Any] = {

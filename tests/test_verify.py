@@ -3,7 +3,7 @@
 Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestCleanProblemStatement
     - TestAxiomClassification
-    - TestParseAssumptionsUserAxiomNames
+    - TestParseAssumptionsCategorizedLists
     - TestParseAssumptions
     - TestBuildVerificationSource
     - TestClassifyTocDetail
@@ -411,8 +411,196 @@ class TestAxiomClassification:
     # --- Refined require_qualified: ambiguous vs unique ---
 
 
-class TestParseAssumptionsUserAxiomNames:
-    """Test user_axiom_names parameter in parse_and_classify_assumptions."""
+class TestParseAssumptionsCategorizedLists:
+    """Test the categorized name lists added by §1.6 of the v2 plan.
+
+    The four meaningful combinations of (admitted, classical, user) are
+    exercised:
+
+      * closed                       — no assumptions at all
+      * classical only               — whitelist hits, nothing else
+      * admitted with no axioms      — names flagged as admits via
+        ``admitted_names``
+      * mixed user-axiom + admitted  — user-declared axiom plus an admit
+    """
+
+    @pytest.mark.parametrize(
+        "stdout,admitted_names,expected",
+        [
+            # closed: no assumptions.
+            (
+                "Closed under the global context\n",
+                None,
+                {
+                    "verdict": "closed",
+                    "admitted": [],
+                    "classical_axioms": [],
+                    "user_axioms": [],
+                },
+            ),
+            # classical only.
+            (
+                "Axioms:\n"
+                "Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P\n",
+                None,
+                {
+                    "verdict": "standard_only",
+                    "admitted": [],
+                    "classical_axioms": ["Coq.Logic.Classical_Prop.classic"],
+                    "user_axioms": [],
+                },
+            ),
+            # admitted only (caller supplies admitted_names).  Without
+            # admitted_names, the same input would land in user_axioms — that
+            # is the documented Phase-1 limitation.
+            (
+                "Axioms:\nfuel_bound_admit : nat -> Prop\n",
+                {"fuel_bound_admit"},
+                {
+                    "verdict": "suspicious",
+                    "admitted": ["fuel_bound_admit"],
+                    "classical_axioms": [],
+                    "user_axioms": [],
+                },
+            ),
+            # mixed: user-declared axiom + admitted lemma.
+            (
+                "Axioms:\n" "my_axiom : True\n" "fuel_bound_admit : nat -> Prop\n",
+                {"fuel_bound_admit"},
+                {
+                    "verdict": "suspicious",
+                    "admitted": ["fuel_bound_admit"],
+                    "classical_axioms": [],
+                    "user_axioms": ["my_axiom"],
+                },
+            ),
+        ],
+        ids=["closed", "classical_only", "admitted_only", "mixed_user_and_admitted"],
+    )
+    def test_assumption_classification(self, stdout, admitted_names, expected):
+        verdict, details = parse_and_classify_assumptions(
+            stdout, admitted_names=admitted_names
+        )
+        assert verdict == expected["verdict"]
+        assert details["admitted"] == expected["admitted"]
+        assert details["classical_axioms"] == expected["classical_axioms"]
+        assert details["user_axioms"] == expected["user_axioms"]
+
+    def test_lists_present_even_when_closed(self):
+        """All three lists must be present in details even when verdict=closed."""
+        verdict, details = parse_and_classify_assumptions(
+            "Closed under the global context\n"
+        )
+        assert verdict == "closed"
+        # New lists are present and empty.
+        assert details["admitted"] == []
+        assert details["classical_axioms"] == []
+        assert details["user_axioms"] == []
+        # Legacy back-compat: closed still maps to (sorta) empty details
+        # — the legacy keys "standard"/"suspicious" are absent.
+        assert "standard" not in details
+        assert "suspicious" not in details
+
+    def test_admitted_takes_precedence_over_classical(self):
+        """If a name is in both admitted_names and the whitelist, admitted wins.
+
+        Pathological case, but tests the precedence rule documented in
+        ``parse_and_classify_assumptions``.  Both the new ``admitted`` list
+        *and* the legacy ``verdict`` reflect the admit: an admit overrides
+        classical-only classification, otherwise the two would disagree.
+        """
+        stdout = (
+            "Axioms:\n"
+            "Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P\n"
+        )
+        verdict, details = parse_and_classify_assumptions(
+            stdout, admitted_names={"Coq.Logic.Classical_Prop.classic"}
+        )
+        # Admit overrides — both new lists and legacy verdict agree.
+        assert verdict == "suspicious"
+        assert details["admitted"] == ["Coq.Logic.Classical_Prop.classic"]
+        # ``classic`` moved out of classical_axioms (admitted-precedence).
+        assert details["classical_axioms"] == []
+        assert details["user_axioms"] == []
+
+    def test_admitted_names_unknown_to_assumptions_are_ignored(self):
+        """Names in admitted_names but absent from the parsed list don't appear."""
+        verdict, details = parse_and_classify_assumptions(
+            "Closed under the global context\n",
+            admitted_names={"never_referenced_admit"},
+        )
+        assert verdict == "closed"
+        assert details["admitted"] == []
+
+    def test_admitted_names_empty_set_equivalent_to_none(self):
+        """``admitted_names=set()`` must behave identically to ``None``.
+
+        verify.py treats both as falsy, so the two calls must produce
+        identical ``(verdict, details)`` outputs.  This pins the contract
+        so a future refactor cannot silently diverge the two.
+        """
+        stdout = (
+            "Axioms:\n"
+            "Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P\n"
+            "my_axiom : True\n"
+        )
+        v_none, d_none = parse_and_classify_assumptions(stdout, admitted_names=None)
+        v_empty, d_empty = parse_and_classify_assumptions(stdout, admitted_names=set())
+        assert v_none == v_empty
+        assert d_none == d_empty
+
+    def test_admitted_classical_legacy_keys_unchanged(self):
+        """Pathological case: an admitted name that is ALSO in the classical
+        whitelist.  The new ``admitted`` list takes precedence (the name
+        moves out of ``classical_axioms``), but the legacy ``standard`` list
+        is **intentionally unchanged** — it still contains the classical
+        entry.  This documents the asymmetry between the new categorized
+        lists and the legacy back-compat keys: legacy callers continue to
+        see the same shape they did before §1.6.
+        """
+        stdout = "Axioms:\nclassic : forall P : Prop, P \\/ ~ P\n"
+        verdict, details = parse_and_classify_assumptions(
+            stdout, admitted_names={"classic"}
+        )
+        # New-list precedence: admit wins over classical.
+        assert details["admitted"] == ["classic"]
+        assert details["classical_axioms"] == []
+        # Legacy back-compat: ``standard`` keeps the classical entry,
+        # ``suspicious_names`` stays empty.  The verdict flips to
+        # ``"suspicious"`` (admit overrides) but the legacy *contents*
+        # of ``standard`` are unchanged.
+        assert verdict == "suspicious"
+        assert details["standard"] == ["classic : forall P : Prop, P \\/ ~ P"]
+        assert details["suspicious"] == []
+        assert details["suspicious_names"] == []
+
+    def test_three_lists_partition_assumptions(self):
+        """Every parsed name appears in exactly one of the three new lists."""
+        stdout = (
+            "Axioms:\n"
+            "Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P\n"
+            "my_axiom : True\n"
+            "lemma_admit : nat -> Prop\n"
+        )
+        _, details = parse_and_classify_assumptions(
+            stdout, admitted_names={"lemma_admit"}
+        )
+        bucketed = (
+            set(details["admitted"])
+            | set(details["classical_axioms"])
+            | set(details["user_axioms"])
+        )
+        assert bucketed == {
+            "Coq.Logic.Classical_Prop.classic",
+            "my_axiom",
+            "lemma_admit",
+        }
+        # No overlap.
+        assert (
+            len(details["admitted"])
+            + len(details["classical_axioms"])
+            + len(details["user_axioms"])
+        ) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +738,13 @@ class TestParseAssumptions:
         stdout = "Closed under the global context\n"
         verdict, details = parse_and_classify_assumptions(stdout)
         assert verdict == "closed"
-        assert details == {}
+        # No legacy keys; only the additive §1.6 lists, all empty.
+        assert "standard" not in details
+        assert "suspicious" not in details
+        assert "suspicious_names" not in details
+        assert details["admitted"] == []
+        assert details["classical_axioms"] == []
+        assert details["user_axioms"] == []
 
     def test_classify_standard_only(self):
         stdout = (

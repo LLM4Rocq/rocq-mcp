@@ -110,6 +110,85 @@ class TestCompileTimeout:
 
 
 # ---------------------------------------------------------------------------
+# include_warnings=False end-to-end (uses real coqc)
+# ---------------------------------------------------------------------------
+
+
+class TestIncludeWarningsEndToEnd:
+    """Regression: include_warnings=False must drop *all* warning text from
+    the response body, regardless of warning category."""
+
+    # A source that compiles successfully but emits a deprecation warning
+    # whose location matches the structured-position regex.  ``foo`` is
+    # marked deprecated and immediately referenced.
+    DEPRECATION_SOURCE = (
+        '#[deprecated(since="test")]\n'
+        "Definition foo : nat := 42.\n\n"
+        "Theorem t : foo = 42.\n"
+        "Proof. reflexivity. Qed.\n"
+    )
+
+    # A source that fails compilation *and* emits a deprecation warning.
+    DEPRECATION_WITH_ERROR_SOURCE = (
+        '#[deprecated(since="test")]\n'
+        "Definition foo : nat := 42.\n\n"
+        "Theorem t : foo = 99.\n"
+        "Proof. reflexivity. Qed.\n"
+    )
+
+    def test_compile_success_with_warning_no_warning_text_in_output(self, workspace):
+        """A clean compile with a deprecation warning, include_warnings=False:
+        the response body must contain no warning text."""
+        result = _call_rocq_compile(
+            source=self.DEPRECATION_SOURCE,
+            workspace=str(workspace),
+            include_warnings=False,
+        )
+        assert result["success"] is True
+        # Successful compile output should not contain warning text.
+        body_text = " ".join(str(v) for v in result.values())
+        assert "Warning:" not in body_text
+        assert "deprecated" not in body_text.lower()
+
+    def test_compile_failure_with_warning_no_warning_text(self, workspace):
+        """Failure path with deprecation warning + error: include_warnings=False
+        must drop the warning while preserving the error and structured
+        positions."""
+        result = _call_rocq_compile(
+            source=self.DEPRECATION_WITH_ERROR_SOURCE,
+            workspace=str(workspace),
+            include_warnings=False,
+        )
+        assert result["success"] is False
+        # Whole response body — error string + error_positions + hint.
+        # No warning text anywhere in it.
+        import json
+
+        body_text = json.dumps(result)
+        assert "Warning:" not in body_text
+        assert "deprecated" not in body_text.lower()
+        # Real error must still surface.
+        assert "Unable to unify" in result["error"] or "99" in result["error"]
+        # error_positions should not include the warning entry.
+        for pos in result.get("error_positions", []):
+            assert not pos["message"].startswith("Warning:")
+
+    def test_compile_failure_default_includes_warning(self, workspace):
+        """Same source, default include_warnings=True: warning is visible."""
+        result = _call_rocq_compile(
+            source=self.DEPRECATION_WITH_ERROR_SOURCE,
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        # Warning text appears somewhere (either in error string or
+        # error_positions).
+        import json
+
+        body_text = json.dumps(result)
+        assert "deprecated" in body_text.lower()
+
+
+# ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
 

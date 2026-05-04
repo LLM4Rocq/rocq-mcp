@@ -464,6 +464,65 @@ class TestFeedbackCollection:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests for _extract_feedback include_warnings
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFeedbackIncludeWarnings:
+    """Test _extract_feedback honours include_warnings.
+
+    Levels follow the LSP Diagnostic Severity convention used by coq-lsp:
+    1 = Error, 2 = Warning, 3 = Information, 4 = Hint.
+    """
+
+    pytestmark = []
+
+    def _state_with(self, feedback):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(feedback=feedback)
+
+    def test_default_includes_warnings(self):
+        from rocq_mcp.interactive import _extract_feedback
+
+        state = self._state_with([(2, "deprecation warning"), (3, "Print output")])
+        result = _extract_feedback(state)
+        assert result is not None
+        assert "deprecation warning" in result
+        assert "Print output" in result
+
+    def test_include_warnings_false_drops_warning_level(self):
+        from rocq_mcp.interactive import _extract_feedback
+
+        state = self._state_with([(2, "deprecation warning"), (3, "Print output")])
+        result = _extract_feedback(state, include_warnings=False)
+        assert result is not None
+        assert "deprecation warning" not in result
+        assert "Print output" in result
+
+    def test_include_warnings_false_keeps_info_and_hint(self):
+        from rocq_mcp.interactive import _extract_feedback
+
+        state = self._state_with([(3, "info msg"), (4, "hint msg")])
+        result = _extract_feedback(state, include_warnings=False)
+        assert result is not None
+        assert "info msg" in result
+        assert "hint msg" in result
+
+    def test_include_warnings_false_only_warnings_returns_none(self):
+        from rocq_mcp.interactive import _extract_feedback
+
+        state = self._state_with([(2, "warn 1"), (2, "warn 2")])
+        assert _extract_feedback(state, include_warnings=False) is None
+
+    def test_empty_feedback_returns_none(self):
+        from rocq_mcp.interactive import _extract_feedback
+
+        assert _extract_feedback(self._state_with([])) is None
+        assert _extract_feedback(self._state_with([]), include_warnings=False) is None
+
+
+# ---------------------------------------------------------------------------
 # Mock-based tests for feedback collection in run_step_multi
 # ---------------------------------------------------------------------------
 
@@ -620,3 +679,323 @@ class TestStepMultiFeedback:
             )
 
         assert "feedback" not in result["results"][0]
+
+
+# ---------------------------------------------------------------------------
+# MCP-path tests for include_warnings threading (mock pet)
+# ---------------------------------------------------------------------------
+
+
+class _MockPetBase:
+    """Shared mock-pet plumbing for include_warnings MCP-path tests."""
+
+    pytestmark = []
+
+    @pytest.fixture(autouse=True)
+    def _reset_state_and_semaphore(self):
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+        yield
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        if "pytanque" in sys.modules:
+            yield
+            return
+
+        mock_module = SimpleNamespace(
+            PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+            Pytanque=MagicMock,
+            PytanqueMode=SimpleNamespace(STDIO="stdio"),
+        )
+        sys.modules["pytanque"] = mock_module
+        yield
+        sys.modules.pop("pytanque", None)
+
+    def _setup_state_and_pet(self, fake_run):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import rocq_mcp.interactive as _interactive
+
+        _interactive._state_table.clear()
+        _interactive._state_next_id = 1
+        _interactive._state_current_id = None
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        sid = _interactive._state_add(
+            state=mock_state,
+            file="test.v",
+            theorem="test",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.run = fake_run
+
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+        return sid, mock_pet, lifespan_state
+
+
+class TestCheckIncludeWarnings(_MockPetBase):
+    """run_check threads include_warnings into per-step feedback."""
+
+    @pytest.mark.asyncio
+    async def test_default_keeps_warnings(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        def fake_run(state, cmd, timeout=None):
+            return SimpleNamespace(
+                st=100,
+                proof_finished=False,
+                feedback=[
+                    (2, "deprecated foo"),
+                    (3, "info"),
+                    (1, "error"),
+                ],
+            )
+
+        sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_check(
+                body="Print nat.",
+                timeout=30.0,
+                lifespan_state=lifespan_state,
+                from_state=sid,
+            )
+
+        feedback = result.get("feedback") or []
+        # feedback is list of [cmd, text] pairs
+        assert len(feedback) == 1
+        text = feedback[0][1]
+        assert "deprecated foo" in text
+        assert "info" in text
+        assert "error" in text
+
+    @pytest.mark.asyncio
+    async def test_include_warnings_false_drops_level_2(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        def fake_run(state, cmd, timeout=None):
+            return SimpleNamespace(
+                st=100,
+                proof_finished=False,
+                feedback=[
+                    (2, "deprecated foo"),
+                    (3, "info"),
+                    (1, "error"),
+                ],
+            )
+
+        sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_check(
+                body="Print nat.",
+                timeout=30.0,
+                lifespan_state=lifespan_state,
+                from_state=sid,
+                include_warnings=False,
+            )
+
+        feedback = result.get("feedback") or []
+        assert len(feedback) == 1
+        text = feedback[0][1]
+        assert "deprecated foo" not in text
+        # Info and error are kept.
+        assert "info" in text
+        assert "error" in text
+
+
+class TestStepMultiIncludeWarnings(_MockPetBase):
+    """run_step_multi threads include_warnings into per-tactic feedback."""
+
+    @pytest.mark.asyncio
+    async def test_default_keeps_warnings(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        def fake_run(state, cmd, timeout=None):
+            return SimpleNamespace(
+                st=100,
+                proof_finished=False,
+                feedback=[(2, "deprecated foo"), (3, "info"), (1, "error")],
+            )
+
+        sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_step_multi(
+                tactics=["Print nat."],
+                lifespan_state=lifespan_state,
+                from_state=sid,
+            )
+
+        fb = result["results"][0]["feedback"]
+        assert "deprecated foo" in fb
+        assert "info" in fb
+        assert "error" in fb
+
+    @pytest.mark.asyncio
+    async def test_include_warnings_false_drops_level_2(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        def fake_run(state, cmd, timeout=None):
+            return SimpleNamespace(
+                st=100,
+                proof_finished=False,
+                feedback=[(2, "deprecated foo"), (3, "info"), (1, "error")],
+            )
+
+        sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            result = await _interactive.run_step_multi(
+                tactics=["Print nat."],
+                lifespan_state=lifespan_state,
+                from_state=sid,
+                include_warnings=False,
+            )
+
+        fb = result["results"][0]["feedback"]
+        assert "deprecated foo" not in fb
+        assert "info" in fb
+        assert "error" in fb
+
+
+class TestQueryIncludeWarnings(_MockPetBase):
+    """run_query honours include_warnings on the feedback list."""
+
+    def _setup_query_pet(self, feedback_after_run):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        # Mock pet whose .run returns a state with the requested feedback,
+        # regardless of cmd.
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+
+        def fake_run(state, cmd, timeout=None):
+            return SimpleNamespace(
+                st=99, proof_finished=False, feedback=feedback_after_run
+            )
+
+        mock_pet.run = fake_run
+        # Fresh import state — pet.start_state may be invoked.
+        mock_pet.start_state = MagicMock(
+            return_value=SimpleNamespace(st=1, proof_finished=False, feedback=[])
+        )
+
+        lifespan_state = {
+            "pet_client": mock_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+        return mock_pet, lifespan_state
+
+    @pytest.mark.asyncio
+    async def test_default_keeps_warnings(self):
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        feedback = [(2, "deprecated foo"), (3, "info"), (1, "error")]
+        mock_pet, lifespan_state = self._setup_query_pet(feedback)
+
+        # Avoid the import-state cache: patch _get_or_create_import_state
+        # to return a synthetic start state.
+        from types import SimpleNamespace
+
+        synth_state = SimpleNamespace(st=1, proof_finished=False, feedback=[])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            with patch.object(
+                _interactive,
+                "_get_or_create_import_state",
+                return_value=synth_state,
+            ):
+                result = await _interactive.run_query(
+                    command="Search nat",
+                    preamble="",
+                    workspace="/tmp",
+                    lifespan_state=lifespan_state,
+                )
+
+        assert result["success"] is True
+        out = result["output"]
+        assert "deprecated foo" in out
+        assert "info" in out
+        assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_include_warnings_false_drops_level_2(self):
+        from unittest.mock import patch
+
+        import rocq_mcp.server
+        import rocq_mcp.interactive as _interactive
+
+        feedback = [(2, "deprecated foo"), (3, "info"), (1, "error")]
+        mock_pet, lifespan_state = self._setup_query_pet(feedback)
+
+        from types import SimpleNamespace
+
+        synth_state = SimpleNamespace(st=1, proof_finished=False, feedback=[])
+
+        with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
+            with patch.object(
+                _interactive,
+                "_get_or_create_import_state",
+                return_value=synth_state,
+            ):
+                result = await _interactive.run_query(
+                    command="Search nat",
+                    preamble="",
+                    workspace="/tmp",
+                    lifespan_state=lifespan_state,
+                    include_warnings=False,
+                )
+
+        assert result["success"] is True
+        out = result["output"]
+        assert "deprecated foo" not in out
+        assert "info" in out
+        assert "error" in out

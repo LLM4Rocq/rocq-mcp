@@ -25,9 +25,14 @@ import hashlib
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
+
+try:
+    from pytanque import PetanqueError as _PetanqueError
+except ImportError:  # pragma: no cover - pytanque optional
+    _PetanqueError = None  # type: ignore[assignment, misc]
 
 from rocq_mcp.verify import _check_forbidden_commands
 
@@ -50,6 +55,10 @@ _MAX_GOALS_SHOWN: int = 10  # Max number of goals to format
 _MAX_FEEDBACK_LENGTH: int = 50_000  # Max chars per feedback step
 _MAX_TOTAL_FEEDBACK: int = 200_000  # Max total chars across all feedback steps
 
+# LSP DiagnosticSeverity: 1=Error, 2=Warning, 3=Information, 4=Hint.
+# See coq-lsp 0.2.5+9.1: lang/diagnostic.ml.
+_LSP_SEVERITY_WARNING: int = 2
+
 
 def _truncate_result(text: str, max_length: int) -> str:
     """Truncate *text* to *max_length* chars, appending an indicator if cut."""
@@ -58,12 +67,22 @@ def _truncate_result(text: str, max_length: int) -> str:
     return text[:max_length] + f"\n... (truncated, {len(text)} total chars)"
 
 
-def _extract_feedback(state: Any) -> str | None:
+def _extract_feedback(state: Any, *, include_warnings: bool = True) -> str | None:
     """Extract non-empty feedback from a pytanque State, joined as a string.
 
-    Returns *None* when there is nothing to report.
+    Returns *None* when there is nothing to report.  When
+    ``include_warnings=False``, drops entries at LSP Warning severity
+    (level 2) so warning noise does not crowd out tool output (Print /
+    Search / vm_compute traces). See coq-lsp 0.2.5+9.1 ``lang/diagnostic.ml``.
     """
-    msgs = [msg for _, msg in (state.feedback or []) if msg]
+    if include_warnings:
+        msgs = [msg for _, msg in (state.feedback or []) if msg]
+    else:
+        msgs = [
+            msg
+            for lvl, msg in (state.feedback or [])
+            if msg and lvl != _LSP_SEVERITY_WARNING
+        ]
     if not msgs:
         return None
     raw = "\n".join(msgs)
@@ -281,6 +300,8 @@ class _StateEntry:
     proof_finished: bool = False
     file_mtime: float | None = None  # mtime at session creation
     resolved_file: str | None = None  # absolute path for staleness check
+    # Wall-clock timestamp; used by rocq_diag for age.
+    created_at: float = field(default_factory=time.time)
 
 
 _state_table: dict[int, _StateEntry] = {}
@@ -455,36 +476,87 @@ async def run_query(
     lifespan_state: dict[str, Any],
     file: str = "",
     max_results: int | None = None,
+    *,
+    include_warnings: bool = True,
+    timeout: int | None = None,
+    from_state: int | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context).
 
-    Two modes (mutually exclusive):
+    Three modes (mutually exclusive):
     - **preamble mode**: import commands set up the environment (cached).
     - **file mode**: a ``.v`` file provides the full environment.
+    - **from_state mode**: a live state from the state-table (e.g. mid-
+      ``rocq_check``) provides the full proof context — opened scopes,
+      hypotheses, local definitions.  The transient child state produced
+      by the query is discarded; the parent state-table entry stays
+      unchanged.
 
     When *file* is given, uses :func:`_get_file_end_state` to obtain a
     state at the end of the file where all definitions are in scope.
+
+    When *from_state* is given, the live state is resolved via
+    :func:`_resolve_check_base_state`; eviction / non-existence yields a
+    validation failure pointing the caller to ``rocq_start``.  The
+    response is augmented with ``from_state_id`` so the caller can
+    confirm which state was queried.
+
+    When ``include_warnings=False``, drops feedback entries at LSP
+    Warning severity (level 2) before counting / returning.
+
+    ``timeout`` (when not ``None``) is forwarded explicitly to
+    :func:`_run_with_pet`; otherwise the helper falls back to
+    ``lifespan_state["pet_timeout"]``.  Caller (the MCP wrapper) is
+    expected to apply ``ROCQ_QUERY_TIMEOUT_CAP``.
     """
-    if file and preamble.strip():
-        return {
-            "success": False,
-            "error": "Provide either 'file' or 'preamble', not both.",
-        }
+    if file and from_state is not None:
+        return _server._fail(
+            lifespan_state,
+            "rocq_query",
+            "Provide either 'file' or 'from_state', not both.",
+        )
+    if from_state is not None and preamble.strip():
+        # Silent preamble drop would mislead the caller — fail loudly so
+        # they understand the live state already provides the context.
+        return _server._fail(
+            lifespan_state,
+            "rocq_query",
+            "preamble is not used in from_state mode; the live state already "
+            "provides the context.",
+        )
+    if from_state is None and file and preamble.strip():
+        return _server._fail(
+            lifespan_state,
+            "rocq_query",
+            "Provide either 'file' or 'preamble', not both.",
+        )
 
     forbidden = _check_forbidden_commands(command)
     if forbidden:
-        return {"success": False, "error": forbidden}
-    if not file:
+        return _server._fail(lifespan_state, "rocq_query", forbidden)
+    # In from_state mode, the preamble is irrelevant — skip its scan.
+    if not file and from_state is None:
         forbidden = _check_forbidden_commands(preamble)
         if forbidden:
-            return {"success": False, "error": forbidden}
+            return _server._fail(lifespan_state, "rocq_query", forbidden)
 
     def _do_query(pet: Any) -> dict[str, Any]:
-        if file:
+        from_state_id: int | None = None
+        if from_state is not None:
+            entry, base_id, err = _resolve_check_base_state(from_state)
+            if err or entry is None:
+                return _server._fail(
+                    lifespan_state,
+                    "rocq_query",
+                    err or f"State {from_state} not found.",
+                )
+            state = entry.state
+            from_state_id = base_id
+        elif file:
             try:
                 state = _get_file_end_state(pet, file, workspace, lifespan_state)
             except (ValueError, FileNotFoundError) as e:
-                return {"success": False, "error": str(e)}
+                return _server._fail(lifespan_state, "rocq_query", str(e))
         else:
             preamble_text = preamble.strip()
             preamble_cmds = (
@@ -499,6 +571,10 @@ async def run_query(
             cmd += "."
         state = pet.run(state, cmd)
         feedback = state.feedback or []
+        if not include_warnings:
+            feedback = [
+                (lvl, msg) for lvl, msg in feedback if lvl != _LSP_SEVERITY_WARNING
+            ]
 
         # Apply result-count limit before character truncation
         total_results = len(feedback)
@@ -516,12 +592,16 @@ async def run_query(
                 output[:_MAX_QUERY_OUTPUT]
                 + f"\n... (truncated, {len(output)} total chars)"
             )
-        return {"success": True, "output": output or "(no output)"}
+        resp: dict[str, Any] = {"success": True, "output": output or "(no output)"}
+        if from_state_id is not None:
+            resp["from_state_id"] = from_state_id
+        return resp
 
     return await _server._run_with_pet(
         _do_query,
         lifespan_state,
-        "Query",
+        "rocq_query",
+        timeout=timeout,
     )
 
 
@@ -545,23 +625,69 @@ async def run_assumptions(
     theorem is defined, so the query runs in a context where all definitions
     from that file are in scope.  This eliminates shadowing ambiguity that
     plagued the old preamble-based approach.
+
+    Returns a dict containing:
+
+        * ``success``           — bool.
+        * ``theorem``           — the cleaned theorem name.
+        * ``admitted``          — list[str] of names the caller has externally
+          identified as ``Admitted``/``admit``.  **Currently always ``[]``**
+          in this flow: ``Print Assumptions`` does not distinguish
+          ``Admitted`` from ``Axiom``/``Parameter``/``Conjecture``; populating
+          this list is deferred to a later phase that cross-references the
+          source file.  **Do not treat empty ``admitted`` as evidence of an
+          admit-free proof.**
+        * ``classical_axioms``  — list[str] of axiom names matched against a
+          static whitelist of classical-logic axioms (``Excluded_middle``,
+          ``FunctionalExtensionality``, ``ProofIrrelevance``, primitive
+          ints/floats/arrays/strings, …).  Match is by **exact qualified
+          name**; user-defined axioms with whitelisted names (e.g. a custom
+          ``classic`` outside ``Coq.Logic.Classical_Prop``) would currently
+          be auto-trusted.
+        * ``user_axioms``       — list[str] of non-classical axioms *not* known
+          to be admits.  Anything user-declared (``Axiom``, ``Parameter``,
+          ``Conjecture``) outside the whitelist lands here, and so do
+          ``Admitted`` lemmas (until ``admitted`` is populated by a future
+          phase).
+
+        **Trusted closed proof**: ``not user_axioms and not admitted`` (with
+        ``classical_axioms`` allowed if you accept classical logic).
+
+        * ``assumptions``       — detailed list of axiom strings (legacy
+          shape: classified as ``standard``-only or ``suspicious`` per
+          ``verdict``).
+        * ``standard_assumptions`` — present when ``verdict == "suspicious"``
+          and there are also classical axioms in the cone.
+        * ``raw_output``        — full raw ``Print Assumptions`` output.
+
+    Notes:
+        ``verdict`` is **DEPRECATED**; prefer the structured lists above.
+        See :func:`rocq_mcp.verify.parse_and_classify_assumptions` for the
+        deprecation predicates.
     """
     from rocq_mcp.verify import is_rocq_qualified_name, parse_and_classify_assumptions
 
     # Validate file parameter
     if not file or not file.strip():
-        return {"success": False, "error": "File parameter is required."}
+        return _server._fail(
+            lifespan_state, "rocq_assumptions", "File parameter is required."
+        )
 
     # Validate: non-empty, valid Rocq identifier or qualified name.
     clean_name = name.strip() if name else ""
     if not clean_name:
-        return {"success": False, "error": "Theorem name must not be empty."}
+        return _server._fail(
+            lifespan_state, "rocq_assumptions", "Theorem name must not be empty."
+        )
     if not is_rocq_qualified_name(clean_name):
-        return {
-            "success": False,
-            "error": f"Invalid identifier: {clean_name!r}. "
-            "Expected a Rocq name like 'add_comm' or 'Nat.add_comm'.",
-        }
+        return _server._fail(
+            lifespan_state,
+            "rocq_assumptions",
+            (
+                f"Invalid identifier: {clean_name!r}. "
+                "Expected a Rocq name like 'add_comm' or 'Nat.add_comm'."
+            ),
+        )
 
     query_result = await run_query(
         command=f"Print Assumptions {clean_name}.",
@@ -571,6 +697,52 @@ async def run_assumptions(
         file=file,
     )
     if not query_result.get("success"):
+        # Best-effort enrichment: attach the file's symbol list so the
+        # agent can fuzzy-match a misspelled name without a separate tool
+        # call.  Skip when ``available_in_file`` is already present (e.g.
+        # if a future caller pre-attached one) and when the file path
+        # cannot be resolved.
+        #
+        # Gate the enrichment on non-transport failures.  Two ways to be
+        # a "transport failure":
+        #   * reason in {timeout, lock_contended, unavailable,
+        #     memory_exhausted}; or
+        #   * reason == "crashed" *and* ``pet_restarted`` is True (the
+        #     pet process actually died — see ``_run_with_pet``).
+        # A bare ``reason == "crashed"`` without ``pet_restarted`` is a
+        # live PetanqueError (typically a Coq "Reference X not found"
+        # error from a typo'd theorem name) — exactly the case the
+        # enrichment exists to help with, so we DO run it.
+        reason = query_result.get("reason")
+        pet_restarted = query_result.get("pet_restarted") is True
+        is_transport_failure = (
+            reason in _TRANSPORT_FAILURE_REASONS and reason != "crashed"
+        ) or (reason == "crashed" and pet_restarted)
+        if "available_in_file" not in query_result and not is_transport_failure:
+            result = await _fetch_available_in_file(
+                file=file,
+                workspace=workspace,
+                lifespan_state=lifespan_state,
+            )
+            if result.names:
+                query_result["available_in_file"] = result.names
+                if result.truncated:
+                    query_result["available_in_file_truncated"] = True
+                    query_result["available_in_file_total"] = result.total
+                    query_result["available_in_file_limit"] = _DEFAULT_TOC_LIMIT
+                # Non-empty names means the file IS valid; the failure
+                # was about the requested name (a typo).  Re-record as
+                # ``not_found`` so ``rocq_diag`` reports it correctly
+                # rather than as the generic ``crashed`` reason
+                # ``_run_with_pet`` set on a Coq error.
+                if query_result.get("reason") != "not_found":
+                    query_result["reason"] = "not_found"
+                    _server._record_error(
+                        lifespan_state,
+                        "rocq_assumptions",
+                        query_result.get("error", ""),
+                        reason="not_found",
+                    )
         return query_result
 
     raw_output = query_result["output"]
@@ -585,7 +757,12 @@ async def run_assumptions(
     result: dict[str, Any] = {
         "success": True,
         "theorem": clean_name,
+        # DEPRECATED: prefer the structured lists below.  See docstring.
         "verdict": verdict,
+        # Categorized name lists (additive, Phase 1 of the v2 plan).
+        "admitted": details.get("admitted", []),
+        "classical_axioms": details.get("classical_axioms", []),
+        "user_axioms": details.get("user_axioms", []),
         "raw_output": raw_output,
     }
     if verdict == "closed":
@@ -621,6 +798,172 @@ def _format_toc_elements(elements: list[Any], indent: int = 1) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# TOC name cache (used by `available_in_file` enrichment on not-found failures)
+# ---------------------------------------------------------------------------
+
+# Cache for ``pet.toc`` name lists keyed by ``(resolved_file, mtime)``.  Bounded
+# at :data:`_TOC_CACHE_MAX` entries with FIFO eviction so long sessions do not
+# accumulate stale ``.v`` files.  An mtime change naturally invalidates the
+# entry (different key).  Best-effort: any error in extraction yields ``[]``
+# and no field is attached on the failure path.
+_TOC_CACHE: dict[tuple[str, float], list[str]] = {}
+_TOC_CACHE_MAX: int = 50
+
+
+def _collect_toc_names(toc_result: Any) -> list[str]:
+    """Flatten a ``pet.toc`` tree into the list of top-level definition names.
+
+    ``pet.toc`` returns ``list[(section_name, list[TocElement])]``; each
+    element has ``elem.name.v`` (the identifier) plus optional nested
+    ``children`` (e.g. tactics under a Theorem, definitions inside a Section).
+    Returns every named element encountered, including inside nested
+    children — the LLM consumer wants the full set of identifiers visible
+    from the file scope, not just one indentation level.
+    """
+    names: list[str] = []
+
+    def _walk(elements: list[Any]) -> None:
+        for elem in elements:
+            name = elem.name.v if elem.name else None
+            if name:
+                names.append(name)
+            if elem.children:
+                _walk(elem.children)
+
+    if toc_result:
+        for _section_name, elements in toc_result:
+            _walk(elements)
+    return names
+
+
+def _toc_names_cached(pet: Any, resolved_file: str) -> list[str]:
+    """Return sorted top-level names in ``resolved_file`` via ``pet.toc``,
+    cached by ``(file, mtime)``.
+
+    Returns an empty list on any error (best-effort enrichment) and does
+    *not* cache the failure — a transient pet hiccup should not poison
+    the cache for the rest of the session.  Bounded to
+    :data:`_TOC_CACHE_MAX` entries with FIFO eviction on success.
+    """
+    try:
+        mtime = os.path.getmtime(resolved_file)
+    except OSError:
+        return []
+    key = (resolved_file, mtime)
+    if key in _TOC_CACHE:
+        return _TOC_CACHE[key]
+    try:
+        toc_result = pet.toc(resolved_file)
+        names = sorted(_collect_toc_names(toc_result))
+    except Exception:
+        # Do not cache failures: caller will retry next time.
+        return []
+    if len(_TOC_CACHE) >= _TOC_CACHE_MAX:
+        # Evict the oldest (insertion-order).
+        _TOC_CACHE.pop(next(iter(_TOC_CACHE)))
+    _TOC_CACHE[key] = names
+    return names
+
+
+_DEFAULT_TOC_LIMIT: int = 500
+
+
+# Reasons that indicate the pet itself is stressed/dead.  When
+# ``run_query`` failed for one of these, the ``available_in_file``
+# enrichment skips the extra ``pet.toc`` call: the failure was not
+# about the requested name and the pet should not be hammered further.
+#
+# ``"crashed"`` is intentionally listed here for the *transport* sense
+# (pet process died, indicated by ``pet_restarted: True``).  It is also
+# the reason ``_run_with_pet`` records for a *live* PetanqueError —
+# typically a Coq error such as ``Reference foo not found.`` — where
+# enrichment IS useful.  The runtime gate (in ``run_assumptions``)
+# treats those two cases differently using ``pet_restarted``.
+_TRANSPORT_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        "timeout",
+        "crashed",
+        "memory_exhausted",
+        "lock_contended",
+        "unavailable",
+    }
+)
+
+
+def _truncate_names(
+    names: list[str], limit: int = _DEFAULT_TOC_LIMIT
+) -> tuple[list[str], bool]:
+    """Cap *names* at *limit*; return ``(capped, truncated_flag)``.
+
+    Lexicographic windowing on the requested name is the wrong recovery
+    model for typos: a one-character difference at position 0 (e.g.
+    ``fool_bound`` vs ``fuel_bound``) places the window in a different
+    bucket than the target.  A simple first-N cap with a truncation
+    marker lets the agent see the whole list for typical files
+    (≤ ``limit`` definitions) and a clearly-marked prefix plus a
+    pointer to ``rocq_toc`` for pathological large files.
+    """
+    if len(names) <= limit:
+        return names, False
+    return names[:limit], True
+
+
+class _AvailableInFile(NamedTuple):
+    """Result of :func:`_fetch_available_in_file` — the capped name list,
+    a flag indicating whether ``names`` was truncated relative to the file,
+    and the total count of names found in the file before truncation.
+
+    Using a NamedTuple instead of a bare ``tuple[list[str], bool, int]``
+    eliminates positional misorder bugs at the call sites (which juggle
+    truncation-marker fields conditionally) while staying ``isinstance``-
+    compatible with plain tuples.
+    """
+
+    names: list[str]
+    truncated: bool
+    total: int
+
+
+async def _fetch_available_in_file(
+    *,
+    file: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> _AvailableInFile:
+    """Async wrapper that fetches the (capped) name list for *file*.
+
+    Resolves *file* against *workspace*, runs ``pet.toc`` (cached) under
+    the pet lock, and returns an :class:`_AvailableInFile` with
+    ``names``, ``truncated``, and ``total``.  On any error returns an
+    empty result (``names=[]``, ``truncated=False``, ``total=0``) —
+    this is best-effort enrichment that must never break the primary
+    failure response.
+    """
+    try:
+        resolved = _server._resolve_file_in_workspace(file, workspace)
+    except (ValueError, FileNotFoundError, OSError):
+        return _AvailableInFile([], False, 0)
+
+    def _do_toc(pet: Any) -> list[str]:
+        return _toc_names_cached(pet, resolved)
+
+    try:
+        names = await _server._run_with_pet(
+            _do_toc,
+            lifespan_state,
+            "rocq_assumptions",
+        )
+    except Exception:
+        return _AvailableInFile([], False, 0)
+    if not isinstance(names, list):
+        # _run_with_pet returns a failure dict on errors; treat as empty.
+        return _AvailableInFile([], False, 0)
+    total = len(names)
+    capped, truncated = _truncate_names(names)
+    return _AvailableInFile(capped, truncated, total)
+
+
 async def run_toc(
     file: str,
     workspace: str,
@@ -631,7 +974,7 @@ async def run_toc(
     try:
         file_path = _server._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError) as e:
-        return {"success": False, "error": str(e)}
+        return _server._fail(lifespan_state, "rocq_toc", str(e))
 
     def _do_toc(pet: Any) -> dict[str, Any]:
         _server._set_workspace_if_needed(pet, workspace, lifespan_state)
@@ -654,7 +997,7 @@ async def run_toc(
     return await _server._run_with_pet(
         _do_toc,
         lifespan_state,
-        "TOC request",
+        "rocq_toc",
     )
 
 
@@ -672,10 +1015,10 @@ async def run_notations(
     """Core implementation of rocq_notations (testable without FastMCP Context)."""
     forbidden = _check_forbidden_commands(statement)
     if forbidden:
-        return {"success": False, "error": forbidden}
+        return _server._fail(lifespan_state, "rocq_notations", forbidden)
     forbidden = _check_forbidden_commands(preamble)
     if forbidden:
-        return {"success": False, "error": forbidden}
+        return _server._fail(lifespan_state, "rocq_notations", forbidden)
 
     _temp_files: list[str] = []
 
@@ -735,7 +1078,7 @@ async def run_notations(
     return await _server._run_with_pet(
         _do_notations,
         lifespan_state,
-        "Notation query",
+        "rocq_notations",
         on_timeout=_on_timeout,
     )
 
@@ -805,7 +1148,44 @@ def _build_theorem_start_result(
 ) -> dict[str, Any]:
     """Return the rocq_start-style payload for a theorem-based state."""
     _server._set_workspace_if_needed(pet, workspace, lifespan_state)
-    state = pet.start(resolved_file, theorem)
+    try:
+        state = pet.start(resolved_file, theorem)
+    except Exception as e:
+        # Best-effort enrichment: when pet rejects ``theorem`` (typically
+        # because no such name exists in *file*), attach the file's symbol
+        # list so the agent can fuzzy-match without a separate tool call.
+        # If pet died, re-raise so ``_run_with_pet`` reports
+        # ``pet_restarted=True`` to the client.
+        if _PetanqueError is not None and isinstance(e, _PetanqueError):
+            if not _server._pet_alive(lifespan_state.get("pet_client")):
+                raise
+            available: list[str] = []
+            truncated = False
+            total = 0
+            try:
+                all_names = _toc_names_cached(pet, resolved_file)
+                total = len(all_names)
+                available, truncated = _truncate_names(all_names)
+            except Exception:
+                available = []
+                truncated = False
+                total = 0
+            resp: dict[str, Any] = {
+                "success": False,
+                "error": e.message,
+                "reason": "not_found",
+            }
+            if available:
+                resp["available_in_file"] = available
+                if truncated:
+                    resp["available_in_file_truncated"] = True
+                    resp["available_in_file_total"] = total
+                    resp["available_in_file_limit"] = _DEFAULT_TOC_LIMIT
+            _server._record_error(
+                lifespan_state, "rocq_start", e.message, reason="not_found"
+            )
+            return resp
+        raise
     # Capture mtime after pet.start to avoid TOCTOU gap.
     try:
         file_mtime: float | None = os.path.getmtime(resolved_file)
@@ -872,11 +1252,17 @@ async def capture_position_state(
     lifespan_state: dict[str, Any],
     line: int,
     character: int,
-    description: str,
+    tool: str,
     track_staleness: bool = True,
     timeout: float | None = None,
 ) -> dict[str, Any]:
     """Capture a position-based proof state via the async PET helper.
+
+    *tool* is forwarded to ``_run_with_pet`` as both the canonical tool
+    name in user-facing error messages and the ``tool`` field on
+    ``recent_errors`` entries.  Pass the public MCP tool name of the
+    caller (e.g. ``"rocq_compile"`` for state capture from a coqc error
+    position).
 
     ``timeout`` (seconds) is forwarded to ``_run_with_pet``; when ``None``
     the lifespan default is used.
@@ -897,7 +1283,7 @@ async def capture_position_state(
     return await _server._run_with_pet(
         _execute,
         lifespan_state,
-        description,
+        tool,
         timeout=timeout,
     )
 
@@ -932,20 +1318,22 @@ async def run_start(
     )
 
     if not (_start_by_theorem or _start_by_pos or _start_by_preamble):
-        return {
-            "success": False,
-            "error": (
+        return _server._fail(
+            lifespan_state,
+            "rocq_start",
+            (
                 "No valid start mode. Provide file+theorem, "
                 "file+line+character, or preamble."
             ),
-        }
+        )
 
     if _start_by_pos:
         if not (0 <= line <= 100000) or not (0 <= character <= 100000):
-            return {
-                "success": False,
-                "error": "line and character must be in range [0, 100000].",
-            }
+            return _server._fail(
+                lifespan_state,
+                "rocq_start",
+                "line and character must be in range [0, 100000].",
+            )
 
     # Path traversal + existence check (early validation before entering thread)
     resolved_file: str = ""
@@ -953,13 +1341,13 @@ async def run_start(
         try:
             resolved_file = _server._resolve_file_in_workspace(file, workspace)
         except (ValueError, FileNotFoundError) as e:
-            return {"success": False, "error": str(e)}
+            return _server._fail(lifespan_state, "rocq_start", str(e))
 
     # Forbidden commands check for preamble
     if _start_by_preamble:
         forbidden = _check_forbidden_commands(preamble)
         if forbidden:
-            return {"success": False, "error": forbidden}
+            return _server._fail(lifespan_state, "rocq_start", forbidden)
 
     def _execute(pet: Any) -> dict[str, Any]:
         if _start_by_theorem:
@@ -994,7 +1382,7 @@ async def run_start(
     return await _server._run_with_pet(
         _execute,
         lifespan_state,
-        "Start proof context",
+        "rocq_start",
     )
 
 
@@ -1084,28 +1472,38 @@ async def run_check(
     timeout: float,
     lifespan_state: dict[str, Any],
     from_state: int | None = None,
+    *,
+    include_warnings: bool = True,
 ) -> dict[str, Any]:
     """Execute commands sequentially from a state.
 
     One command = step. Multiple commands = batch.
     Returns state_id, goals, proof_finished, and timing info.
     On error mid-batch, returns last_valid_state_id for recovery.
+
+    When ``include_warnings=False``, per-step feedback drops entries at
+    LSP Warning severity (level 2) so warning noise does not crowd out
+    tool output (Print / Search / vm_compute traces).
     """
     if len(body) > _server.ROCQ_MAX_SOURCE_SIZE:
-        return {
-            "success": False,
-            "error": f"Body too large ({len(body)} bytes, max {_server.ROCQ_MAX_SOURCE_SIZE}).",
-        }
+        return _server._fail(
+            lifespan_state,
+            "rocq_check",
+            (
+                f"Body too large ({len(body)} bytes, "
+                f"max {_server.ROCQ_MAX_SOURCE_SIZE})."
+            ),
+        )
 
     forbidden = _check_forbidden_commands(body)
     if forbidden:
-        return {"success": False, "error": forbidden}
+        return _server._fail(lifespan_state, "rocq_check", forbidden)
 
     commands = _split_rocq_sentences(body) if body.strip() else []
 
     entry, base_state_id, err = _resolve_check_base_state(from_state)
     if err:
-        return {"success": False, "error": err}
+        return _server._fail(lifespan_state, "rocq_check", err)
     assert entry is not None and base_state_id is not None  # err is None here
 
     # Empty body — return early.
@@ -1142,7 +1540,11 @@ async def run_check(
         # outer check and now, invalidating the entry.
         entry_to_use, _re_base_id, re_err = _resolve_check_base_state(base_state_id)
         if re_err or entry_to_use is None:
-            return {"success": False, "error": re_err or "Internal: state lost."}
+            return _server._fail(
+                lifespan_state,
+                "rocq_check",
+                re_err or "Internal: state lost.",
+            )
 
         stale_warning = _check_staleness(entry_to_use)
         start_time = time.monotonic()
@@ -1170,7 +1572,9 @@ async def run_check(
                 # Collect per-step feedback (e.g. Print output,
                 # vm_compute traces) before it is lost.
                 if total_feedback_size < _MAX_TOTAL_FEEDBACK:
-                    fb_text = _extract_feedback(new_state)
+                    fb_text = _extract_feedback(
+                        new_state, include_warnings=include_warnings
+                    )
                     if fb_text is not None:
                         feedback_pairs.append([cmd, fb_text])
                         total_feedback_size += len(fb_text)
@@ -1237,7 +1641,7 @@ async def run_check(
     return await _server._run_with_pet(
         _execute,
         lifespan_state,
-        "Check",
+        "rocq_check",
         timeout=float(hard_timeout),
         partial_state=partial_state,
     )
@@ -1252,26 +1656,36 @@ async def run_step_multi(
     tactics: list[str],
     lifespan_state: dict[str, Any],
     from_state: int | None = None,
+    *,
+    include_warnings: bool = True,
 ) -> dict[str, Any]:
     """Core implementation of rocq_step_multi (testable without FastMCP Context).
 
     Supports ``from_state`` to try tactics from a specific state.
     Results are ephemeral — commit with ``rocq_check(body=..., from_state=...)``.
+
+    When ``include_warnings=False``, per-tactic feedback drops entries at
+    LSP Warning severity (level 2).
     """
     # Validate each tactic up front
     if len(tactics) > _MAX_STEP_MULTI_TACTICS:
-        return {
-            "success": False,
-            "error": f"Too many tactics: {len(tactics)} exceeds maximum of {_MAX_STEP_MULTI_TACTICS}.",
-        }
+        return _server._fail(
+            lifespan_state,
+            "rocq_step_multi",
+            (
+                f"Too many tactics: {len(tactics)} "
+                f"exceeds maximum of {_MAX_STEP_MULTI_TACTICS}."
+            ),
+        )
 
     for tac in tactics:
         forbidden = _check_forbidden_commands(tac)
         if forbidden:
-            return {
-                "success": False,
-                "error": f"Forbidden in tactic {tac!r}: {forbidden}",
-            }
+            return _server._fail(
+                lifespan_state,
+                "rocq_step_multi",
+                f"Forbidden in tactic {tac!r}: {forbidden}",
+            )
 
     timeout: float = lifespan_state["pet_timeout"]
     hard_timeout = _compute_hard_timeout(timeout)
@@ -1280,7 +1694,7 @@ async def run_step_multi(
     # Re-validated inside _execute (state may be invalidated between checks).
     _, _, err = _resolve_check_base_state(from_state)
     if err:
-        return {"success": False, "error": err}
+        return _server._fail(lifespan_state, "rocq_step_multi", err)
 
     # Shared list so partial results survive a timeout via partial_state
     partial_state: dict[str, Any] = {"partial_results": []}
@@ -1300,7 +1714,11 @@ async def run_step_multi(
         # Re-validate under lock — pet may have restarted since the outer check.
         entry_to_use, base_state_id, err = _resolve_check_base_state(from_state)
         if err or entry_to_use is None:
-            return {"success": False, "error": err or "Internal: state lost."}
+            return _server._fail(
+                lifespan_state,
+                "rocq_step_multi",
+                err or "Internal: state lost.",
+            )
 
         _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
         parent_state = entry_to_use.state
@@ -1328,7 +1746,9 @@ async def run_step_multi(
 
                 # Collect per-tactic feedback if any.
                 if total_feedback_size < _MAX_TOTAL_FEEDBACK:
-                    fb_text = _extract_feedback(new_state)
+                    fb_text = _extract_feedback(
+                        new_state, include_warnings=include_warnings
+                    )
                     if fb_text is not None:
                         entry_dict["feedback"] = fb_text
                         total_feedback_size += len(fb_text)
@@ -1367,7 +1787,7 @@ async def run_step_multi(
     return await _server._run_with_pet(
         _execute,
         lifespan_state,
-        "Multi-tactic exploration",
+        "rocq_step_multi",
         timeout=hard_timeout,
         partial_state=partial_state,
     )

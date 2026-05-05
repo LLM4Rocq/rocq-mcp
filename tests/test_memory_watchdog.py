@@ -30,6 +30,7 @@ from rocq_mcp.server import _run_with_pet
 
 from tests.conftest import (
     FakePsutilProcess as _FakePsutilProcess,
+    make_lifespan_state,
     mock_pet as _mock_pet,
     patch_psutil_rss as _patch_psutil_rss,
 )
@@ -79,11 +80,8 @@ class TestMemoryWatchdogBreach:
         _patch_psutil_rss(monkeypatch, 500)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         invalidated: list[bool] = []
@@ -123,11 +121,8 @@ class TestMemoryWatchdogBreach:
         _patch_psutil_rss(monkeypatch, 300)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
@@ -154,11 +149,8 @@ class TestMemoryWatchdogBreach:
         _patch_psutil_rss(monkeypatch, 300)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
@@ -190,11 +182,8 @@ class TestMemoryWatchdogNoBreach:
         _patch_psutil_rss(monkeypatch, 50)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_quick(pet):
@@ -211,11 +200,8 @@ class TestMemoryWatchdogNoBreach:
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_immediate(pet):
@@ -277,11 +263,8 @@ class TestMemoryWatchdogResilience:
         _patch_psutil_raises(monkeypatch, psutil.NoSuchProcess)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_quick(pet):
@@ -303,11 +286,8 @@ class TestExistingPathsUnaffected:
         _patch_psutil_rss(monkeypatch, 50)
 
         mock_pet = _mock_pet()
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 0.1,  # very short timeout
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state(pet_timeout=0.1)  # very short timeout
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
@@ -337,11 +317,8 @@ class TestExistingPathsUnaffected:
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet(alive=True)
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_raises(pet):

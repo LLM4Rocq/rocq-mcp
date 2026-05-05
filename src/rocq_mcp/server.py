@@ -781,7 +781,7 @@ def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
 _RECENT_ERROR_MESSAGE_LIMIT: int = 500
 
 # Allowed values for the ``reason`` field on ``recent_errors`` entries.
-# A superset of :data:`_StateCaptureStatus`'s failure modes plus
+# A superset of :data:`compile_enrichment._StateCaptureStatus`'s failure modes plus
 # ``"validation"`` for early-return validation failures, ``"not_found"``
 # for name-resolution failures (rocq_start / rocq_assumptions typos),
 # and the rocq_verify-specific reasons.
@@ -820,7 +820,7 @@ def _record_error(
     matches the output schema key in ``_build_diag_snapshot``.
 
     *reason* is one of :data:`_RECENT_ERROR_REASONS` — typically a
-    :data:`_StateCaptureStatus` value for pet-level failures, or
+    :data:`compile_enrichment._StateCaptureStatus` value for pet-level failures, or
     ``"validation"`` for early-return validation failures.
 
     Long *message* strings are truncated to
@@ -831,7 +831,16 @@ def _record_error(
     Tolerates ``lifespan_state is None`` (no recording) and missing
     ``recent_errors`` key (no recording) — both happen when the failing
     tool call has no MCP context.
+
+    Asserts that *reason* is in :data:`_RECENT_ERROR_REASONS`.  Without
+    this guard a typo'd reason would silently appear in ``rocq_diag``
+    output and break agent dispatch logic — mirrors
+    :data:`compile_enrichment._VALID_STATE_CAPTURE_STATUSES` which is used the same way
+    in ``compile_enrichment``.
     """
+    assert (
+        reason in _RECENT_ERROR_REASONS
+    ), f"unknown error reason {reason!r}; add it to _RECENT_ERROR_REASONS"
     if lifespan_state is None:
         return
     buf = lifespan_state.get("recent_errors")
@@ -965,8 +974,7 @@ async def _handle_pet_failure(
     on_timeout: Callable[[], None] | None = None,
     partial_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a unified failure response for one of ``_run_with_pet``'s
-    seven except arms.
+    """Build a unified failure response for ``_run_with_pet``'s except arms.
 
     When *killed_pet* is True (timeout / dead PetanqueError / BrokenPipe /
     ConnectionError), invalidates the pet client, force-releases the
@@ -1034,7 +1042,7 @@ async def _run_with_pet(
     failure mode (success path, ``pet_restarted``-tagged crashes,
     ``partial_state`` merges, etc.) and a TypedDict would be unwieldy.
     The ``"reason"`` key, when present on a failure, is a
-    :data:`_StateCaptureStatus` (one of ``"timeout"``, ``"crashed"``,
+    :data:`compile_enrichment._StateCaptureStatus` (one of ``"timeout"``, ``"crashed"``,
     ``"memory_exhausted"``, ``"lock_contended"``, ``"unavailable"``).
     """
     try:
@@ -1164,19 +1172,20 @@ async def _run_with_pet(
 # ---------------------------------------------------------------------------
 # Import implementation functions from submodules
 # ---------------------------------------------------------------------------
-# NOTE: These imports MUST come after all shared infrastructure above is
-# defined, because compile / interactive / diag / compile_enrichment all
-# import from this module.
+# These imports MUST come at the bottom of this module: ``compile`` /
+# ``interactive`` / ``diag`` / ``compile_enrichment`` all import server
+# at module load time (for shared infrastructure: locks, _record_error,
+# config), so server cannot in turn import them at the top without a
+# cycle.  Only re-export symbols that are actually accessed via
+# ``rocq_mcp.server`` from tests or from sibling modules — every dead
+# re-export is a test-monkeypatch trap waiting to happen.
 
 from rocq_mcp.compile import (  # noqa: E402
-    _PROOF_FILE_LABEL,
-    _first_error_from_positions,
     run_compile,
     run_compile_file,
     run_verify,
 )
 from rocq_mcp.interactive import (  # noqa: E402
-    _state_remove,
     run_assumptions,
     run_query,
     run_start,
@@ -1187,19 +1196,10 @@ from rocq_mcp.interactive import (  # noqa: E402
 )
 from rocq_mcp.diag import (  # noqa: E402
     _DIAG_LIVE_STATES_CAP,
-    _RssSampleStatus,
     _build_diag_snapshot,
     _sample_pet_rss_mb,
 )
 from rocq_mcp.compile_enrichment import (  # noqa: E402
-    _CaptureResult,
-    _ENRICHMENT_TIMEOUT_CAP,
-    _StateCaptureStatus,
-    _VALID_STATE_CAPTURE_STATUSES,
-    _capture_compile_error_state,
-    _enrich_compile_failure,
-    _enrichment_timeout,
-    _merge_compile_error_state,
     run_compile_file_with_state,
     run_compile_with_state,
 )
@@ -1236,7 +1236,8 @@ async def rocq_compile(
       - ``"outside_proof"``: error is outside any open proof; no
         ``state_id`` is returned.  Follow the original ``hint``.
       - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
-        ``"unavailable"`` / ``"no_position"``: enrichment did not
+        ``"unavailable"`` / ``"memory_exhausted"`` /
+        ``"no_position"``: enrichment did not
         succeed; follow the original ``hint`` (typically
         ``rocq_start(file=..., line=..., character=...)``).
 
@@ -1300,7 +1301,8 @@ async def rocq_compile_file(
       - ``"outside_proof"``: error is outside any open proof; no
         ``state_id`` is returned.  Follow the original ``hint``.
       - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
-        ``"unavailable"`` / ``"no_position"``: enrichment did not
+        ``"unavailable"`` / ``"memory_exhausted"`` /
+        ``"no_position"``: enrichment did not
         succeed; follow the original ``hint`` (typically
         ``rocq_start(file=..., line=..., character=...)``).
 
@@ -1529,7 +1531,11 @@ async def rocq_query(
         )
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     result = await run_query(
         command=command,
@@ -1615,7 +1621,11 @@ async def rocq_assumptions(
         )
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_assumptions(
         name=name,
@@ -1663,7 +1673,11 @@ async def rocq_toc(
         )
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_toc(
         file=file,
@@ -1712,7 +1726,11 @@ async def rocq_notations(
         )
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_notations(
         statement=statement,
@@ -1794,7 +1812,11 @@ async def rocq_start(
         )
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_start(
         file=file,
@@ -1843,6 +1865,9 @@ async def rocq_step_multi(
     when the tactic produces visible output (e.g., ``Print``, ``Search``).
 
     Requires an active state from rocq_start or rocq_check (or use from_state).
+    With ``from_state=None`` and no current state in the table, returns a
+    validation failure with reason ``"validation"`` and a hint to call
+    rocq_start first.
 
     **Canonical exploration pattern:** if the first few steps of a proof
     are a confident prefix, advance with ``rocq_check`` first and pass
@@ -1864,7 +1889,11 @@ async def rocq_step_multi(
     recent error history.
     """
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_step_multi(
         tactics=tactics,
@@ -1930,7 +1959,11 @@ async def rocq_check(
     timeout = timeout if timeout is not None and timeout > 0 else ROCQ_PET_TIMEOUT
 
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
 
     return await run_check(
         body=body,
@@ -1983,7 +2016,11 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
       The full set is :data:`_RECENT_ERROR_REASONS`.
     """
     if ctx is None:
-        return {"success": False, "error": "Internal error: no MCP context."}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": "Internal error: no MCP context.",
+        }
     return _build_diag_snapshot(ctx.lifespan_context)
 
 

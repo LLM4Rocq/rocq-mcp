@@ -386,6 +386,7 @@ def _build_compile_result(
     if result["timed_out"]:
         return {
             "success": False,
+            "reason": "timeout",
             "error": (
                 f"Compilation timed out after {timeout}s. "
                 "The proof may contain a diverging tactic."
@@ -412,12 +413,16 @@ def _build_compile_result(
             fallback = _drop_warning_lines(fallback)
         if not fallback:
             fallback = f"coqc exited with code {result['returncode']} (no stderr)."
-        return {"success": False, "error": fallback}
+        return {"success": False, "reason": "compile_error", "error": fallback}
 
     positions = _parse_coqc_error_positions(
         result["stderr"], include_warnings=include_warnings
     )
-    result_dict: dict[str, Any] = {"success": False, "error": error_text}
+    result_dict: dict[str, Any] = {
+        "success": False,
+        "reason": "compile_error",
+        "error": error_text,
+    }
     if positions:
         result_dict["error_positions"] = positions
         result_dict["hint"] = (
@@ -451,12 +456,13 @@ def run_compile(
     if len(source) > _server.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
+            "reason": "validation",
             "error": f"Source exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     forbidden = _check_forbidden_commands(source)
     if forbidden:
-        return {"success": False, "error": forbidden}
+        return {"success": False, "reason": "validation", "error": forbidden}
 
     result = _run_coqc(source, workspace, timeout)
     return _build_compile_result(
@@ -486,22 +492,27 @@ def run_compile_file(
     try:
         file_path = _server._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError) as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "reason": "validation", "error": str(e)}
 
     try:
         source = Path(file_path).read_text()
     except OSError as e:
-        return {"success": False, "error": f"Cannot read file: {e}"}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": f"Cannot read file: {e}",
+        }
 
     if len(source) > _server.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
+            "reason": "validation",
             "error": f"File exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     forbidden = _check_forbidden_commands(source)
     if forbidden:
-        return {"success": False, "error": forbidden}
+        return {"success": False, "reason": "validation", "error": forbidden}
 
     result = _run_coqc_file(file_path, workspace, timeout)
     return _build_compile_result(
@@ -697,7 +708,7 @@ async def _extract_problem_structure(
     problem_statement: str,
     workspace: str,
     lifespan_state: dict[str, Any],
-) -> ProblemStructure | None:
+) -> ProblemStructure | dict[str, Any] | None:
     """Extract the structure of a problem statement using pytanque toc.
 
     Writes the problem_statement to a temp file, runs toc under the pet
@@ -706,7 +717,16 @@ async def _extract_problem_structure(
     (:func:`_toc_result_to_problem_structure`) and runs outside the
     lock, keeping pet contention bounded.
 
-    Returns None if pet is not available or toc fails.
+    Three-way return:
+
+    - ``ProblemStructure`` on success.
+    - A failure dict (carrying ``pet_restarted: True`` when relevant)
+      when pet died or memory was exhausted during toc.  The caller
+      must propagate this dict back to the agent rather than falling
+      through to Phase 3 — otherwise the ``pet_restarted`` signal is
+      swallowed and the agent never learns to call ``rocq_diag``.
+    - ``None`` when pet is unavailable or toc returned no data — Phase
+      3 fallback applies.
     """
     _temp_files: list[str] = []
 
@@ -742,10 +762,14 @@ async def _extract_problem_structure(
         on_timeout=_on_timeout,
     )
 
-    # _run_with_pet may return an error dict instead of toc data; treat
-    # that the same as no result.  toc_result may also be None when toc
-    # itself failed (e.g. PetanqueError).
-    if toc_result is None or isinstance(toc_result, dict):
+    # Distinguish three outcomes: pet-restart (must surface), other
+    # pet-side failure (Phase 3 fallback is fine), and "toc returned
+    # nothing" (also Phase 3).
+    if isinstance(toc_result, dict):
+        if toc_result.get("pet_restarted"):
+            return toc_result
+        return None
+    if toc_result is None:
         return None
     return _toc_result_to_problem_structure(toc_result, problem_statement)
 
@@ -1036,6 +1060,13 @@ async def _run_phase2_shared_defs(
     structure = await _extract_problem_structure(
         problem_statement, workspace, lifespan_state
     )
+
+    # Pet died during toc — surface pet_restarted to the caller instead
+    # of silently falling through to Phase 3.  Without this the
+    # rocq_diag breadcrumb on the wrapper docstring is unreachable
+    # through the Phase 2 path.
+    if isinstance(structure, dict):
+        return structure
 
     if structure is None:
         return _phase3_or_fallback(

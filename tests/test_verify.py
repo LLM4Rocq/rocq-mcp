@@ -263,10 +263,6 @@ class TestAxiomClassification:
             is True
         )
 
-    def test_mathcomp_short_form_boolp_prefix(self):
-        """mathcomp sometimes outputs the short ``boolp.`` form."""
-        assert _is_standard_axiom("boolp.functional_extensionality_dep") is True
-
     def test_mathcomp_em_short_name(self):
         """``EM`` is the mathcomp-specific short name for excluded middle."""
         assert _is_standard_axiom("mathcomp.classical.boolp.EM") is True
@@ -281,6 +277,33 @@ class TestAxiomClassification:
     def test_user_axiom_named_em_rejected(self):
         """A user ``Axiom EM`` outside mathcomp must NOT be auto-trusted."""
         assert _is_standard_axiom("MyModule.EM") is False
+
+    def test_bare_boolp_prefix_rejected(self):
+        """A user-supplied ``boolp.v`` containing ``Axiom EM : False.`` must
+        NOT be auto-trusted just because it mimics mathcomp's short form.
+        Require the full ``mathcomp.classical.boolp.`` qualifier."""
+        assert _is_standard_axiom("boolp.EM") is False
+        assert _is_standard_axiom("boolp.functional_extensionality_dep") is False
+        assert _is_standard_axiom("boolp.cid") is False
+
+    def test_bare_classical_sets_prefix_rejected(self):
+        """Symmetric to ``boolp.``: bare ``classical_sets.`` is not a
+        trusted source."""
+        assert _is_standard_axiom("classical_sets.EM") is False
+
+    # The implementation green-lights unqualified mathcomp short names
+    # (the ``"."`` not in name branch of _is_standard_axiom).  The audit
+    # noted this was untested.  Pin the current behaviour so a future
+    # tightening (rejecting unqualified) doesn't slip through silently.
+
+    def test_mathcomp_em_unqualified_accepted(self):
+        assert _is_standard_axiom("EM") is True
+
+    def test_mathcomp_pselect_unqualified_accepted(self):
+        assert _is_standard_axiom("pselect") is True
+
+    def test_mathcomp_cid_unqualified_accepted(self):
+        assert _is_standard_axiom("cid") is True
 
     # --- SPOOFED axioms: must be REJECTED ---
 

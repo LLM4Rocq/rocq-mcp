@@ -248,15 +248,39 @@ def multiline_import_proof():
 # ---------------------------------------------------------------------------
 
 
-def make_lifespan_state(pet_timeout: float = 30.0) -> dict:
-    """Build a minimal lifespan_state dict for tests that drive run_* helpers
-    directly.  Mirrors the subset of ``app_lifespan``'s schema that the core
-    pet-touching helpers actually read."""
-    return {
+def make_lifespan_state(pet_timeout: float = 30.0, *, full: bool = False) -> dict:
+    """Build a lifespan_state dict for tests.
+
+    With *full=False* (default), returns the minimal subset that the
+    core pet-touching helpers actually read — sufficient for unit tests
+    that drive ``run_*`` directly.
+
+    With *full=True*, returns the complete schema produced by
+    ``app_lifespan`` in production: pet bookkeeping fields,
+    ``recent_errors`` ring buffer, peak/generation counters.  Use this
+    for tests that exercise ``rocq_diag`` or the memory watchdog.
+    """
+    state: dict = {
         "pet_client": None,
         "pet_timeout": pet_timeout,
         "current_workspace": None,
     }
+    if full:
+        import collections
+
+        import rocq_mcp.server as _server
+
+        state.update(
+            {
+                "workspace": "/tmp",
+                "pet_started_at": None,
+                "total_spawns": 0,
+                "peak_pet_rss_mb": 0.0,
+                "pet_generation": 0,
+                "recent_errors": collections.deque(maxlen=_server._RECENT_ERRORS_MAX),
+            }
+        )
+    return state
 
 
 def mock_pet(pid: int = 12345, alive: bool = True) -> MagicMock:

@@ -247,10 +247,15 @@ async def run_compile_with_state(
         return result
     if result.get("success"):
         return result
-    # Record the coqc-level failure (validation / forbidden / size /
-    # actual compile error) before optional pet enrichment.
+    # Record the coqc-level failure with the response's own reason
+    # (validation, compile_error, or timeout) before optional pet
+    # enrichment.  Falls back to "compile_error" when the helper
+    # couldn't classify (defensive — should not happen post-fix).
     _server._record_error(
-        lifespan_state, "rocq_compile", result.get("error", ""), reason="validation"
+        lifespan_state,
+        "rocq_compile",
+        result.get("error", ""),
+        reason=str(result.get("reason") or "compile_error"),
     )
     return await _enrich_compile_failure(
         result,
@@ -284,7 +289,7 @@ async def run_compile_file_with_state(
         lifespan_state,
         "rocq_compile_file",
         result.get("error", ""),
-        reason="validation",
+        reason=str(result.get("reason") or "compile_error"),
     )
     if resolved_file is None:
         result["state_capture_status"] = "no_position"

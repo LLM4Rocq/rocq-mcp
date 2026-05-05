@@ -27,9 +27,14 @@ from tests.conftest import make_lifespan_state as _make_lifespan_state  # noqa: 
 @pytest.fixture
 def lifespan_state():
     """Provide a lifespan_state and clean up pet on teardown."""
+    from collections import deque
+
     from rocq_mcp.server import _invalidate_pet
 
     state = _make_lifespan_state()
+    # Add the recent_errors buffer that production app_lifespan
+    # sets up — tests of recording behaviour depend on it.
+    state["recent_errors"] = deque(maxlen=10)
     yield state
     _invalidate_pet(state)
 
@@ -187,8 +192,22 @@ class TestCheckBatch:
         assert cr["commands_run"] >= 2
 
     @pytest.mark.asyncio
-    async def test_batch_error_mid_proof(self, workspace, lifespan_state):
-        """Run a batch where the 2nd command fails, verify error details."""
+    @pytest.mark.parametrize(
+        "bad_tactic",
+        [
+            # Undefined tactic identifier (Ltac lookup failure).
+            "omega_bad_tactic.",
+            # Type mismatch — `apply` against an irrelevant lemma.
+            "apply Nat.add_comm.",
+            # Unsolved subgoal at Qed (try to finish without proof).
+            "exact 0.",
+        ],
+    )
+    async def test_batch_error_mid_proof(self, workspace, lifespan_state, bad_tactic):
+        """Mid-batch failures across structurally distinct error modes
+        all hit the same code path and must produce identical envelope
+        shape (reason="tactic_failed", failed_command, command_index,
+        last_valid_state_id, recent_errors round-trip)."""
         from rocq_mcp.interactive import run_start, run_check
 
         vfile = workspace / "check_batch_err.v"
@@ -204,9 +223,9 @@ class TestCheckBatch:
         )
         assert sr["success"] is True
 
-        # First tactic (intros) should succeed, second (omega_bad) should fail
+        # First tactic (intros) succeeds; second varies by parameter.
         cr = await run_check(
-            body="intros. omega_bad_tactic.",
+            body=f"intros. {bad_tactic}",
             timeout=30.0,
             lifespan_state=lifespan_state,
             from_state=sr["state_id"],
@@ -222,6 +241,14 @@ class TestCheckBatch:
         assert cr["commands_run"] == 1
         assert "last_valid_state_id" in cr
         assert cr["last_valid_state_id"] is not None
+        # The same reason must reach recent_errors so rocq_diag surfaces
+        # the failure with consistent attribution.
+        recorded = [
+            e
+            for e in lifespan_state["recent_errors"]
+            if e.get("tool") == "rocq_check" and e.get("reason") == "tactic_failed"
+        ]
+        assert len(recorded) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -734,8 +734,13 @@ _STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
     # few mathcomp-specific short names: EM, pselect, cid).
     "mathcomp.classical.boolp.",
     "mathcomp.classical.classical_sets.",
-    "boolp.",  # short form sometimes emitted without the mathcomp.classical. prefix
-    "classical_sets.",
+    # NOTE: bare ``boolp.`` / ``classical_sets.`` are intentionally NOT
+    # in this list.  Together with the 2-char short name ``EM`` in the
+    # whitelist, a workspace-supplied ``boolp.v`` containing
+    # ``Axiom EM : False.`` would have been auto-trusted by rocq_verify
+    # Phase 3 (no Module M wrapping; the proof-source ``\bAxiom\b``
+    # block does not see what ``Require Import`` pulls in).  Require the
+    # full ``mathcomp.classical.boolp.`` qualifier instead.
 )
 
 

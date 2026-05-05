@@ -26,6 +26,7 @@ from tests.conftest import (
     _MockContext,
     FakePsutilProcess as _FakePsutilProcess,
     add_mock_state,
+    make_lifespan_state,
     mock_pet as _mock_pet,
     patch_psutil_rss as _patch_psutil_rss,
 )
@@ -33,19 +34,7 @@ from tests.conftest import (
 
 def _fresh_lifespan_state() -> dict:
     """Build a lifespan_state dict matching ``app_lifespan``'s schema."""
-    import collections
-
-    return {
-        "pet_client": None,
-        "workspace": "/tmp",
-        "pet_timeout": 30.0,
-        "current_workspace": None,
-        "pet_started_at": None,
-        "total_spawns": 0,
-        "peak_pet_rss_mb": 0.0,
-        "pet_generation": 0,
-        "recent_errors": collections.deque(maxlen=_server._RECENT_ERRORS_MAX),
-    }
+    return make_lifespan_state(full=True)
 
 
 @pytest.fixture(autouse=True)
@@ -854,6 +843,25 @@ class TestExtraValidationRecording:
             "unavailable",
             "validation",
         ]
+
+    def test_record_error_rejects_unknown_reason(self):
+        """A typo'd reason must trip the assertion at write time so it
+        cannot silently appear in rocq_diag output and break agent
+        dispatch logic.  Mirrors _VALID_STATE_CAPTURE_STATUSES."""
+        ls = _fresh_lifespan_state()
+        with pytest.raises(AssertionError, match="unknown error reason"):
+            _record_error(ls, "tool_x", "msg", reason="totally_made_up")
+
+    def test_record_error_accepts_every_documented_reason(self):
+        """Every value in ``_RECENT_ERROR_REASONS`` must be accepted —
+        the validator must not reject something the docstring promises
+        the buffer can carry."""
+        ls = _fresh_lifespan_state()
+        for reason in _server._RECENT_ERROR_REASONS:
+            _record_error(ls, "round_trip", "msg", reason=reason)
+        snap = _build_diag_snapshot(ls)
+        recorded = {e["reason"] for e in snap["recent_errors"]}
+        assert recorded == set(_server._RECENT_ERROR_REASONS)
 
 
 # ---------------------------------------------------------------------------

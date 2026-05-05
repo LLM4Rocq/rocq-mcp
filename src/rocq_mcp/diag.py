@@ -14,6 +14,7 @@ from typing import Any, Literal
 import psutil
 
 import rocq_mcp.server as _server
+from rocq_mcp.interactive import _state_table
 
 # Maximum number of ``live_states`` entries returned by ``rocq_diag``.
 # Caps the response payload; ``live_states_total`` reports the full count.
@@ -73,13 +74,6 @@ def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
 
     pet_rss_mb, sample_status = _sample_pet_rss_mb(lifespan_state)
     peak = float(lifespan_state.get("peak_pet_rss_mb", 0.0) or 0.0)
-
-    # Lazy import to avoid the server -> interactive -> server cycle at
-    # module load time.
-    try:
-        from rocq_mcp.interactive import _state_table
-    except ImportError:
-        _state_table = {}  # type: ignore[assignment]
 
     # Sort by created_at descending (most recent first), then take cap.
     all_entries = list(_state_table.items())

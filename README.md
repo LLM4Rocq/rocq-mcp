@@ -29,7 +29,7 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes twelve MCP tools:
+The server exposes eleven MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
@@ -44,7 +44,7 @@ The server exposes twelve MCP tools:
 | Tool | Description |
 |------|-------------|
 | **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Three context modes: **preamble** (import commands as a string), **file** (a `.v` file path whose definitions are in scope), or **from_state** (a live `state_id` from a `rocq_check` session — the query sees opened scopes, hypotheses, and local definitions). Use `from_state=<state_id>` to introspect mid-proof without re-specifying preamble. Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
-| **`rocq_assumptions`** | Check what axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns three categorized name lists — `admitted`, `classical_axioms`, `user_axioms` — that partition the cone of assumptions; a trusted closed proof has empty `user_axioms` and `admitted` (with `classical_axioms` allowed if you accept classical logic). The legacy `verdict` field (`"closed"`/`"standard_only"`/`"suspicious"`) is **deprecated** and retained only for back-compat. |
+| **`rocq_assumptions`** | List the axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns `assumptions: list[str]` of `"name : type"` pairs from `Print Assumptions` (empty when the theorem is closed under the global context) plus the full `raw_output` for agents that want it. No classification — `rocq_assumptions` is pure introspection; the agent decides what's safe to trust. Use `rocq_verify` for a sandboxed admit-free / axiom-policy decision on a candidate proof. |
 | **`rocq_start`** | Start an interactive proof session and return proof goals. Three modes: (1) by theorem name, (2) by position — jump to any point in a file to inspect proof goals there (e.g., error positions from `rocq_compile`), (3) from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. Optional `force_restart=True` kills the PET process and clears all cached state before starting (use when PET is in a bad state). |
 | **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. Includes `stale_warning` if the source file was modified since session start. |
 | **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
@@ -100,6 +100,18 @@ For mid-proof queries — e.g. `Search` against the live proof state —
 use `from_state=<state_id>` instead of preamble; the live state
 already has all imports and scopes set up.
 
+### Failure envelope and `reason` taxonomy
+
+Every failure response carries `{success: False, error: str, reason: str}` so an agent can dispatch on `reason` without parsing message text. The same `reason` is recorded into the `recent_errors` ring buffer that `rocq_diag` returns. Values:
+
+- **Validation / lookup** (set by tools before reaching `pet`): `"validation"`, `"not_found"` (typo on `rocq_start` / `rocq_assumptions`).
+- **Pet-side** (set by `_run_with_pet` on subprocess-level failures): `"timeout"`, `"crashed"`, `"memory_exhausted"`, `"lock_contended"`, `"unavailable"`. When pet had to be killed, the response also carries `pet_restarted: True`.
+- **`rocq_check` mid-batch**: `"tactic_failed"` (Coq rejected the tactic — distinct from a transport-level `"crashed"`).
+- **`rocq_compile` / `rocq_compile_file`**: `"compile_error"` (coqc returned non-zero).
+- **`rocq_verify`-specific**: `"compile_error"`, `"axiom_dependency"` (proof relies on `Admitted`/admit/custom axiom), `"type_mismatch"` (Phase 3 found the proof's type differs from the problem's type).
+
+When a tool returns `pet_restarted: True`, call `rocq_diag` for memory headroom and recent-error history.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -153,7 +165,7 @@ Forbidden commands:
 
 ### Layer 3: Print Assumptions axiom whitelist
 
-After compilation, `Print Assumptions` is checked against a whitelist of standard library axioms (classical logic, functional extensionality, Reals axioms, etc.). Axioms with qualified names must have a recognized stdlib prefix (`Coq.*`, `Rocq.*`, `Stdlib.*`, or known module prefixes like `ClassicalDedekindReals.*`). The `M.` prefix on user-declared axioms ensures they are always rejected.
+After compilation, `Print Assumptions` is checked against a whitelist of standard library axioms (classical logic, functional extensionality, Reals axioms, primitive int/float/array/string operations, mathcomp.classical re-exports, etc.). Axioms with qualified names must have a recognized stdlib prefix (`Coq.*`, `Rocq.*`, `Stdlib.*`, `Corelib.*`, the full `mathcomp.classical.boolp.*` / `mathcomp.classical.classical_sets.*`, or known module prefixes like `ClassicalDedekindReals.*`). Bare module-name prefixes (e.g. a workspace-supplied `boolp.v`) are intentionally **not** trusted, so a user `Axiom EM : False.` cannot be auto-trusted just because it mimics mathcomp's short form. The `M.` prefix on user-declared axioms inside Phase 1 / 2 Module M sandboxing ensures they are always rejected.
 
 Printing flags (`Set Printing All`, `Set Printing Universes`, `Set Printing Width`) are reset after `End M.` to prevent corruption of `Print Assumptions` output format.
 
@@ -227,11 +239,13 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, 
 
 ```
 src/rocq_mcp/
-  __init__.py       Package init
-  server.py         MCP server, 11 tool definitions, pet subprocess management
-  compile.py        coqc-based tools: compile, compile_file, verify
-  interactive.py    pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
-  verify.py         Rocq lexer scanner, Module M. verification, Print Assumptions parsing
+  __init__.py            Package init
+  server.py              MCP server, 11 @mcp.tool wrappers, pet subprocess management
+  compile.py             coqc-based tools: compile, compile_file, verify
+  compile_enrichment.py  Compile-error-state orchestration (PET state capture)
+  diag.py                rocq_diag snapshot builder (pet uptime, memory, recent errors)
+  interactive.py         pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
+  verify.py              Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
   conftest.py           Shared fixtures
   test_compile.py       Tests for rocq_compile

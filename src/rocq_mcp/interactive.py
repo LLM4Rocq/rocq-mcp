@@ -708,6 +708,7 @@ async def run_assumptions(
                 file=file,
                 workspace=workspace,
                 lifespan_state=lifespan_state,
+                tool="rocq_assumptions",
             )
             _attach_available_in_file(query_result, result)
             if result.names:
@@ -718,6 +719,22 @@ async def run_assumptions(
                 # ``_run_with_pet`` set on a Coq error.
                 if query_result.get("reason") != "not_found":
                     query_result["reason"] = "not_found"
+                    # Drop the just-recorded rocq_query/crashed entry
+                    # (set by _run_with_pet on the live PetanqueError)
+                    # before re-recording as rocq_assumptions/not_found.
+                    # Without this, rocq_diag reports the same failure
+                    # twice with conflicting tool / reason attribution.
+                    buf = (
+                        lifespan_state.get("recent_errors")
+                        if lifespan_state is not None
+                        else None
+                    )
+                    if (
+                        buf
+                        and buf[-1].get("tool") == "rocq_query"
+                        and buf[-1].get("reason") == "crashed"
+                    ):
+                        buf.pop()
                     _server._record_error(
                         lifespan_state,
                         "rocq_assumptions",
@@ -795,8 +812,19 @@ def _scan_module_regions(source: str) -> list[tuple[int, int, str]]:
 
     Comment- and string-safe via :func:`verify._neutralize_for_regex`
     (length-preserving so line numbers survive).  A region is emitted
-    only when the matching ``End <Name>.`` is seen — declarative
-    one-liners like ``Module M : MT.`` produce no enclosing region.
+    only when a matching ``End <Name>.`` is seen.
+
+    Declarative one-liners (``Module M : MT.``, ``Module M := SomeMod.``)
+    have no body and no closing ``End``.  The opener regex matches them
+    indistinguishably from a real opener, so they get pushed onto the
+    stack.  When a later ``End <Outer>.`` fires we scan the stack
+    top-down for the matching name and pop everything down to and
+    including it — discarding the intervening one-liner pushes.  Without
+    this, an inner declarative one-liner would silently corrupt the
+    parent's qualifier (the audit reproducer was
+    ``Module Outer. Module M : MT. Module Sibling. … End Sibling. End Outer.``
+    where ``Outer`` was being dropped from regions and ``Sibling.x``
+    would be qualified bare instead of as ``Outer.Sibling.x``).
     """
     from rocq_mcp.verify import _neutralize_for_regex
 
@@ -809,11 +837,15 @@ def _scan_module_regions(source: str) -> list[tuple[int, int, str]]:
             open_stack.append((i, m.group(1)))
             continue
         e = _MODULE_END_RE.match(line)
-        if e and open_stack:
-            top_line, top_name = open_stack[-1]
-            if top_name == e.group(1):
-                open_stack.pop()
-                regions.append((top_line, i, top_name))
+        if not (e and open_stack):
+            continue
+        target = e.group(1)
+        for j in range(len(open_stack) - 1, -1, -1):
+            if open_stack[j][1] == target:
+                top_line, _ = open_stack[j]
+                del open_stack[j:]
+                regions.append((top_line, i, target))
+                break
     return regions
 
 
@@ -921,6 +953,11 @@ _DEFAULT_TOC_LIMIT: int = 500
 # typically a Coq error such as ``Reference foo not found.`` — where
 # enrichment IS useful.  The runtime gate (in ``run_assumptions``)
 # treats those two cases differently using ``pet_restarted``.
+#
+# This set is a strict subset of :data:`server._RECENT_ERROR_REASONS`
+# (the larger set also includes validation-only and tool-specific
+# values like ``"not_found"`` / ``"tactic_failed"``).  Keep both in
+# sync when adding a new pet-side failure mode.
 _TRANSPORT_FAILURE_REASONS: frozenset[str] = frozenset(
     {
         "timeout",
@@ -988,6 +1025,7 @@ async def _fetch_available_in_file(
     file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    tool: str,
 ) -> _AvailableInFile:
     """Async wrapper that fetches the (capped) name list for *file*.
 
@@ -997,6 +1035,12 @@ async def _fetch_available_in_file(
     empty result (``names=[]``, ``truncated=False``, ``total=0``) —
     this is best-effort enrichment that must never break the primary
     failure response.
+
+    *tool* is forwarded to ``_run_with_pet`` so any pet-level failure
+    during the toc lookup is attributed to the calling tool in
+    ``recent_errors``.  Required (no default) because there is no
+    sensible fallback — silently mis-attributing a future caller's
+    failure to ``rocq_assumptions`` would be a bug.
     """
     try:
         resolved = _server._resolve_file_in_workspace(file, workspace)
@@ -1010,7 +1054,7 @@ async def _fetch_available_in_file(
         names = await _server._run_with_pet(
             _do_toc,
             lifespan_state,
-            "rocq_assumptions",
+            tool,
         )
     except Exception:
         return _AvailableInFile([], False, 0)
@@ -1655,6 +1699,16 @@ async def run_check(
                 # and returns pet_restarted=True to the client.
                 if not _server._pet_alive(lifespan_state.get("pet_client")):
                     raise
+                # Record into recent_errors so rocq_diag surfaces the
+                # tactic-level failure under the same reason the
+                # response carries.  Without this, mid-batch failures
+                # were invisible in the diag buffer.
+                _server._record_error(
+                    lifespan_state,
+                    "rocq_check",
+                    e.message,
+                    reason="tactic_failed",
+                )
                 return _build_check_failure_dict(
                     error_message=e.message,
                     failed_command=cmd,

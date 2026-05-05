@@ -734,6 +734,58 @@ class TestAssumptionsAvailableInFile:
         assert "fool_bound" in not_found_entries[0]["message"]
 
     @pytest.mark.asyncio
+    async def test_typo_failure_drops_prior_rocq_query_crashed_entry(self, monkeypatch):
+        """When the not_found re-tag fires, the rocq_query/crashed entry
+        that ``_run_with_pet`` recorded for the underlying live
+        PetanqueError must be dropped — otherwise rocq_diag reports the
+        same failure twice with conflicting attribution
+        (``rocq_query/crashed`` AND ``rocq_assumptions/not_found``)."""
+        from collections import deque
+        import rocq_mcp.interactive as _int
+
+        async def mock_run_query(**kwargs):
+            # Simulate the buffer state after _run_with_pet has recorded
+            # the live PetanqueError as rocq_query/crashed (the real flow
+            # is run_assumptions -> run_query -> _run_with_pet -> _record_error).
+            kwargs["lifespan_state"]["recent_errors"].append(
+                {
+                    "tool": "rocq_query",
+                    "message": "Reference fool_bound not found.",
+                    "reason": "crashed",
+                    "occurred_at": 0.0,
+                }
+            )
+            return {
+                "success": False,
+                "error": "Reference fool_bound not found.",
+                "reason": "crashed",
+            }
+
+        async def mock_fetch_available(**kwargs):
+            return _int._AvailableInFile(["fuel_bound"], False, 1)
+
+        monkeypatch.setattr(_int, "run_query", mock_run_query)
+        monkeypatch.setattr(_int, "_fetch_available_in_file", mock_fetch_available)
+
+        recent_errors: deque = deque(maxlen=10)
+        lifespan_state = {"recent_errors": recent_errors}
+
+        await run_assumptions(
+            name="fool_bound",
+            file="test.v",
+            workspace="/tmp",
+            lifespan_state=lifespan_state,
+        )
+
+        # Buffer must contain exactly ONE entry — the re-tagged
+        # rocq_assumptions/not_found.  The original rocq_query/crashed
+        # was dropped.
+        assert len(recent_errors) == 1
+        only = recent_errors[0]
+        assert only["tool"] == "rocq_assumptions"
+        assert only["reason"] == "not_found"
+
+    @pytest.mark.asyncio
     async def test_typo_failure_no_double_record_when_reason_already_not_found(
         self, monkeypatch
     ):
@@ -987,3 +1039,112 @@ class TestCollectTocNames:
         toc = [("top", [_e("top", 1)])]
         names = _collect_toc_names(toc, source=source)
         assert names == ["top"]
+
+    def test_declarative_one_liner_does_not_corrupt_parent_qualifier(self):
+        """Audit-fix #2 reproducer.  ``Module M : MT.`` is a declarative
+        one-liner: it has no body and no ``End M.``.  The opener regex
+        cannot distinguish it from a real opener, so it gets pushed
+        onto the stack.  When ``End Outer.`` later fires, we must scan
+        down the stack for the matching name (rather than checking only
+        the top), or ``Outer`` is silently dropped from regions and
+        ``Sibling.x`` ends up qualified bare instead of as
+        ``Outer.Sibling.x``."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # 0: Module Outer.
+        # 1:   Module M : MT.            (one-liner, no End)
+        # 2:   Module Sibling.
+        # 3:     Definition x := 1.
+        # 4:   End Sibling.
+        # 5: End Outer.
+        source = (
+            "Module Outer.\n"
+            "  Module M : MT.\n"
+            "  Module Sibling.\n"
+            "    Definition x := 1.\n"
+            "  End Sibling.\n"
+            "End Outer.\n"
+        )
+        toc = [("x", [_e("x", 3)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["Outer.Sibling.x"]
+
+    def test_module_assignment_one_liner_no_corruption(self):
+        """Same bug class via ``Module M := SomeMod.`` (functor application
+        / module aliasing).  Also has no body and no ``End``."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # 0: Module Outer.
+        # 1:   Module M := SomeMod.
+        # 2:   Definition y := 0.
+        # 3: End Outer.
+        source = (
+            "Module Outer.\n"
+            "  Module M := SomeMod.\n"
+            "  Definition y := 0.\n"
+            "End Outer.\n"
+        )
+        toc = [("y", [_e("y", 2)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["Outer.y"]
+
+    def test_top_level_one_liner_does_not_break_subsequent_regions(self):
+        """A declarative one-liner at the top level leaks onto the open
+        stack but should not corrupt any subsequent module's qualifier."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # 0: Module M := SomeMod.       (one-liner, top-level, no End)
+        # 1: Module Real.
+        # 2:   Definition x := 1.
+        # 3: End Real.
+        source = (
+            "Module M := SomeMod.\n"
+            "Module Real.\n"
+            "  Definition x := 1.\n"
+            "End Real.\n"
+        )
+        toc = [("x", [_e("x", 2)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["Real.x"]

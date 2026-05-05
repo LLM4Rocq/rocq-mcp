@@ -1156,6 +1156,14 @@ class TestLspSeverityWire:
     of ``From Stdlib Require Import …``) and verify both that the wire
     integer is 2 *and* that the ``include_warnings=False`` filter
     actually drops it end-to-end.
+
+    **Rocq version dependency**: the deprecation message text comes
+    from Rocq 9.0+'s standard library namespace rename.  If a future
+    Rocq stops emitting this warning (or renames the message), the
+    deprecation-text assertion below should fall back to a more
+    generic "warning"/"deprecat" substring match — but the
+    ``2 in levels`` assertion will still hold for any LSP-severity
+    warning.
     """
 
     @pytest.fixture

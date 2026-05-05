@@ -821,28 +821,38 @@ class TestExtraValidationRecording:
 
     @pytest.mark.asyncio
     async def test_recent_errors_includes_reason(self):
-        """Each ``reason`` value round-trips through ``_record_error``
-        and surfaces on the ``recent_errors[]`` entry."""
+        """Every documented reason round-trips through ``_record_error``
+        and surfaces on the ``recent_errors[]`` entry.
+
+        The expected list is enumerated explicitly (not iterated from
+        the frozenset) so a regression that *removes* a reason from
+        ``_RECENT_ERROR_REASONS`` without also removing the documented
+        contract still fails this test — i.e. the test pins the public
+        taxonomy, not just whatever the implementation happens to allow.
+        """
         ls = _fresh_lifespan_state()
-        for reason in (
+        expected = [
+            # Pet-side (set by _run_with_pet)
             "timeout",
             "crashed",
             "memory_exhausted",
             "lock_contended",
             "unavailable",
+            # Validation / lookup
             "validation",
-        ):
+            "not_found",
+            # rocq_check mid-batch
+            "tactic_failed",
+            # rocq_verify-specific
+            "compile_error",
+            "axiom_dependency",
+            "type_mismatch",
+        ]
+        for reason in expected:
             _record_error(ls, f"tool_{reason}", "msg", reason=reason)
         snap = _build_diag_snapshot(ls)
         reasons = [e["reason"] for e in snap["recent_errors"]]
-        assert reasons == [
-            "timeout",
-            "crashed",
-            "memory_exhausted",
-            "lock_contended",
-            "unavailable",
-            "validation",
-        ]
+        assert reasons == expected
 
     def test_record_error_rejects_unknown_reason(self):
         """A typo'd reason must trip the assertion at write time so it
@@ -852,16 +862,27 @@ class TestExtraValidationRecording:
         with pytest.raises(AssertionError, match="unknown error reason"):
             _record_error(ls, "tool_x", "msg", reason="totally_made_up")
 
-    def test_record_error_accepts_every_documented_reason(self):
-        """Every value in ``_RECENT_ERROR_REASONS`` must be accepted —
-        the validator must not reject something the docstring promises
-        the buffer can carry."""
-        ls = _fresh_lifespan_state()
-        for reason in _server._RECENT_ERROR_REASONS:
-            _record_error(ls, "round_trip", "msg", reason=reason)
-        snap = _build_diag_snapshot(ls)
-        recorded = {e["reason"] for e in snap["recent_errors"]}
-        assert recorded == set(_server._RECENT_ERROR_REASONS)
+    def test_documented_reason_set_matches_expected(self):
+        """``_RECENT_ERROR_REASONS`` must equal the documented set —
+        not a superset (silently broadens the contract) or a subset
+        (silently narrows it).  Independent of any test that iterates
+        the frozenset (which would tautologically cover whatever's in
+        it)."""
+        assert _server._RECENT_ERROR_REASONS == frozenset(
+            {
+                "timeout",
+                "crashed",
+                "memory_exhausted",
+                "lock_contended",
+                "unavailable",
+                "validation",
+                "not_found",
+                "tactic_failed",
+                "compile_error",
+                "axiom_dependency",
+                "type_mismatch",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

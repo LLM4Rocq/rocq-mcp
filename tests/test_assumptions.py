@@ -268,7 +268,11 @@ class TestRunAssumptions:
 
     @pytest.mark.asyncio
     async def test_parse_exception_returns_error(self, monkeypatch):
-        """If the raw assumptions parser raises, return error with raw_output."""
+        """If the raw assumptions parser raises, return error with the
+        unified envelope (success/error/reason) and round-trip the
+        failure into recent_errors so rocq_diag surfaces it."""
+        from collections import deque
+
         self._query_result = {
             "success": True,
             "output": "some unparseable garbage",
@@ -280,15 +284,24 @@ class TestRunAssumptions:
 
         monkeypatch.setattr(_verify, "_parse_assumptions_raw", _bad_parse)
 
+        ls = {"recent_errors": deque(maxlen=10)}
         result = await run_assumptions(
             name="thm",
             file="test.v",
             workspace="/tmp",
-            lifespan_state={},
+            lifespan_state=ls,
         )
         assert result["success"] is False
+        assert result["reason"] == "crashed"
         assert "parse" in result["error"].lower()
         assert "raw_output" in result
+        # The same reason must reach recent_errors.
+        recorded = [
+            e
+            for e in ls["recent_errors"]
+            if e.get("tool") == "rocq_assumptions" and e.get("reason") == "crashed"
+        ]
+        assert len(recorded) == 1
 
     @pytest.mark.asyncio
     async def test_no_classification_fields_on_success(self):

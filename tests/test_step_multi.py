@@ -493,6 +493,57 @@ class TestStepMultiReal:
         assert "pet_restarted" not in result
         assert "tactic failed" in result["error"]
 
+    def test_per_tactic_failure_tags_reason_tactic_failed(self):
+        """A per-tactic PetanqueError (tactic was rejected by Coq, pet
+        still alive) must tag the entry with reason="tactic_failed" so
+        agents can dispatch on it the same way they do on rocq_check
+        mid-batch failures — not just `{success: False, error}`."""
+        from pytanque import PetanqueError
+
+        from rocq_mcp.interactive import run_step_multi, _state_add
+
+        parent_state = _make_mock_state(proof_finished=False)
+        _state_add(
+            state=parent_state,
+            file="test.v",
+            theorem="t",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+
+        # Build a mock pet whose .run raises a live PetanqueError.
+        err = PetanqueError.__new__(PetanqueError)
+        err.message = "Reference omega_bad_tactic not found."
+        mock_alive_pet = MagicMock()
+        mock_alive_pet.process = MagicMock()
+        mock_alive_pet.process.poll = MagicMock(return_value=None)
+        mock_alive_pet.run = MagicMock(side_effect=err)
+
+        lifespan_state = {
+            "pet_client": mock_alive_pet,
+            "pet_timeout": 30.0,
+            "current_workspace": "/tmp",
+        }
+
+        with patch("rocq_mcp.server._ensure_pet", return_value=mock_alive_pet):
+            result = asyncio.run(
+                run_step_multi(
+                    tactics=["omega_bad_tactic.", "lia."],
+                    lifespan_state=lifespan_state,
+                )
+            )
+
+        # Top-level call succeeds — step_multi's contract is "try them
+        # all and report each result"; only transport failures abort.
+        assert result["success"] is True
+        assert len(result["results"]) == 2
+        for entry in result["results"]:
+            assert entry["success"] is False
+            assert entry["reason"] == "tactic_failed"
+            assert "error" in entry
+
 
 # ---------------------------------------------------------------------------
 # TestStepMultiIntegration: integration tests (require pet)

@@ -82,13 +82,16 @@ async def _capture_compile_error_state(
     "state": <dict|None>}``.  ``state`` is the captured state dict on
     ``"ok"`` / ``"outside_proof"``, ``None`` otherwise.
     """
-    # Lazy import: defensive against a future split where rocq_mcp.interactive
-    # becomes optional. In current packaging this branch is unreachable; the
-    # realistic "unavailable" case fires from _run_with_pet via
-    # reason="unavailable".
+    # Function-body import: serves two purposes.  (1) Tests monkeypatch
+    # ``capture_position_state`` on ``rocq_mcp.interactive`` and need a
+    # fresh attribute lookup each call — a module-level import would
+    # freeze the reference at load time and bypass the monkeypatch.
+    # (2) The ``except ImportError`` branch is exercised by
+    # ``test_status_unavailable_when_import_fails`` (simulating an
+    # interactive-module load failure) and surfaces ``"unavailable"``
+    # gracefully instead of crashing the enrichment path.
     try:
-        from rocq_mcp.interactive import capture_position_state as _cps
-        from rocq_mcp.interactive import _state_remove
+        from rocq_mcp.interactive import _state_remove, capture_position_state
     except ImportError:
         return {"status": "unavailable", "state": None}
 
@@ -117,7 +120,7 @@ async def _capture_compile_error_state(
 
     try:
         try:
-            state_result = await _cps(
+            state_result = await capture_position_state(
                 file=file_label,
                 resolved_file=lookup_file,
                 workspace=workspace,

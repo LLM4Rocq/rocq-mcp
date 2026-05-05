@@ -2666,6 +2666,115 @@ class TestVerifyEnvelopeContract:
         assert result["success"] is False
         assert result.get("reason") == "validation"
 
+    async def test_pet_restarted_failure_not_double_recorded(
+        self, workspace, monkeypatch
+    ):
+        """When Phase 2's pet toc lookup crashes, ``_run_with_pet`` records
+        ``rocq_verify/crashed`` into recent_errors and returns a
+        ``pet_restarted: True`` envelope.  ``run_verify`` propagates that
+        envelope; the wrapper used to record it AGAIN, producing two
+        entries for one call with conflicting attribution.  The wrapper
+        must skip its own _record_error when ``pet_restarted`` is set."""
+        from collections import deque
+
+        from rocq_mcp.server import rocq_verify
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        # Pre-populate the buffer with the entry _run_with_pet would
+        # have recorded inside _extract_problem_structure.
+        ls = {"recent_errors": deque(maxlen=10)}
+        ls["recent_errors"].append(
+            {
+                "tool": "rocq_verify",
+                "message": "Pet process died: <foo>",
+                "reason": "crashed",
+                "occurred_at": 0.0,
+            }
+        )
+
+        async def fake_run_verify(**kwargs):
+            return {
+                "success": False,
+                "error": "Pet process died: <foo>",
+                "reason": "crashed",
+                "pet_restarted": True,
+            }
+
+        monkeypatch.setattr(_server, "run_verify", fake_run_verify)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+
+        await rocq_verify(
+            proof="x",
+            problem_name="t",
+            problem_statement="Theorem t : True. Admitted.",
+            workspace=str(workspace),
+            ctx=_MockContext(ls),
+        )
+
+        # Buffer must still have exactly the one prior entry.
+        assert len(ls["recent_errors"]) == 1
+        only = ls["recent_errors"][0]
+        assert only["tool"] == "rocq_verify"
+        assert only["reason"] == "crashed"
+
+    async def test_axiom_dependency_round_trips_into_recent_errors(
+        self, workspace, admitted_proof, simple_problem_statement
+    ):
+        """End-to-end: an admit-dependent proof fails with
+        reason="axiom_dependency" AND records that into recent_errors
+        so rocq_diag surfaces it.  compile.py writes the response
+        reason but never calls _record_error itself — the wrapper does.
+        Without this test, a refactor that drops the wrapper's
+        recording would only break rocq_diag, not the response, and
+        the existing TestVerifyEnvelopeContract assertions would
+        still pass."""
+        from rocq_mcp.server import rocq_verify
+        from tests.conftest import _MockContext, make_lifespan_state
+
+        ls = make_lifespan_state(full=True)
+        result = await rocq_verify(
+            proof=admitted_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+            ctx=_MockContext(ls),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "axiom_dependency"
+        recorded = [
+            e
+            for e in ls["recent_errors"]
+            if e.get("tool") == "rocq_verify" and e.get("reason") == "axiom_dependency"
+        ]
+        assert len(recorded) == 1
+
+    async def test_compile_error_round_trips_into_recent_errors(
+        self, workspace, cheating_proof, simple_problem_statement
+    ):
+        """Same shape for compile_error: type-redefinition cheat fails
+        Phase 1 build, surfaces reason="compile_error" on the response,
+        and lands in recent_errors under that reason."""
+        from rocq_mcp.server import rocq_verify
+        from tests.conftest import _MockContext, make_lifespan_state
+
+        ls = make_lifespan_state(full=True)
+        result = await rocq_verify(
+            proof=cheating_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+            ctx=_MockContext(ls),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "compile_error"
+        recorded = [
+            e
+            for e in ls["recent_errors"]
+            if e.get("tool") == "rocq_verify" and e.get("reason") == "compile_error"
+        ]
+        assert len(recorded) == 1
+
 
 # ---------------------------------------------------------------------------
 # Shared-defs integration tests (Phase 2 template + coqc)

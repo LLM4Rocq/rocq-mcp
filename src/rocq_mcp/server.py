@@ -888,29 +888,25 @@ async def _build_memory_abort_response(
 ) -> dict[str, Any]:
     """Run the memory-abort recovery path and return the response dict.
 
-    Mirrors the timeout recovery: invalidate pet, release the lock, fire
-    ``on_timeout``, merge ``partial_state``.  Reason ``"memory_exhausted"``
-    discriminates from timeout/crashed; no separate boolean flag.
+    Thin wrapper around :func:`_handle_pet_failure` that supplies the
+    memory-specific error message; the recovery scaffold (invalidate
+    pet, release lock, fire on_timeout, merge partial, record error)
+    is shared with every other killed-pet path.
     """
-    _invalidate_pet(lifespan_state)
-    await _force_release_pet_lock()
-    if on_timeout:
-        on_timeout()
-    resp: dict[str, Any] = {
-        "success": False,
-        "error": (
+    return await _handle_pet_failure(
+        lifespan_state,
+        tool,
+        reason="memory_exhausted",
+        error=(
             f"{tool} aborted: pet RSS exceeded "
             f"{ROCQ_MAX_PET_RSS_MB} MB. The proof state was lost; "
             "pet has been restarted. Retry with a smaller term, "
             "avoid vm_compute on large inputs, or split the work."
         ),
-        "pet_restarted": True,
-        "reason": "memory_exhausted",
-    }
-    if partial_state:
-        _merge_partial_state(resp, partial_state)
-    _record_error(lifespan_state, tool, resp["error"], reason="memory_exhausted")
-    return resp
+        killed_pet=True,
+        on_timeout=on_timeout,
+        partial_state=partial_state,
+    )
 
 
 async def _memory_watchdog(
@@ -1415,14 +1411,18 @@ async def rocq_verify(
         lifespan_state=ctx.lifespan_context if ctx else None,
     )
     # Record verification failures (success=False with an error message)
-    # so rocq_diag surfaces them.  Successful verifications and pet-level
-    # crashes routed through run_verify -> _run_with_pet are already
-    # recorded inside that helper.
+    # so rocq_diag surfaces them.  Pet-level crashes routed through
+    # run_verify -> _run_with_pet (Phase 2 toc lookup) are already
+    # recorded inside that helper, so skip when ``pet_restarted=True``
+    # to avoid the double-record bug — the prior entry already carries
+    # tool="rocq_verify" with the right reason because _extract_problem_structure
+    # passes that tool name to _run_with_pet.
     if (
         ctx is not None
         and isinstance(result, dict)
         and result.get("success") is False
         and result.get("error")
+        and not result.get("pet_restarted")
     ):
         _record_error(
             ctx.lifespan_context,

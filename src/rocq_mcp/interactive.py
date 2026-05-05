@@ -747,9 +747,17 @@ async def run_assumptions(
     try:
         pairs = _parse_assumptions_raw(raw_output)
     except Exception as e:
+        # Parser blew up on Print Assumptions output we didn't expect
+        # (future Rocq format change, unusual identifier shape, …).
+        # Tag as "crashed" because the failure is below our layer; the
+        # alternatives (validation, not_found) don't fit — this isn't
+        # user input that failed validation.
+        msg = f"Failed to parse assumptions output: {e}"
+        _server._record_error(lifespan_state, "rocq_assumptions", msg, reason="crashed")
         return {
             "success": False,
-            "error": f"Failed to parse assumptions output: {e}",
+            "reason": "crashed",
+            "error": msg,
             "raw_output": raw_output,
         }
     return {
@@ -1878,7 +1886,13 @@ async def run_step_multi(
                 # If pet died, re-raise so outer handler detects it.
                 if not _server._pet_alive(lifespan_state.get("pet_client")):
                     raise
+                # Tag the same reason rocq_check uses for mid-batch
+                # failures so an agent dispatcher can treat per-tactic
+                # entries with a uniform key.  The tactic was rejected
+                # by Coq (live PetanqueError, pet still alive) — not a
+                # transport-level crash.
                 entry_dict["success"] = False
+                entry_dict["reason"] = "tactic_failed"
                 entry_dict["error"] = e.message
 
             partial_state["partial_results"].append(entry_dict)

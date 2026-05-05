@@ -693,6 +693,13 @@ _KNOWN_SAFE_AXIOMS: set[str] = {
     # --- Primitive strings (PrimString) ---
     "string",  # Set (primitive type)
     "cat",  # string -> string -> string
+    # --- mathcomp.classical-specific short names ---
+    # mathcomp re-exports most standard axioms (functional_extensionality_dep,
+    # propositional_extensionality, etc.) under their stdlib short names,
+    # which are already covered above.  These three are mathcomp-specific.
+    "EM",  # excluded middle (boolp)
+    "pselect",  # forall P, {P} + {~P}                       (boolp)
+    "cid",  # constructive indefinite description           (boolp)
 }
 
 # Standard library module prefixes. Axioms qualified with these are safe.
@@ -722,6 +729,13 @@ _STDLIB_MODULE_PREFIXES: tuple[str, ...] = (
     "PrimString.",  # string, cat, length, compare
     "FloatOps.",  # float operation specs
     "FloatAxioms.",  # float axiom specs
+    # mathcomp.classical (commonly used by analysis/finmap proofs;
+    # re-exports stdlib axioms under their stdlib short names plus a
+    # few mathcomp-specific short names: EM, pselect, cid).
+    "mathcomp.classical.boolp.",
+    "mathcomp.classical.classical_sets.",
+    "boolp.",  # short form sometimes emitted without the mathcomp.classical. prefix
+    "classical_sets.",
 )
 
 

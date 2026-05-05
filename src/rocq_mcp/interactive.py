@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -54,6 +55,10 @@ _MAX_GOALS_LENGTH: int = 8000  # Max chars for formatted goals output
 _MAX_GOALS_SHOWN: int = 10  # Max number of goals to format
 _MAX_FEEDBACK_LENGTH: int = 50_000  # Max chars per feedback step
 _MAX_TOTAL_FEEDBACK: int = 200_000  # Max total chars across all feedback steps
+# Max line / character index accepted by ``rocq_start`` in by-position
+# mode.  100k is well above any realistic .v file (a 100k-line file
+# would be ~3 MB of source and far past any practical Coq build).
+_MAX_LINE_CHAR_RANGE: int = 100_000
 
 # LSP DiagnosticSeverity: 1=Error, 2=Warning, 3=Information, 4=Hint.
 # See coq-lsp 0.2.5+9.1: lang/diagnostic.ml.
@@ -542,6 +547,7 @@ async def run_query(
 
     def _do_query(pet: Any) -> dict[str, Any]:
         from_state_id: int | None = None
+        stale_warning: str | None = None
         if from_state is not None:
             entry, base_id, err = _resolve_check_base_state(from_state)
             if err or entry is None:
@@ -552,6 +558,12 @@ async def run_query(
                 )
             state = entry.state
             from_state_id = base_id
+            # Match the staleness check rocq_check does: a query against
+            # a state whose backing file changed on disk would resolve
+            # symbols against the new file's environment.  Surface a
+            # warning so the agent knows the state may not match the
+            # source they're reading.
+            stale_warning = _check_staleness(entry)
         elif file:
             try:
                 state = _get_file_end_state(pet, file, workspace, lifespan_state)
@@ -595,6 +607,8 @@ async def run_query(
         resp: dict[str, Any] = {"success": True, "output": output or "(no output)"}
         if from_state_id is not None:
             resp["from_state_id"] = from_state_id
+        if stale_warning:
+            resp["stale_warning"] = stale_warning
         return resp
 
     return await _server._run_with_pet(
@@ -619,7 +633,9 @@ async def run_assumptions(
     """Core implementation of rocq_assumptions (testable without FastMCP Context).
 
     Runs ``Print Assumptions <name>.`` via :func:`run_query` in file mode
-    and classifies the result using :func:`verify.parse_and_classify_assumptions`.
+    and returns the parsed assumption list verbatim.  No classification —
+    the agent decides what's safe to trust.  (``rocq_verify`` keeps its
+    sandboxed classifier; this tool is pure introspection.)
 
     The *file* parameter is required — it provides the ``.v`` file where the
     theorem is defined, so the query runs in a context where all definitions
@@ -630,42 +646,11 @@ async def run_assumptions(
 
         * ``success``           — bool.
         * ``theorem``           — the cleaned theorem name.
-        * ``admitted``          — list[str] of names the caller has externally
-          identified as ``Admitted``/``admit``.  **Currently always ``[]``**
-          in this flow: ``Print Assumptions`` does not distinguish
-          ``Admitted`` from ``Axiom``/``Parameter``/``Conjecture``; populating
-          this list is deferred to a later phase that cross-references the
-          source file.  **Do not treat empty ``admitted`` as evidence of an
-          admit-free proof.**
-        * ``classical_axioms``  — list[str] of axiom names matched against a
-          static whitelist of classical-logic axioms (``Excluded_middle``,
-          ``FunctionalExtensionality``, ``ProofIrrelevance``, primitive
-          ints/floats/arrays/strings, …).  Match is by **exact qualified
-          name**; user-defined axioms with whitelisted names (e.g. a custom
-          ``classic`` outside ``Coq.Logic.Classical_Prop``) would currently
-          be auto-trusted.
-        * ``user_axioms``       — list[str] of non-classical axioms *not* known
-          to be admits.  Anything user-declared (``Axiom``, ``Parameter``,
-          ``Conjecture``) outside the whitelist lands here, and so do
-          ``Admitted`` lemmas (until ``admitted`` is populated by a future
-          phase).
-
-        **Trusted closed proof**: ``not user_axioms and not admitted`` (with
-        ``classical_axioms`` allowed if you accept classical logic).
-
-        * ``assumptions``       — detailed list of axiom strings (legacy
-          shape: classified as ``standard``-only or ``suspicious`` per
-          ``verdict``).
-        * ``standard_assumptions`` — present when ``verdict == "suspicious"``
-          and there are also classical axioms in the cone.
+        * ``assumptions``       — list[str] of ``"name : type"`` pairs from
+          ``Print Assumptions``.  Empty when the theorem is closed.
         * ``raw_output``        — full raw ``Print Assumptions`` output.
-
-    Notes:
-        ``verdict`` is **DEPRECATED**; prefer the structured lists above.
-        See :func:`rocq_mcp.verify.parse_and_classify_assumptions` for the
-        deprecation predicates.
     """
-    from rocq_mcp.verify import is_rocq_qualified_name, parse_and_classify_assumptions
+    from rocq_mcp.verify import _parse_assumptions_raw, is_rocq_qualified_name
 
     # Validate file parameter
     if not file or not file.strip():
@@ -724,12 +709,8 @@ async def run_assumptions(
                 workspace=workspace,
                 lifespan_state=lifespan_state,
             )
+            _attach_available_in_file(query_result, result)
             if result.names:
-                query_result["available_in_file"] = result.names
-                if result.truncated:
-                    query_result["available_in_file_truncated"] = True
-                    query_result["available_in_file_total"] = result.total
-                    query_result["available_in_file_limit"] = _DEFAULT_TOC_LIMIT
                 # Non-empty names means the file IS valid; the failure
                 # was about the requested name (a typo).  Re-record as
                 # ``not_found`` so ``rocq_diag`` reports it correctly
@@ -747,32 +728,19 @@ async def run_assumptions(
 
     raw_output = query_result["output"]
     try:
-        verdict, details = parse_and_classify_assumptions(raw_output)
+        pairs = _parse_assumptions_raw(raw_output)
     except Exception as e:
         return {
             "success": False,
             "error": f"Failed to parse assumptions output: {e}",
             "raw_output": raw_output,
         }
-    result: dict[str, Any] = {
+    return {
         "success": True,
         "theorem": clean_name,
-        # DEPRECATED: prefer the structured lists below.  See docstring.
-        "verdict": verdict,
-        # Categorized name lists (additive, Phase 1 of the v2 plan).
-        "admitted": details.get("admitted", []),
-        "classical_axioms": details.get("classical_axioms", []),
-        "user_axioms": details.get("user_axioms", []),
+        "assumptions": [f"{name} : {ty}" for name, ty in pairs],
         "raw_output": raw_output,
     }
-    if verdict == "closed":
-        result["assumptions"] = []
-    elif verdict == "standard_only":
-        result["assumptions"] = details.get("standard", [])
-    else:
-        result["assumptions"] = details.get("suspicious", [])
-        result["standard_assumptions"] = details.get("standard", [])
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -811,23 +779,92 @@ _TOC_CACHE: dict[tuple[str, float], list[str]] = {}
 _TOC_CACHE_MAX: int = 50
 
 
-def _collect_toc_names(toc_result: Any) -> list[str]:
-    """Flatten a ``pet.toc`` tree into the list of top-level definition names.
+# pet.toc flattens Module hierarchy: members of `Module M.` are emitted at
+# top level with their bare name (`foo`), not the addressable qualified
+# form (`M.foo`).  We reconstruct the path by scanning the source for
+# `Module X.` / `End X.` lines and intersecting with each element's range.
+# Sections do NOT introduce a namespace qualifier in Coq, so they are
+# excluded from the prefix.  Module Type DOES qualify members.
+_MODULE_OPEN_RE = re.compile(r"^\s*Module\s+(?:Type\s+)?([A-Z][A-Za-z0-9_']*)\b")
+_MODULE_END_RE = re.compile(r"^\s*End\s+([A-Z][A-Za-z0-9_']*)\s*\.")
+
+
+def _scan_module_regions(source: str) -> list[tuple[int, int, str]]:
+    """Return ``(start_line, end_line, name)`` for each Module/Module Type
+    block in *source*.  Lines are 0-based to match coq-lsp ranges.
+
+    Comment- and string-safe via :func:`verify._neutralize_for_regex`
+    (length-preserving so line numbers survive).  A region is emitted
+    only when the matching ``End <Name>.`` is seen — declarative
+    one-liners like ``Module M : MT.`` produce no enclosing region.
+    """
+    from rocq_mcp.verify import _neutralize_for_regex
+
+    cleaned = _neutralize_for_regex(source)
+    open_stack: list[tuple[int, str]] = []
+    regions: list[tuple[int, int, str]] = []
+    for i, line in enumerate(cleaned.split("\n")):
+        m = _MODULE_OPEN_RE.match(line)
+        if m:
+            open_stack.append((i, m.group(1)))
+            continue
+        e = _MODULE_END_RE.match(line)
+        if e and open_stack:
+            top_line, top_name = open_stack[-1]
+            if top_name == e.group(1):
+                open_stack.pop()
+                regions.append((top_line, i, top_name))
+    return regions
+
+
+def _module_prefix_for_line(regions: list[tuple[int, int, str]], line: int) -> str:
+    """Return the dot-prefix for an element at *line* (0-based).
+
+    For nested ``Module Outer. Module Inner. … End Inner. End Outer.``,
+    a definition inside ``Inner`` returns ``"Outer.Inner."``.  Returns
+    the empty string when *line* is outside every region.
+    """
+    enclosing = [(s, name) for (s, e, name) in regions if s < line < e]
+    if not enclosing:
+        return ""
+    enclosing.sort(key=lambda r: r[0])
+    return ".".join(name for _, name in enclosing) + "."
+
+
+def _collect_toc_names(toc_result: Any, source: str = "") -> list[str]:
+    """Flatten a ``pet.toc`` tree into a list of addressable definition names.
 
     ``pet.toc`` returns ``list[(section_name, list[TocElement])]``; each
     element has ``elem.name.v`` (the identifier) plus optional nested
-    ``children`` (e.g. tactics under a Theorem, definitions inside a Section).
-    Returns every named element encountered, including inside nested
-    children — the LLM consumer wants the full set of identifiers visible
-    from the file scope, not just one indentation level.
+    ``children``.
+
+    Filters Notation/Infix entries: their ``name.v`` is a syntax key
+    like ``"x + y"``, useless as a ``name=`` argument to subsequent
+    calls.
+
+    When *source* is provided, qualifies Module members by prefixing
+    them with the enclosing path (``foo`` → ``Outer.Inner.foo``).  Pet
+    flattens Module structure away in its own output; we reconstruct
+    it from the source using element line ranges.  Without *source*,
+    returns bare names (callers like the unit tests pass mocked
+    elements with no real source attached).
     """
+    from rocq_mcp.verify import _NOTATION_DETAILS
+
+    regions = _scan_module_regions(source) if source else []
     names: list[str] = []
 
     def _walk(elements: list[Any]) -> None:
         for elem in elements:
+            detail = getattr(elem, "detail", "") or ""
+            if detail in _NOTATION_DETAILS:
+                continue
             name = elem.name.v if elem.name else None
             if name:
-                names.append(name)
+                prefix = ""
+                if regions and elem.range is not None:
+                    prefix = _module_prefix_for_line(regions, elem.range.start.line)
+                names.append(f"{prefix}{name}")
             if elem.children:
                 _walk(elem.children)
 
@@ -838,7 +875,7 @@ def _collect_toc_names(toc_result: Any) -> list[str]:
 
 
 def _toc_names_cached(pet: Any, resolved_file: str) -> list[str]:
-    """Return sorted top-level names in ``resolved_file`` via ``pet.toc``,
+    """Return sorted addressable names in ``resolved_file`` via ``pet.toc``,
     cached by ``(file, mtime)``.
 
     Returns an empty list on any error (best-effort enrichment) and does
@@ -855,7 +892,11 @@ def _toc_names_cached(pet: Any, resolved_file: str) -> list[str]:
         return _TOC_CACHE[key]
     try:
         toc_result = pet.toc(resolved_file)
-        names = sorted(_collect_toc_names(toc_result))
+        try:
+            source = Path(resolved_file).read_text()
+        except OSError:
+            source = ""
+        names = sorted(_collect_toc_names(toc_result, source=source))
     except Exception:
         # Do not cache failures: caller will retry next time.
         return []
@@ -923,6 +964,23 @@ class _AvailableInFile(NamedTuple):
     names: list[str]
     truncated: bool
     total: int
+
+
+def _attach_available_in_file(resp: dict[str, Any], result: _AvailableInFile) -> None:
+    """Add ``available_in_file*`` recovery hints to a failure response.
+
+    No-op when *result* is empty (the helper returned no names — keeps
+    the failure response unchanged).  Used by both ``run_assumptions``
+    and ``_build_theorem_start_result`` so the enrichment shape is
+    identical across the two not-found flows.
+    """
+    if not result.names:
+        return
+    resp["available_in_file"] = result.names
+    if result.truncated:
+        resp["available_in_file_truncated"] = True
+        resp["available_in_file_total"] = result.total
+        resp["available_in_file_limit"] = _DEFAULT_TOC_LIMIT
 
 
 async def _fetch_available_in_file(
@@ -1159,28 +1217,18 @@ def _build_theorem_start_result(
         if _PetanqueError is not None and isinstance(e, _PetanqueError):
             if not _server._pet_alive(lifespan_state.get("pet_client")):
                 raise
-            available: list[str] = []
-            truncated = False
-            total = 0
             try:
                 all_names = _toc_names_cached(pet, resolved_file)
-                total = len(all_names)
-                available, truncated = _truncate_names(all_names)
+                capped, truncated = _truncate_names(all_names)
+                avail = _AvailableInFile(capped, truncated, len(all_names))
             except Exception:
-                available = []
-                truncated = False
-                total = 0
+                avail = _AvailableInFile([], False, 0)
             resp: dict[str, Any] = {
                 "success": False,
                 "error": e.message,
                 "reason": "not_found",
             }
-            if available:
-                resp["available_in_file"] = available
-                if truncated:
-                    resp["available_in_file_truncated"] = True
-                    resp["available_in_file_total"] = total
-                    resp["available_in_file_limit"] = _DEFAULT_TOC_LIMIT
+            _attach_available_in_file(resp, avail)
             _server._record_error(
                 lifespan_state, "rocq_start", e.message, reason="not_found"
             )
@@ -1328,11 +1376,13 @@ async def run_start(
         )
 
     if _start_by_pos:
-        if not (0 <= line <= 100000) or not (0 <= character <= 100000):
+        if not (0 <= line <= _MAX_LINE_CHAR_RANGE) or not (
+            0 <= character <= _MAX_LINE_CHAR_RANGE
+        ):
             return _server._fail(
                 lifespan_state,
                 "rocq_start",
-                "line and character must be in range [0, 100000].",
+                f"line and character must be in range [0, {_MAX_LINE_CHAR_RANGE}].",
             )
 
     # Path traversal + existence check (early validation before entering thread)
@@ -1401,9 +1451,15 @@ def _build_check_failure_dict(
     feedback_pairs: list[list[str]],
     stale_warning: str | None,
 ) -> dict[str, Any]:
-    """Assemble the result dict for a mid-batch ``run_check`` failure."""
+    """Assemble the result dict for a mid-batch ``run_check`` failure.
+
+    Tags ``reason="tactic_failed"`` so the unified envelope is consistent:
+    agents can programmatically distinguish "your tactic was rejected by
+    Coq" from a transport-level ``"crashed"`` (pet died) or ``"timeout"``.
+    """
     result: dict[str, Any] = {
         "success": False,
+        "reason": "tactic_failed",
         "error": error_message,
         "failed_command": failed_command,
         "command_index": command_index,
@@ -1430,7 +1486,7 @@ def _build_check_success_dict(
     commands_run: int,
     check_time_ms: int,
     state_id: int,
-    parent_state_id: int,
+    from_state_id: int,
     feedback_pairs: list[list[str]],
     stale_warning: str | None,
     complete: Any,
@@ -1443,7 +1499,7 @@ def _build_check_success_dict(
         "commands_run": commands_run,
         "check_time_ms": check_time_ms,
         "state_id": state_id,
-        "parent_state_id": parent_state_id,
+        "from_state_id": from_state_id,
     }
     if feedback_pairs:
         result["feedback"] = feedback_pairs
@@ -1512,7 +1568,7 @@ async def run_check(
             "success": True,
             "commands_run": 0,
             "state_id": base_state_id,
-            "parent_state_id": base_state_id,
+            "from_state_id": base_state_id,
             "goals": "",
             "proof_finished": entry.proof_finished,
             "check_time_ms": 0,
@@ -1626,7 +1682,7 @@ async def run_check(
             commands_run=len(commands),
             check_time_ms=int(elapsed * 1000),
             state_id=prev_state_id,
-            parent_state_id=base_state_id,
+            from_state_id=base_state_id,
             feedback_pairs=feedback_pairs,
             stale_warning=stale_warning,
             complete=complete,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -240,3 +241,62 @@ def multiline_import_proof():
         "Theorem test : forall n : nat, n + 0 = n.\n"
         "Proof. lia. Qed.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared mock helpers (used across pet-touching test suites)
+# ---------------------------------------------------------------------------
+
+
+def make_lifespan_state(pet_timeout: float = 30.0) -> dict:
+    """Build a minimal lifespan_state dict for tests that drive run_* helpers
+    directly.  Mirrors the subset of ``app_lifespan``'s schema that the core
+    pet-touching helpers actually read."""
+    return {
+        "pet_client": None,
+        "pet_timeout": pet_timeout,
+        "current_workspace": None,
+    }
+
+
+def mock_pet(pid: int = 12345, alive: bool = True) -> MagicMock:
+    """Minimal mock pet client whose ``.process`` has a pid and a poll() —
+    just enough surface for ``_pet_alive`` and ``_sample_pet_rss_mb`` to
+    exercise their happy paths.  Test files used to define this verbatim
+    (test_diag.py / test_memory_watchdog.py)."""
+    m = MagicMock()
+    m.process = MagicMock()
+    m.process.pid = pid
+    m.process.poll.return_value = None if alive else 1
+    m.process.stdin = None
+    m.process.stdout = None
+    m.process.stderr = None
+    m._own_pgrp = False
+    return m
+
+
+class _FakeMemoryInfo:
+    def __init__(self, rss: int) -> None:
+        self.rss = rss
+
+
+class FakePsutilProcess:
+    """Stand-in for ``psutil.Process`` returning a fixed RSS in bytes."""
+
+    def __init__(self, rss_bytes: int) -> None:
+        self._rss = rss_bytes
+
+    def memory_info(self) -> _FakeMemoryInfo:
+        return _FakeMemoryInfo(self._rss)
+
+
+def patch_psutil_rss(monkeypatch, rss_mb: int) -> None:
+    """Make ``psutil.Process(pid)`` return a fake process with the given RSS."""
+    import psutil
+
+    rss_bytes = rss_mb * 1024 * 1024
+
+    def _factory(pid: int) -> FakePsutilProcess:
+        return FakePsutilProcess(rss_bytes)
+
+    monkeypatch.setattr(psutil, "Process", _factory)

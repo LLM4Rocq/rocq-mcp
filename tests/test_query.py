@@ -16,11 +16,7 @@ from tests.conftest import PET_AVAILABLE
 _pet_only = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
 
-def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
-    return {
-        "pet_client": None,
-        "pet_timeout": pet_timeout,
-    }
+from tests.conftest import make_lifespan_state as _make_lifespan_state  # noqa: E402
 
 
 @pytest.fixture
@@ -1100,3 +1096,127 @@ class TestQueryFromStateIntegration:
         assert result["success"] is True
         # Parent's pet state object identity preserved; entry untouched.
         assert _state_table[sid].state is parent_pet_state_before
+
+    @pytest.mark.asyncio
+    async def test_from_state_surfaces_stale_warning_when_file_changed(
+        self, workspace, lifespan_state
+    ):
+        """If the .v file backing a session is modified after rocq_start,
+        a subsequent from_state query must surface ``stale_warning`` so
+        the agent knows the proof state may not match the current
+        source — same contract as rocq_check."""
+        from rocq_mcp.interactive import _state_table, run_start
+
+        vfile = Path(workspace) / "stale_query.v"
+        vfile.write_text("Theorem stale_thm : True.\nProof. exact I. Qed.\n")
+
+        start = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="stale_thm",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert start["success"] is True
+        sid = start["state_id"]
+
+        # Mutate the file's mtime (simulate an out-of-band edit).
+        entry = _state_table[sid]
+        assert entry.file_mtime is not None
+        entry.file_mtime = entry.file_mtime - 100  # pretend session is older
+
+        result = await run_query(
+            command="Check Nat.add.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+            from_state=sid,
+        )
+        assert result["success"] is True
+        assert "stale_warning" in result
+        assert "modified" in result["stale_warning"].lower()
+
+
+# ---------------------------------------------------------------------------
+# LSP DiagnosticSeverity wire convention (Audit finding #2)
+# ---------------------------------------------------------------------------
+
+
+@_pet_only
+class TestLspSeverityWire:
+    """Pin pet's feedback severity convention at the wire boundary.
+
+    pet emits feedback as ``List[Tuple[int, str]]``.  Our filter
+    (``_extract_feedback`` / ``run_query``) treats integer ``2`` as
+    LSP DiagnosticSeverity.Warning.  If pet ever switched to Coq's
+    ``Feedback.level`` enum (where 2 means Notice, 3 means Info), the
+    filter would silently drop the wrong messages.
+
+    These tests trigger a real Rocq deprecation warning
+    (``From Coq Require Import …`` is deprecated in Rocq 9.x in favor
+    of ``From Stdlib Require Import …``) and verify both that the wire
+    integer is 2 *and* that the ``include_warnings=False`` filter
+    actually drops it end-to-end.
+    """
+
+    @pytest.fixture
+    def lifespan_state(self):
+        from rocq_mcp.server import _invalidate_pet
+
+        state = _make_lifespan_state()
+        yield state
+        _invalidate_pet(state)
+
+    @pytest.mark.asyncio
+    async def test_warning_level_is_lsp_severity_2(self, workspace, lifespan_state):
+        """Direct pet probe: state.feedback for a deprecation must be (2, msg)."""
+        from rocq_mcp.server import _ensure_pet, _set_workspace_if_needed
+        from rocq_mcp.interactive import _get_or_create_import_state
+
+        pet = _ensure_pet(lifespan_state)
+        _set_workspace_if_needed(pet, str(workspace), lifespan_state)
+        # Empty initial state — no preamble cached.
+        state = _get_or_create_import_state(pet, str(workspace), [], lifespan_state)
+        # Run a deprecated import directly — feedback on the resulting state
+        # must contain the warning at LSP severity 2.
+        state = pet.run(state, "From Coq Require Import Arith.")
+        levels = [lvl for lvl, _ in (state.feedback or [])]
+        assert 2 in levels, (
+            f"Expected LSP severity 2 (Warning) in feedback levels {levels!r}; "
+            "if pet ever switched to Coq Feedback.level enum (Notice=2 / "
+            "Info=3), this test pins the convention."
+        )
+        warning_msgs = [msg for lvl, msg in (state.feedback or []) if lvl == 2]
+        joined = " ".join(warning_msgs).lower()
+        assert "deprecat" in joined or "from stdlib" in joined or "warning" in joined
+
+    @pytest.mark.asyncio
+    async def test_include_warnings_false_drops_real_warning(
+        self, workspace, lifespan_state
+    ):
+        """End-to-end: include_warnings=False must drop the real Rocq warning
+        from rocq_query output, validating that the level==2 filter targets
+        the right messages."""
+        with_warn = await run_query(
+            command="From Coq Require Import Arith.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+            include_warnings=True,
+        )
+        assert with_warn["success"] is True
+        # Warning text must surface when include_warnings=True.
+        assert "deprecat" in with_warn["output"].lower() or (
+            "from stdlib" in with_warn["output"].lower()
+        )
+
+        without_warn = await run_query(
+            command="From Coq Require Import Arith.",
+            preamble="",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+            include_warnings=False,
+        )
+        assert without_warn["success"] is True
+        # The deprecation warning must be filtered out.
+        assert "deprecat" not in without_warn["output"].lower()
+        assert "from stdlib" not in without_warn["output"].lower()

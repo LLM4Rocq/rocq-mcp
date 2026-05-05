@@ -1,7 +1,9 @@
 """Tests for the rocq_assumptions tool (run_assumptions).
 
-These tests mock run_query to avoid needing pet — they test the
-classification and result formatting logic only.
+These tests mock run_query to avoid needing pet — they test result
+formatting and the available_in_file enrichment.  rocq_assumptions
+is pure introspection (no classification); the verdict / classification
+fields live on rocq_verify.
 """
 
 from __future__ import annotations
@@ -53,7 +55,6 @@ class TestRunAssumptions:
             lifespan_state={},
         )
         assert result["success"] is True
-        assert result["verdict"] == "closed"
         assert result["assumptions"] == []
 
     @pytest.mark.asyncio
@@ -73,7 +74,7 @@ class TestRunAssumptions:
         assert self._last_query_kwargs["preamble"] == ""
 
     @pytest.mark.asyncio
-    async def test_standard_axioms(self):
+    async def test_classical_axiom_returned_verbatim(self):
         self._query_result = {
             "success": True,
             "output": (
@@ -89,11 +90,11 @@ class TestRunAssumptions:
             lifespan_state={},
         )
         assert result["success"] is True
-        assert result["verdict"] == "standard_only"
         assert len(result["assumptions"]) == 1
+        assert "Coq.Logic.Classical_Prop.classic" in result["assumptions"][0]
 
     @pytest.mark.asyncio
-    async def test_suspicious_axiom(self):
+    async def test_user_axiom_returned_verbatim(self):
         self._query_result = {
             "success": True,
             "output": "Axioms:\nmy_custom_axiom : False",
@@ -105,8 +106,7 @@ class TestRunAssumptions:
             lifespan_state={},
         )
         assert result["success"] is True
-        assert result["verdict"] == "suspicious"
-        assert len(result["assumptions"]) >= 1
+        assert any("my_custom_axiom" in a for a in result["assumptions"])
 
     @pytest.mark.asyncio
     async def test_empty_name(self):
@@ -204,8 +204,8 @@ class TestRunAssumptions:
         assert result["theorem"] == "Nat.add_comm"
 
     @pytest.mark.asyncio
-    async def test_mixed_axioms(self):
-        """Both standard and suspicious axioms should be classified correctly."""
+    async def test_mixed_axioms_returned_verbatim(self):
+        """All assumptions appear in the same flat list — no classification."""
         self._query_result = {
             "success": True,
             "output": (
@@ -222,11 +222,18 @@ class TestRunAssumptions:
             lifespan_state={},
         )
         assert result["success"] is True
-        assert result["verdict"] == "suspicious"
-        # Should have suspicious assumptions
-        assert len(result["assumptions"]) >= 1
-        # Should also report standard assumptions
-        assert "standard_assumptions" in result
+        joined = "\n".join(result["assumptions"])
+        assert "Coq.Logic.Classical_Prop.classic" in joined
+        assert "my_custom_axiom" in joined
+        # No classification fields anywhere on the response.
+        for legacy_key in (
+            "verdict",
+            "admitted",
+            "classical_axioms",
+            "user_axioms",
+            "standard_assumptions",
+        ):
+            assert legacy_key not in result
 
     @pytest.mark.asyncio
     async def test_name_with_leading_trailing_whitespace(self):
@@ -261,20 +268,17 @@ class TestRunAssumptions:
 
     @pytest.mark.asyncio
     async def test_parse_exception_returns_error(self, monkeypatch):
-        """If parse_and_classify_assumptions raises, return error with raw_output."""
+        """If the raw assumptions parser raises, return error with raw_output."""
         self._query_result = {
             "success": True,
             "output": "some unparseable garbage",
         }
-        import rocq_mcp.interactive as _int
+        import rocq_mcp.verify as _verify
 
         def _bad_parse(*args, **kwargs):
             raise ValueError("parse failed")
 
-        # Patch the local import inside run_assumptions
-        import rocq_mcp.verify as _verify
-
-        monkeypatch.setattr(_verify, "parse_and_classify_assumptions", _bad_parse)
+        monkeypatch.setattr(_verify, "_parse_assumptions_raw", _bad_parse)
 
         result = await run_assumptions(
             name="thm",
@@ -286,88 +290,10 @@ class TestRunAssumptions:
         assert "parse" in result["error"].lower()
         assert "raw_output" in result
 
-    # --- §1.6: categorized name lists on the response (additive) ---
-
     @pytest.mark.asyncio
-    async def test_categorized_lists_present_when_closed(self):
-        """All three new lists must appear in the response, even when closed."""
-        self._query_result = {
-            "success": True,
-            "output": "Closed under the global context",
-        }
-        result = await run_assumptions(
-            name="thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert result["success"] is True
-        assert result["admitted"] == []
-        assert result["classical_axioms"] == []
-        assert result["user_axioms"] == []
-
-    @pytest.mark.asyncio
-    async def test_categorized_lists_classical_only(self):
-        self._query_result = {
-            "success": True,
-            "output": (
-                "Axioms:\n"
-                "Coq.Logic.Classical_Prop.classic : forall P : Prop, P \\/ ~ P"
-            ),
-        }
-        result = await run_assumptions(
-            name="thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert result["admitted"] == []
-        assert result["classical_axioms"] == ["Coq.Logic.Classical_Prop.classic"]
-        assert result["user_axioms"] == []
-
-    @pytest.mark.asyncio
-    async def test_categorized_lists_user_axiom(self):
-        """A non-whitelist axiom lands in user_axioms (admitted stays empty
-        because Print Assumptions does not distinguish Admitted from Axiom)."""
-        self._query_result = {
-            "success": True,
-            "output": "Axioms:\nmy_custom_axiom : False",
-        }
-        result = await run_assumptions(
-            name="bad_thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert result["admitted"] == []
-        assert result["classical_axioms"] == []
-        assert result["user_axioms"] == ["my_custom_axiom"]
-
-    @pytest.mark.asyncio
-    async def test_categorized_lists_mixed(self):
-        self._query_result = {
-            "success": True,
-            "output": (
-                "Axioms:\n"
-                "Coq.Logic.Classical_Prop.classic"
-                " : forall P : Prop, P \\/ ~ P\n"
-                "my_custom_axiom : False"
-            ),
-        }
-        result = await run_assumptions(
-            name="mixed_thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert result["admitted"] == []
-        assert result["classical_axioms"] == ["Coq.Logic.Classical_Prop.classic"]
-        assert result["user_axioms"] == ["my_custom_axiom"]
-
-    @pytest.mark.asyncio
-    async def test_verdict_field_retained_for_back_compat(self):
-        """Phase 1 is additive only — verdict must still be in the response."""
-        # closed
+    async def test_no_classification_fields_on_success(self):
+        """Confirm rocq_assumptions never emits classifier fields — this is
+        introspection, not a trust decision (rocq_verify owns that)."""
         self._query_result = {
             "success": True,
             "output": "Closed under the global context",
@@ -375,105 +301,14 @@ class TestRunAssumptions:
         r = await run_assumptions(
             name="thm", file="test.v", workspace="/tmp", lifespan_state={}
         )
-        assert "verdict" in r and r["verdict"] == "closed"
-
-        # standard_only
-        self._query_result = {
-            "success": True,
-            "output": (
-                "Axioms:\n"
-                "Coq.Logic.Classical_Prop.classic"
-                " : forall P : Prop, P \\/ ~ P"
-            ),
-        }
-        r = await run_assumptions(
-            name="thm", file="test.v", workspace="/tmp", lifespan_state={}
-        )
-        assert r["verdict"] == "standard_only"
-
-        # suspicious
-        self._query_result = {
-            "success": True,
-            "output": "Axioms:\nmy_custom_axiom : False",
-        }
-        r = await run_assumptions(
-            name="thm", file="test.v", workspace="/tmp", lifespan_state={}
-        )
-        assert r["verdict"] == "suspicious"
-
-    @pytest.mark.asyncio
-    async def test_assumptions_field_retained_for_back_compat(self):
-        """The legacy ``assumptions`` and ``standard_assumptions`` keys must
-        still be populated alongside the new lists."""
-        self._query_result = {
-            "success": True,
-            "output": (
-                "Axioms:\n"
-                "Coq.Logic.Classical_Prop.classic"
-                " : forall P : Prop, P \\/ ~ P\n"
-                "my_custom_axiom : False"
-            ),
-        }
-        result = await run_assumptions(
-            name="thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert "assumptions" in result
-        assert any("my_custom_axiom" in a for a in result["assumptions"])
-        assert "standard_assumptions" in result
-        assert any(
-            "Classical_Prop.classic" in a for a in result["standard_assumptions"]
-        )
-
-    @pytest.mark.asyncio
-    async def test_run_assumptions_propagates_populated_admitted(self, monkeypatch):
-        """Verify run_assumptions surfaces ``admitted`` from the parser, even
-        when populated externally — proves the wiring works once admit
-        detection lands in a future phase.
-
-        Today no caller passes ``admitted_names``, so ``admitted`` is
-        structurally ``[]`` in the production flow.  This test stubs the
-        parser to return a populated list and asserts the tool layer
-        forwards it unchanged into ``result["admitted"]``.
-        """
-        self._query_result = {
-            "success": True,
-            "output": "Axioms:\nfuel_bound_admit : nat -> Prop\nmy_axiom : True",
-        }
-
-        def fake_classify(stdout, admitted_names=None):
-            return (
-                "suspicious",
-                {
-                    "admitted": ["fuel_bound_admit"],
-                    "classical_axioms": [],
-                    "user_axioms": ["my_axiom"],
-                    "standard": [],
-                    "suspicious": [
-                        "my_axiom : True",
-                        "fuel_bound_admit : nat -> Prop",
-                    ],
-                    "suspicious_names": ["my_axiom", "fuel_bound_admit"],
-                },
-            )
-
-        monkeypatch.setattr(
-            "rocq_mcp.verify.parse_and_classify_assumptions", fake_classify
-        )
-
-        result = await run_assumptions(
-            name="thm",
-            file="test.v",
-            workspace="/tmp",
-            lifespan_state={},
-        )
-        assert result["success"] is True
-        assert result["admitted"] == ["fuel_bound_admit"]
-        assert result["user_axioms"] == ["my_axiom"]
-        assert result["classical_axioms"] == []
-        assert result["verdict"] == "suspicious"
+        for legacy_key in (
+            "verdict",
+            "admitted",
+            "classical_axioms",
+            "user_axioms",
+            "standard_assumptions",
+        ):
+            assert legacy_key not in r
 
     @pytest.mark.asyncio
     async def test_empty_file_rejected(self):
@@ -505,12 +340,7 @@ class TestRunAssumptions:
 # ---------------------------------------------------------------------------
 
 
-def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
-    return {
-        "pet_client": None,
-        "pet_timeout": pet_timeout,
-        "current_workspace": None,
-    }
+from tests.conftest import make_lifespan_state as _make_lifespan_state  # noqa: E402
 
 
 @_pet_only
@@ -538,7 +368,46 @@ class TestAssumptionsFileModeIntegration:
             lifespan_state=lifespan_state,
         )
         assert result["success"] is True
-        assert result["verdict"] == "closed"
+        assert result["assumptions"] == []
+
+    @pytest.mark.asyncio
+    async def test_module_child_qualified_in_available_in_file(
+        self, workspace, lifespan_state
+    ):
+        """End-to-end: a typo'd theorem name in a file containing a Module
+        must produce ``available_in_file`` with the Module-qualified form
+        (``M.foo`` not bare ``foo``) so the agent can address it
+        directly.  Notation entries must be filtered out — their syntax
+        keys would only confuse the agent."""
+        vfile = Path(workspace) / "qualified_avail.v"
+        vfile.write_text(
+            "Module Outer.\n"
+            "  Definition shallow := 1.\n"
+            "  Module Inner.\n"
+            "    Theorem deep : True.\n"
+            "    Proof. exact I. Qed.\n"
+            "  End Inner.\n"
+            "End Outer.\n"
+            'Notation "x +! y" := (x + y) (at level 50).\n'
+            "Definition top := 0.\n"
+        )
+        # Ask for a typo to trigger the available_in_file enrichment path.
+        result = await run_assumptions(
+            name="depe",  # typo for Outer.Inner.deep
+            file="qualified_avail.v",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert result["success"] is False
+        names = set(result.get("available_in_file", []))
+        # Module children carry the full path; bare top-level definition
+        # stays bare; the Notation entry is filtered out.
+        assert "Outer.Inner.deep" in names
+        assert "Outer.shallow" in names
+        assert "top" in names
+        assert "deep" not in names  # bare form must NOT appear
+        assert "shallow" not in names
+        assert "x +! y" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +451,7 @@ class TestRocqAssumptionsWrapper:
 
         async def mock_run_assumptions(**kwargs):
             captured.update(kwargs)
-            return {"success": True, "verdict": "closed", "assumptions": []}
+            return {"success": True, "theorem": "my_thm", "assumptions": []}
 
         monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
         monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
@@ -967,3 +836,154 @@ class TestCollectTocNames:
         )
         names = _collect_toc_names([("main", [unnamed])])
         assert names == ["inner"]
+
+    def test_filters_notation_entries(self):
+        """Notation/Infix entries have syntax keys (`x + y`) as names —
+        useless as `name=` arguments, must be dropped."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, detail):
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail=detail,
+                kind=0,
+                range=None,
+                children=None,
+            )
+
+        toc = [
+            (
+                "main",
+                [
+                    _e("real_def", "Definition"),
+                    _e("x + y", "Notation"),
+                    _e("x ?? y", "Infix"),
+                    _e("real_thm", "Theorem"),
+                ],
+            )
+        ]
+        names = _collect_toc_names(toc)
+        assert set(names) == {"real_def", "real_thm"}
+
+    def test_qualifies_module_children_when_source_given(self):
+        """When a Rocq source is provided, definitions inside Module M get
+        qualified as ``M.foo`` so the agent can address them."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # Source layout (0-based lines):
+        # 0: Module Outer.
+        # 1:   Module Inner.
+        # 2:     Definition deep := 99.
+        # 3:   End Inner.
+        # 4:   Definition shallow := 1.
+        # 5: End Outer.
+        # 6: Definition top := 0.
+        source = (
+            "Module Outer.\n"
+            "  Module Inner.\n"
+            "    Definition deep := 99.\n"
+            "  End Inner.\n"
+            "  Definition shallow := 1.\n"
+            "End Outer.\n"
+            "Definition top := 0.\n"
+        )
+        toc = [
+            ("deep", [_e("deep", 2)]),
+            ("shallow", [_e("shallow", 4)]),
+            ("top", [_e("top", 6)]),
+        ]
+        names = _collect_toc_names(toc, source=source)
+        assert set(names) == {"Outer.Inner.deep", "Outer.shallow", "top"}
+
+    def test_section_children_not_qualified(self):
+        """Coq sections do NOT introduce a namespace qualifier — Section
+        members must be emitted as bare names."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # Section S. Definition x := 1. End S.
+        source = "Section S.\n  Definition x := 1.\nEnd S.\n"
+        toc = [("x", [_e("x", 1)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["x"]
+
+    def test_module_type_also_qualifies(self):
+        """Module Type members are addressable as MT.foo from outside,
+        so they MUST be qualified."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line, detail="Parameter"):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail=detail,
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # Module Type MT. Parameter p : nat. End MT.
+        source = "Module Type MT.\n  Parameter p : nat.\nEnd MT.\n"
+        toc = [("p", [_e("p", 1)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["MT.p"]
+
+    def test_qualification_skips_module_open_in_comment(self):
+        """A 'Module X.' inside a comment must NOT open a region — the
+        comment scrubber preserves line numbers so subsequent ranges
+        still align correctly."""
+        from rocq_mcp.interactive import _collect_toc_names
+        from types import SimpleNamespace
+
+        def _e(name, line):
+            r = SimpleNamespace(
+                start=SimpleNamespace(line=line, character=0),
+                end=SimpleNamespace(line=line, character=0),
+            )
+            return SimpleNamespace(
+                name=SimpleNamespace(v=name),
+                detail="Definition",
+                kind=0,
+                range=r,
+                children=None,
+            )
+
+        # Line 0: comment claiming Module M.   Line 1: real def.
+        # Confirms the region scanner does not treat the comment as a
+        # real Module opener — `top` stays bare.
+        source = "(* Module M. *)\nDefinition top := 0.\n"
+        toc = [("top", [_e("top", 1)])]
+        names = _collect_toc_names(toc, source=source)
+        assert names == ["top"]

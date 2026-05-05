@@ -22,47 +22,13 @@ from rocq_mcp.server import (
     _run_with_pet,
     rocq_diag,
 )
-from tests.conftest import _MockContext, add_mock_state
-
-# ---------------------------------------------------------------------------
-# Helpers (mirrors test_memory_watchdog.py patterns)
-# ---------------------------------------------------------------------------
-
-
-def _mock_pet(pid: int = 12345, alive: bool = True) -> MagicMock:
-    mock = MagicMock()
-    mock.process = MagicMock()
-    mock.process.pid = pid
-    mock.process.poll.return_value = None if alive else 1
-    mock.process.stdin = None
-    mock.process.stdout = None
-    mock.process.stderr = None
-    mock._own_pgrp = False
-    return mock
-
-
-class _FakeMemoryInfo:
-    def __init__(self, rss: int) -> None:
-        self.rss = rss
-
-
-class _FakePsutilProcess:
-    def __init__(self, rss_bytes: int) -> None:
-        self._rss = rss_bytes
-
-    def memory_info(self) -> _FakeMemoryInfo:
-        return _FakeMemoryInfo(self._rss)
-
-
-def _patch_psutil_rss(monkeypatch, rss_mb: int) -> None:
-    import psutil
-
-    rss_bytes = rss_mb * 1024 * 1024
-
-    def _factory(pid: int) -> _FakePsutilProcess:
-        return _FakePsutilProcess(rss_bytes)
-
-    monkeypatch.setattr(psutil, "Process", _factory)
+from tests.conftest import (
+    _MockContext,
+    FakePsutilProcess as _FakePsutilProcess,
+    add_mock_state,
+    mock_pet as _mock_pet,
+    patch_psutil_rss as _patch_psutil_rss,
+)
 
 
 def _fresh_lifespan_state() -> dict:

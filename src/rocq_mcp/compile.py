@@ -778,7 +778,7 @@ def _build_assumptions_result(
 
     if verdict == "closed":
         return {
-            "verified": True,
+            "success": True,
             "verification_method": method,
             "assumptions": [],
             **({"note": note_suffix.rstrip()} if note_suffix else {}),
@@ -788,14 +788,15 @@ def _build_assumptions_result(
             note_suffix + "Proof uses standard axioms (e.g., classical logic, Reals)."
         )
         return {
-            "verified": True,
+            "success": True,
             "verification_method": method,
             "assumptions": details["standard"],
             "note": note,
         }
     else:  # "suspicious"
         return {
-            "verified": False,
+            "success": False,
+            "reason": "axiom_dependency",
             "verification_method": method,
             "error": (
                 "Proof depends on unproved assumptions: "
@@ -827,7 +828,7 @@ def _try_direct_verification(
     Check type comparison against the problem statement.
 
     Returns:
-        - A result dict (verified=True/False) if Phase 3 can determine a verdict.
+        - A result dict (success=True/False) if Phase 3 can determine a verdict.
         - None if Phase 3 cannot apply (compilation failure, parse error, etc.),
           signaling the caller to fall back to the Phase 1 error.
     """
@@ -835,7 +836,12 @@ def _try_direct_verification(
     try:
         proof_source = build_direct_verification_source(proof, problem_name)
     except ValueError as e:
-        return {"verified": False, "error": str(e), "verification_method": "direct"}
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": str(e),
+            "verification_method": "direct",
+        }
 
     t_start = time.monotonic()
     run_a_timeout = max(5, timeout // 2)
@@ -879,7 +885,8 @@ def _try_direct_verification(
 
     if norm_proof != norm_problem:
         return {
-            "verified": False,
+            "success": False,
+            "reason": "type_mismatch",
             "error": (
                 "Type mismatch: proof type differs from problem type. "
                 f"Proof: {proof_type}  Expected: {problem_type}"
@@ -944,7 +951,10 @@ def _run_phase1_module_m(
             problem_statement,
         )
     except ValueError as e:
-        return ({"verified": False, "error": str(e)}, {})
+        return (
+            {"success": False, "reason": "validation", "error": str(e)},
+            {},
+        )
 
     result = _run_coqc(verification_source, workspace, timeout)
 
@@ -961,7 +971,8 @@ def _run_phase1_module_m(
                 workspace,
                 timeout,
                 fallback={
-                    "verified": False,
+                    "success": False,
+                    "reason": "timeout",
                     "error": f"Verification timed out after {timeout}s.",
                 },
             ),
@@ -988,7 +999,8 @@ def _run_phase1_module_m(
         if not phase1_error:
             phase1_error = f"coqc exited with code {result['returncode']}."
     phase1_failure: dict[str, Any] = {
-        "verified": False,
+        "success": False,
+        "reason": "compile_error",
         "error": phase1_error,
         "hint": verification_hint(phase1_stderr),
     }
@@ -1050,7 +1062,7 @@ async def _run_phase2_shared_defs(
             proof, problem_name, structure
         )
     except ValueError as e:
-        return {"verified": False, "error": str(e)}
+        return {"success": False, "reason": "validation", "error": str(e)}
 
     result2 = _run_coqc(shared_source, workspace, _remaining_timeout(t0, timeout))
 
@@ -1063,7 +1075,8 @@ async def _run_phase2_shared_defs(
             workspace,
             timeout,
             fallback={
-                "verified": False,
+                "success": False,
+                "reason": "timeout",
                 "error": f"Verification (shared-defs) timed out after {timeout}s.",
             },
         )
@@ -1107,17 +1120,19 @@ async def run_verify(
     try:
         _validate_rocq_identifier(problem_name)
     except ValueError as exc:
-        return {"verified": False, "error": str(exc)}
+        return {"success": False, "reason": "validation", "error": str(exc)}
 
     if len(proof) > _server.ROCQ_MAX_SOURCE_SIZE:
         return {
-            "verified": False,
+            "success": False,
+            "reason": "validation",
             "error": f"Proof exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     if len(problem_statement) > _server.ROCQ_MAX_SOURCE_SIZE:
         return {
-            "verified": False,
+            "success": False,
+            "reason": "validation",
             "error": f"Problem statement exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 

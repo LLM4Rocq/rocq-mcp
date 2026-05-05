@@ -50,7 +50,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is True
+        assert verify_result["success"] is True
 
     async def test_compile_then_verify_cheat(
         self, workspace, cheating_proof, simple_problem_statement
@@ -72,7 +72,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is False
+        assert verify_result["success"] is False
 
     async def test_classical_axiom_accepted(
         self, workspace, classical_proof, classical_problem
@@ -91,7 +91,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=classical_problem,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is True
+        assert verify_result["success"] is True
 
     async def test_axiom_spoofing_rejected_end_to_end(
         self, workspace, axiom_spoofing_proof
@@ -116,7 +116,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is False
+        assert verify_result["success"] is False
 
     async def test_admitted_proof_rejected_end_to_end(
         self, workspace, admitted_proof, simple_problem_statement
@@ -134,7 +134,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is False
+        assert verify_result["success"] is False
 
     async def test_print_assumptions_injection_rejected(self, workspace):
         """CRITICAL: Print Assumptions stdout injection must not bypass verification.
@@ -172,7 +172,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is False, (
+        assert verify_result["success"] is False, (
             "Print Assumptions stdout injection bypassed verification! "
             f"Result: {verify_result}"
         )
@@ -272,7 +272,7 @@ class TestCompileVerifyWorkflow:
             workspace=str(tmp_path),
         )
         assert (
-            verify_result["verified"] is True
+            verify_result["success"] is True
         ), f"Verify failed: {verify_result.get('error', '')}"
 
     async def test_no_artifacts_after_workflow(
@@ -316,7 +316,7 @@ class TestCompileVerifyWorkflow:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert verify_result["verified"] is True
+        assert verify_result["success"] is True
 
 
 # =========================================================================
@@ -553,7 +553,7 @@ class TestSharedDefsVerifyWorkflow:
             ctx=ctx,
         )
 
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "shared_defs"
 
     async def test_phase1_verify_no_fallback(self, lifespan_state, workspace):
@@ -571,7 +571,7 @@ class TestSharedDefsVerifyWorkflow:
             workspace=str(workspace),
             ctx=ctx,
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "module_m"
 
     async def test_phase2_with_definition_and_inductive(
@@ -602,7 +602,7 @@ class TestSharedDefsVerifyWorkflow:
             ctx=ctx,
         )
 
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "shared_defs"
 
     async def test_phase2_rejects_admitted(self, lifespan_state, workspace):
@@ -629,7 +629,7 @@ class TestSharedDefsVerifyWorkflow:
             ctx=ctx,
         )
 
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_phase2_with_require_import_no_defs(self, lifespan_state, workspace):
         """Require Import Znumtheory without Inductive/Def triggers Phase 2.
@@ -670,7 +670,7 @@ class TestSharedDefsVerifyWorkflow:
             ctx=ctx,
         )
 
-        assert result["verified"] is True
+        assert result["success"] is True
 
 
 # =========================================================================

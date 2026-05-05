@@ -21,13 +21,7 @@ from tests.conftest import PET_AVAILABLE
 pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
 
-def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
-    """Create a minimal lifespan_state dict for testing."""
-    return {
-        "pet_client": None,
-        "pet_timeout": pet_timeout,
-        "current_workspace": None,
-    }
+from tests.conftest import make_lifespan_state as _make_lifespan_state  # noqa: E402
 
 
 @pytest.fixture
@@ -218,6 +212,10 @@ class TestCheckBatch:
             from_state=sr["state_id"],
         )
         assert cr["success"] is False
+        # Mid-batch tactic rejection must tag reason="tactic_failed" so the
+        # agent can distinguish it from a transport-level "crashed" or
+        # "timeout".
+        assert cr["reason"] == "tactic_failed"
         assert "error" in cr
         assert "failed_command" in cr
         assert cr["command_index"] == 1
@@ -277,8 +275,8 @@ class TestCheckFromState:
         assert state_a != state_b
 
         # Both should record the start state as their parent
-        assert cr_a["parent_state_id"] == start_id
-        assert cr_b["parent_state_id"] == start_id
+        assert cr_a["from_state_id"] == start_id
+        assert cr_b["from_state_id"] == start_id
 
 
 # ---------------------------------------------------------------------------

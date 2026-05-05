@@ -651,7 +651,9 @@ class TestStateCaptureStatus:
         def _raise_oserror(*args, **kwargs):
             raise OSError("disk full")
 
-        monkeypatch.setattr(_server.tempfile, "NamedTemporaryFile", _raise_oserror)
+        from rocq_mcp import compile_enrichment as _ce
+
+        monkeypatch.setattr(_ce.tempfile, "NamedTemporaryFile", _raise_oserror)
 
         result = asyncio.run(
             _server.run_compile_with_state(

@@ -248,6 +248,40 @@ class TestAxiomClassification:
     def test_raxioms_module_qualified(self):
         assert _is_standard_axiom("Raxioms.completeness") is True
 
+    # --- mathcomp.classical re-exports ---
+
+    def test_mathcomp_classical_functional_extensionality(self):
+        """mathcomp.classical.boolp re-exports the stdlib axiom."""
+        assert (
+            _is_standard_axiom("mathcomp.classical.boolp.functional_extensionality_dep")
+            is True
+        )
+
+    def test_mathcomp_classical_propositional_extensionality(self):
+        assert (
+            _is_standard_axiom("mathcomp.classical.boolp.propositional_extensionality")
+            is True
+        )
+
+    def test_mathcomp_short_form_boolp_prefix(self):
+        """mathcomp sometimes outputs the short ``boolp.`` form."""
+        assert _is_standard_axiom("boolp.functional_extensionality_dep") is True
+
+    def test_mathcomp_em_short_name(self):
+        """``EM`` is the mathcomp-specific short name for excluded middle."""
+        assert _is_standard_axiom("mathcomp.classical.boolp.EM") is True
+
+    def test_mathcomp_pselect_short_name(self):
+        assert _is_standard_axiom("mathcomp.classical.boolp.pselect") is True
+
+    def test_mathcomp_cid_short_name(self):
+        """``cid`` is mathcomp's constructive indefinite description."""
+        assert _is_standard_axiom("mathcomp.classical.boolp.cid") is True
+
+    def test_user_axiom_named_em_rejected(self):
+        """A user ``Axiom EM`` outside mathcomp must NOT be auto-trusted."""
+        assert _is_standard_axiom("MyModule.EM") is False
+
     # --- SPOOFED axioms: must be REJECTED ---
 
     def test_spoofed_m_classic_rejected(self):
@@ -2237,7 +2271,7 @@ class TestVerifySuccess:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
 
     async def test_classical_proof_accepted(
         self, workspace, classical_proof, classical_problem
@@ -2249,7 +2283,7 @@ class TestVerifySuccess:
             problem_statement=classical_problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         # Should list classic as a standard axiom
         if "assumptions" in result and result["assumptions"] != []:
             assert any("classic" in a for a in result["assumptions"])
@@ -2267,7 +2301,7 @@ class TestVerifySuccess:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
 
     async def test_printing_depth_reset(self, workspace):
         """Proof that sets Printing Depth to 1 must still verify.
@@ -2288,7 +2322,7 @@ class TestVerifySuccess:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
 
     async def test_multiline_import_proof(self, workspace, multiline_import_proof):
         """Proof with multi-line From...Require Import should verify."""
@@ -2305,7 +2339,7 @@ class TestVerifySuccess:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
 
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -2322,7 +2356,7 @@ class TestVerifyRejection:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_axiom_spoofing(self, workspace, axiom_spoofing_proof):
         """CRITICAL: user-defined 'Axiom classic : False' must be rejected.
@@ -2337,7 +2371,7 @@ class TestVerifyRejection:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_admitted_inside_module(
         self, workspace, admitted_proof, simple_problem_statement
@@ -2349,7 +2383,7 @@ class TestVerifyRejection:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         # Should either have suspicious assumptions or a compilation error
         assert "assumptions" in result or "error" in result
 
@@ -2363,14 +2397,14 @@ class TestVerifyRejection:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_end_module_escape(self, workspace):
         """Proof containing 'End M.' to try to escape the module sandbox.
 
         The proof tries to close Module M early, then declare an axiom at
         top level. Rocq should reject this with a compilation error, which
-        is the safe outcome (verified=False).
+        is the safe outcome (success=False).
         """
         escape_proof = (
             "Theorem t : True.\n"
@@ -2386,7 +2420,7 @@ class TestVerifyRejection:
             problem_statement="Theorem t : True.\nAdmitted.\n",
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_module_m_in_problem_statement(self, workspace):
         """Problem statement containing 'Module M.' must not break template.
@@ -2410,7 +2444,7 @@ class TestVerifyRejection:
         )
         # Should fail: either the module structure is invalid, or the
         # extra Module M. causes a redefinition error
-        assert result["verified"] is False
+        assert result["success"] is False
 
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -2427,7 +2461,7 @@ class TestVerifyInputValidation:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "valid rocq identifier" in result["error"].lower()
 
     async def test_bad_workspace(self, simple_proof, simple_problem_statement):
@@ -2438,7 +2472,7 @@ class TestVerifyInputValidation:
             problem_statement=simple_problem_statement,
             workspace="/nonexistent/path/xyz",
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "error" in result
 
     async def test_timeout(self, workspace, timeout_proof):
@@ -2451,7 +2485,7 @@ class TestVerifyInputValidation:
             workspace=str(workspace),
             timeout=3,
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "timed out" in result["error"].lower()
 
     async def test_oversized_proof(self, workspace):
@@ -2462,7 +2496,7 @@ class TestVerifyInputValidation:
             problem_statement="Theorem test : True.\nAdmitted.",
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "size" in result["error"].lower()
 
     async def test_oversized_problem_statement(self, workspace):
@@ -2473,7 +2507,7 @@ class TestVerifyInputValidation:
             problem_statement="x" * 2_000_000,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "size" in result["error"].lower()
 
     async def test_newline_in_problem_name(
@@ -2485,7 +2519,7 @@ class TestVerifyInputValidation:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_space_in_problem_name(
         self, workspace, simple_proof, simple_problem_statement
@@ -2496,7 +2530,7 @@ class TestVerifyInputValidation:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
 
 @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -2529,6 +2563,85 @@ class TestVerifyCleanup:
         )
         after = set(glob_mod.glob(str(workspace / "*")))
         assert before == after, f"Leftover artifacts: {after - before}"
+
+
+# ---------------------------------------------------------------------------
+# Unified envelope contract (Audit finding #4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+class TestVerifyEnvelopeContract:
+    """rocq_verify must emit the same {success, error, reason, ...}
+    envelope as every other tool — never the legacy {verified} shape."""
+
+    async def test_success_path_uses_success_not_verified(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
+        result = await rocq_verify(
+            proof=simple_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert "success" in result
+        assert result["success"] is True
+        # Legacy field must NOT be emitted.
+        assert "verified" not in result
+
+    async def test_validation_failure_emits_reason_validation(
+        self, workspace, simple_proof, simple_problem_statement
+    ):
+        """A dotted problem_name fails validation; reason must be 'validation'."""
+        result = await rocq_verify(
+            proof=simple_proof,
+            problem_name="Nat.add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "validation"
+        assert "verified" not in result
+
+    async def test_axiom_failure_emits_reason_axiom_dependency(
+        self, workspace, admitted_proof, simple_problem_statement
+    ):
+        """A proof that depends on Admitted hits the suspicious-verdict path
+        in _build_assumptions_result; reason must be 'axiom_dependency'."""
+        result = await rocq_verify(
+            proof=admitted_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "axiom_dependency"
+        assert "verified" not in result
+
+    async def test_compile_error_emits_reason_compile_error(
+        self, workspace, cheating_proof, simple_problem_statement
+    ):
+        """A proof that fails to type-check (e.g. type redefinition) hits
+        the Phase 1 build-failure path; reason must be 'compile_error'."""
+        result = await rocq_verify(
+            proof=cheating_proof,
+            problem_name="add_0_r",
+            problem_statement=simple_problem_statement,
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "compile_error"
+        assert "verified" not in result
+
+    async def test_oversized_proof_emits_reason_validation(self, workspace):
+        result = await rocq_verify(
+            proof="x" * 2_000_000,
+            problem_name="test",
+            problem_statement="Theorem test : True.\nAdmitted.",
+            workspace=str(workspace),
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "validation"
 
 
 # ---------------------------------------------------------------------------
@@ -2603,7 +2716,7 @@ class TestSharedDefsIntegration:
         )
         # Without pytanque ctx, Phase 2 cannot run.  Phase 1 fails due to
         # type unification across Module M.  Phase 3 succeeds (direct compilation).
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "direct"
 
 
@@ -2645,7 +2758,7 @@ class TestDirectVerification:
         )
         # Phase 1 will fail (Section inside Module M causes issues),
         # Phase 3 should succeed
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "direct"
 
     async def test_cheating_axiom_caught(self, workspace):
@@ -2662,7 +2775,7 @@ class TestDirectVerification:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_admitted_helper_caught(self, workspace):
         """Phase 3 must catch proofs with Admitted helper lemmas."""
@@ -2683,7 +2796,7 @@ class TestDirectVerification:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_type_mismatch_caught(self, workspace):
         """Phase 3 must catch proofs that prove the wrong statement."""
@@ -2704,7 +2817,7 @@ class TestDirectVerification:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_export_in_proof_caught(self, workspace):
         """Phase 3 must reject proofs that use Export."""
@@ -2723,7 +2836,7 @@ class TestDirectVerification:
         )
         # Phase 1 should catch this via Module M compilation error,
         # and Phase 3 rejects Export
-        assert result["verified"] is False
+        assert result["success"] is False
 
     async def test_full_fallback_chain(self, workspace):
         """Phase 1 fails → Phase 2 skipped (no ctx) → Phase 3 succeeds."""
@@ -2744,7 +2857,7 @@ class TestDirectVerification:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "direct"
 
     async def test_direct_method_has_note(self, workspace):
@@ -2765,7 +2878,7 @@ class TestDirectVerification:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         assert "direct" in result.get("note", "").lower()
 
     async def test_valid_proof_still_uses_phase1(
@@ -2778,7 +2891,7 @@ class TestDirectVerification:
             problem_statement=simple_problem_statement,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "module_m"
 
 
@@ -2834,7 +2947,7 @@ class TestTimeoutFallbackToPhase3:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is True
+        assert result["success"] is True
         assert result["verification_method"] == "direct"
         # Phase 1 (1 call) + Phase 3 Run A + Run B = 3 calls
         assert call_count == 3
@@ -2877,7 +2990,7 @@ class TestTimeoutFallbackToPhase3:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         # Phase 3 now blocks Axiom keyword before compilation
         assert "axiom" in result.get("error", "").lower()
 
@@ -2901,7 +3014,7 @@ class TestTimeoutFallbackToPhase3:
             problem_statement="Theorem t : True.\nAdmitted.\n",
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "timed out" in result["error"].lower()
 
     async def test_phase1_timeout_phase3_type_mismatch(self, workspace, monkeypatch):
@@ -2945,7 +3058,7 @@ class TestTimeoutFallbackToPhase3:
             problem_statement=problem,
             workspace=str(workspace),
         )
-        assert result["verified"] is False
+        assert result["success"] is False
         assert "type mismatch" in result.get("error", "").lower()
 
 

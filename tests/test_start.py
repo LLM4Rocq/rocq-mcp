@@ -25,13 +25,7 @@ pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 # ---------------------------------------------------------------------------
 
 
-def _make_lifespan_state(pet_timeout: float = 30.0) -> dict:
-    return {
-        "pet_client": None,
-        "pet_timeout": pet_timeout,
-        "current_workspace": None,
-    }
-
+from tests.conftest import make_lifespan_state as _make_lifespan_state  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures

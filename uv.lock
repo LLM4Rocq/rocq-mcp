@@ -1027,8 +1027,8 @@ wheels = [
 
 [[package]]
 name = "pytanque"
-version = "0.2.1"
-source = { git = "https://github.com/LLM4Rocq/pytanque#060e69ffd7c54982e3e796c9c55bd2fa79b484a9" }
+version = "0.2.2"
+source = { git = "https://github.com/LLM4Rocq/pytanque?rev=v0.2.2#4092b1238b56468fdc1b3d100e078791c9690fd4" }
 dependencies = [
     { name = "requests" },
     { name = "typing-extensions" },
@@ -1275,7 +1275,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0" },
     { name = "fastmcp", specifier = ">=3.1.0" },
     { name = "psutil", specifier = ">=5.9" },
-    { name = "pytanque", git = "https://github.com/LLM4Rocq/pytanque" },
+    { name = "pytanque", git = "https://github.com/LLM4Rocq/pytanque?rev=v0.2.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.25" },
 ]

@@ -1112,3 +1112,72 @@ class TestTruncateNames:
         capped, truncated = _truncate_names(names, limit=3)
         assert capped == ["a", "b", "c"]
         assert truncated is True
+
+
+# ---------------------------------------------------------------------------
+# TestStartTimeoutForwarding: per-call timeout reaches _run_with_pet (no pet)
+# ---------------------------------------------------------------------------
+
+
+class TestStartTimeoutForwarding:
+    """Per-call ``timeout`` is plumbed from rocq_start to _run_with_pet.
+
+    Uses a mock-based test that doesn't require pet so it runs in CI
+    without coq-lsp. Verifies the contract that callers can override
+    the session-wide ROCQ_PET_TIMEOUT on a per-call basis.
+    """
+
+    pytestmark = []  # override module-level pet skip
+
+    @pytest.mark.asyncio
+    async def test_run_start_forwards_timeout(self, monkeypatch, tmp_path):
+        """run_start(timeout=X) forwards X to _run_with_pet."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_start
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            captured["tool"] = tool
+            return {"success": True, "state_id": 1}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_start(
+            file=str(vfile),
+            theorem="t",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+            timeout=120.0,
+        )
+        assert captured["tool"] == "rocq_start"
+        assert captured["timeout"] == 120.0
+
+    @pytest.mark.asyncio
+    async def test_run_start_default_timeout_is_none(self, monkeypatch, tmp_path):
+        """Without explicit timeout, run_start forwards None (server default)."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_start
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            return {"success": True, "state_id": 1}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_start(
+            file=str(vfile),
+            theorem="t",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+        )
+        assert captured.get("timeout") is None

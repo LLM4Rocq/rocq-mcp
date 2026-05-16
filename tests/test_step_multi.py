@@ -934,3 +934,96 @@ class TestStepMultiDeadPetDetection:
 
         assert result["success"] is False
         assert result.get("pet_restarted") is True
+
+
+# ---------------------------------------------------------------------------
+# TestStepMultiTimeoutForwarding: per-call timeout reaches _run_with_pet
+# ---------------------------------------------------------------------------
+
+
+class TestStepMultiTimeoutForwarding:
+    """Per-call ``timeout`` is plumbed from run_step_multi to _run_with_pet.
+
+    The wrapper passes ``timeout=hard_timeout`` (= timeout + grace).
+    Verifies the per-call value drives the budget, not the session default.
+    """
+
+    pytestmark = []  # override module-level pet skip
+
+    @pytest.mark.asyncio
+    async def test_forwards_per_call_timeout(self, monkeypatch):
+        """run_step_multi(timeout=120) → _run_with_pet sees 120 + grace."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import (
+            _PET_TIMEOUT_GRACE,
+            _state_table,
+            run_step_multi,
+        )
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            captured["tool"] = tool
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        # Inject a dummy state so the pre-check passes
+        _state_table.clear()
+        _state_table[42] = SimpleNamespace(
+            state=SimpleNamespace(id=42),
+            file="/tmp/x.v",
+            workspace="/tmp",
+            mtime=0.0,
+        )
+
+        try:
+            lifespan_state = {"pet_timeout": 30.0}
+            await run_step_multi(
+                tactics=["auto."],
+                lifespan_state=lifespan_state,
+                from_state=42,
+                timeout=120.0,
+            )
+            assert captured["tool"] == "rocq_step_multi"
+            assert captured["timeout"] == 120.0 + _PET_TIMEOUT_GRACE
+        finally:
+            _state_table.clear()
+
+    @pytest.mark.asyncio
+    async def test_default_uses_session_timeout(self, monkeypatch):
+        """Without timeout, falls back to lifespan_state['pet_timeout']."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import (
+            _PET_TIMEOUT_GRACE,
+            _state_table,
+            run_step_multi,
+        )
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        _state_table.clear()
+        _state_table[42] = SimpleNamespace(
+            state=SimpleNamespace(id=42),
+            file="/tmp/x.v",
+            workspace="/tmp",
+            mtime=0.0,
+        )
+
+        try:
+            lifespan_state = {"pet_timeout": 45.0}
+            await run_step_multi(
+                tactics=["auto."],
+                lifespan_state=lifespan_state,
+                from_state=42,
+            )
+            assert captured["timeout"] == 45.0 + _PET_TIMEOUT_GRACE
+        finally:
+            _state_table.clear()

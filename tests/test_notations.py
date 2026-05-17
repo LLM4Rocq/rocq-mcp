@@ -313,3 +313,131 @@ class TestRunNotationsReal:
         assert "_ + _" in lines[1]
         assert "_ = _" in lines[2]
         assert "_ * _" in lines[3]
+
+
+# ---------------------------------------------------------------------------
+# TestNotationsTimeoutForwarding: per-call timeout reaches _run_with_pet
+# ---------------------------------------------------------------------------
+
+
+class TestNotationsTimeoutForwarding:
+    """Per-call ``timeout`` is plumbed from run_notations to _run_with_pet."""
+
+    @pytest.mark.asyncio
+    async def test_run_notations_forwards_timeout(self, monkeypatch, tmp_path):
+        """run_notations(timeout=X) forwards X to _run_with_pet."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_notations
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            captured["tool"] = tool
+            return {"success": True, "output": ""}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_notations(
+            statement="forall n : nat, n = n",
+            preamble="",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+            timeout=120.0,
+        )
+        assert captured["tool"] == "rocq_notations"
+        assert captured["timeout"] == 120.0
+
+    @pytest.mark.asyncio
+    async def test_run_notations_default_timeout_is_none(self, monkeypatch, tmp_path):
+        """Without explicit timeout, run_notations forwards None."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_notations
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            return {"success": True, "output": ""}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_notations(
+            statement="forall n : nat, n = n",
+            preamble="",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+        )
+        assert captured.get("timeout") is None
+
+
+class TestNotationsTimeoutClamp:
+    """rocq_notations wrapper clamps per-call timeout to ROCQ_QUERY_TIMEOUT_CAP.
+
+    The clamp + ``clamped_timeout`` echo lives in the ``@mcp.tool`` wrapper,
+    not in ``run_notations``; an uncapped value would let one call park the
+    shared pet lock for the full duration.  Mirrors the ``rocq_query`` /
+    ``rocq_start`` contract.
+    """
+
+    @staticmethod
+    def _patch(monkeypatch):
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_notations(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "notations": []}
+
+        monkeypatch.setattr(_server, "run_notations", mock_run_notations)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_default_no_clamp(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_notations(
+            statement="forall n : nat, n = n",
+            workspace=str(tmp_path),
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] is None
+        assert "clamped_timeout" not in result
+
+    @pytest.mark.asyncio
+    async def test_above_cap_clamped_with_signal(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        monkeypatch.setattr(_server, "ROCQ_QUERY_TIMEOUT_CAP", 100)
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_notations(
+            statement="forall n : nat, n = n",
+            workspace=str(tmp_path),
+            timeout=9999,
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] == 100.0
+        assert result["clamped_timeout"] == 100
+
+    @pytest.mark.asyncio
+    async def test_below_cap_forwarded(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        monkeypatch.setattr(_server, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_notations(
+            statement="forall n : nat, n = n",
+            workspace=str(tmp_path),
+            timeout=120,
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] == 120.0
+        assert "clamped_timeout" not in result

@@ -1161,3 +1161,139 @@ class TestCollectTocNames:
         toc = [("x", [_e("x", 2)])]
         names = _collect_toc_names(toc, source=source)
         assert names == ["Real.x"]
+
+
+# ---------------------------------------------------------------------------
+# TestAssumptionsTimeoutForwarding: per-call timeout reaches run_query
+# ---------------------------------------------------------------------------
+
+
+class TestAssumptionsTimeoutForwarding:
+    """Per-call ``timeout`` is plumbed from run_assumptions to run_query.
+
+    Mock-based test that doesn't require pet so it runs in CI without
+    coq-lsp. Verifies the contract that callers can override the
+    session-wide ROCQ_PET_TIMEOUT on a per-call basis.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_assumptions_forwards_timeout(self, monkeypatch, tmp_path):
+        """run_assumptions(timeout=X) forwards X to run_query."""
+        import rocq_mcp.interactive as _int
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_query(**kw):
+            captured.update(kw)
+            return {"success": True, "output": "Closed under the global context"}
+
+        monkeypatch.setattr(_int, "run_query", fake_run_query)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_assumptions(
+            name="t",
+            file=str(vfile),
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+            timeout=120.0,
+        )
+        assert captured["timeout"] == 120
+
+    @pytest.mark.asyncio
+    async def test_run_assumptions_default_timeout_is_none(self, monkeypatch, tmp_path):
+        """Without explicit timeout, run_assumptions forwards None."""
+        import rocq_mcp.interactive as _int
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_query(**kw):
+            captured.update(kw)
+            return {"success": True, "output": "Closed under the global context"}
+
+        monkeypatch.setattr(_int, "run_query", fake_run_query)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_assumptions(
+            name="t",
+            file=str(vfile),
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+        )
+        assert captured.get("timeout") is None
+
+
+class TestAssumptionsTimeoutClamp:
+    """rocq_assumptions wrapper clamps per-call timeout to ROCQ_QUERY_TIMEOUT_CAP.
+
+    The clamp + ``clamped_timeout`` echo lives in the ``@mcp.tool`` wrapper,
+    not in ``run_assumptions``; an uncapped value would let one call park the
+    shared pet lock for the full duration.  Mirrors the ``rocq_query`` /
+    ``rocq_start`` contract.
+    """
+
+    @staticmethod
+    def _patch(monkeypatch):
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_assumptions(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "assumptions": []}
+
+        monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_default_no_clamp(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_assumptions(
+            name="t",
+            file="t.v",
+            workspace=str(tmp_path),
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] is None
+        assert "clamped_timeout" not in result
+
+    @pytest.mark.asyncio
+    async def test_above_cap_clamped_with_signal(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        monkeypatch.setattr(_server, "ROCQ_QUERY_TIMEOUT_CAP", 100)
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_assumptions(
+            name="t",
+            file="t.v",
+            workspace=str(tmp_path),
+            timeout=9999,
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] == 100.0
+        assert result["clamped_timeout"] == 100
+
+    @pytest.mark.asyncio
+    async def test_below_cap_forwarded(self, monkeypatch, tmp_path):
+        import rocq_mcp.server as _server
+        from tests.conftest import _MockContext
+
+        monkeypatch.setattr(_server, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+        captured = self._patch(monkeypatch)
+        result = await _server.rocq_assumptions(
+            name="t",
+            file="t.v",
+            workspace=str(tmp_path),
+            timeout=120,
+            ctx=_MockContext({"pet_timeout": 30.0}),
+        )
+        assert captured["timeout"] == 120.0
+        assert "clamped_timeout" not in result

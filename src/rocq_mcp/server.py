@@ -1563,6 +1563,7 @@ async def rocq_assumptions(
     name: str,
     file: str,
     workspace: str = "",
+    timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """List the axioms a theorem depends on.
@@ -1585,6 +1586,15 @@ async def rocq_assumptions(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
+        timeout: Per-call timeout in seconds for the underlying
+            ``Print Assumptions`` query (which loads the file's full
+            import chain).  Default 0 uses ``ROCQ_PET_TIMEOUT`` (env
+            var, default 30).  Raise this for files with heavy import
+            chains.  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default
+            300s) so a stray large value cannot park the pet lock
+            indefinitely; when clamping fires the response includes
+            ``clamped_timeout: <cap>`` so the caller can diagnose
+            unexpected timeouts.
 
     Returns (key fields):
         success:     bool.
@@ -1609,6 +1619,13 @@ async def rocq_assumptions(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
+    effective_timeout: float | None
+    if timeout and timeout > 0:
+        effective_timeout = float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP))
+    else:
+        effective_timeout = None
+    clamped = effective_timeout is not None and timeout > ROCQ_QUERY_TIMEOUT_CAP
+
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
@@ -1627,12 +1644,16 @@ async def rocq_assumptions(
             "error": "Internal error: no MCP context.",
         }
 
-    return await run_assumptions(
+    result = await run_assumptions(
         name=name,
         file=file,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
+        timeout=effective_timeout,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1644,6 +1665,7 @@ async def rocq_assumptions(
 async def rocq_toc(
     file: str,
     workspace: str = "",
+    timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Get the structure of a Rocq file: all definitions, lemmas, theorems, and sections.
@@ -1660,10 +1682,25 @@ async def rocq_toc(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
+        timeout: Per-call timeout in seconds for computing the table of
+            contents (which loads the file's full import chain).  Default
+            0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).  Raise this
+            for files with heavy import chains.  Clamped to
+            ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s) so a stray large
+            value cannot park the pet lock indefinitely; when clamping
+            fires the response includes ``clamped_timeout: <cap>`` so the
+            caller can diagnose unexpected timeouts.
 
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
+    effective_timeout: float | None
+    if timeout and timeout > 0:
+        effective_timeout = float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP))
+    else:
+        effective_timeout = None
+    clamped = effective_timeout is not None and timeout > ROCQ_QUERY_TIMEOUT_CAP
+
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
@@ -1679,11 +1716,15 @@ async def rocq_toc(
             "error": "Internal error: no MCP context.",
         }
 
-    return await run_toc(
+    result = await run_toc(
         file=file,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
+        timeout=effective_timeout,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1696,6 +1737,7 @@ async def rocq_notations(
     statement: str,
     preamble: str = "",
     workspace: str = "",
+    timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """List all notations in a Rocq statement and how they resolve.
@@ -1713,10 +1755,25 @@ async def rocq_notations(
         statement: The proposition/type to analyze.
         preamble: Import lines for context (e.g., "Require Import QArith.").
         workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
+        timeout: Per-call timeout in seconds for the dummy-lemma pet
+            session used to resolve notations (which loads the preamble's
+            full import chain).  Default 0 uses ``ROCQ_PET_TIMEOUT`` (env
+            var, default 30).  Raise this for preambles with heavy import
+            chains.  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s)
+            so a stray large value cannot park the pet lock indefinitely;
+            when clamping fires the response includes ``clamped_timeout:
+            <cap>`` so the caller can diagnose unexpected timeouts.
 
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
+    effective_timeout: float | None
+    if timeout and timeout > 0:
+        effective_timeout = float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP))
+    else:
+        effective_timeout = None
+    clamped = effective_timeout is not None and timeout > ROCQ_QUERY_TIMEOUT_CAP
+
     workspace = workspace or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
@@ -1732,12 +1789,16 @@ async def rocq_notations(
             "error": "Internal error: no MCP context.",
         }
 
-    return await run_notations(
+    result = await run_notations(
         statement=statement,
         preamble=preamble,
         workspace=workspace,
         lifespan_state=ctx.lifespan_context,
+        timeout=effective_timeout,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------

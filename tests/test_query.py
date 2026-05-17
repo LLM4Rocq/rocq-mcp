@@ -1231,3 +1231,76 @@ class TestLspSeverityWire:
         # The deprecation warning must be filtered out.
         assert "deprecat" not in without_warn["output"].lower()
         assert "from stdlib" not in without_warn["output"].lower()
+
+
+# ---------------------------------------------------------------------------
+# TestQueryFileTimeoutForwarding: per-call timeout reaches _run_with_pet
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest_tf
+
+
+class TestQueryFileTimeoutForwarding:
+    """Per-call ``timeout`` in file-mode reaches _run_with_pet.
+
+    Mock-based test that doesn't require pet. Verifies that the
+    ``timeout`` parameter on rocq_query (file mode) is propagated
+    through run_query into the per-call _run_with_pet keyword arg.
+    """
+
+    @_pytest_tf.mark.asyncio
+    async def test_run_query_file_mode_forwards_timeout(self, monkeypatch, tmp_path):
+        """run_query(file=..., timeout=X) forwards X to _run_with_pet."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_query
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            captured["tool"] = tool
+            return {"success": True, "output": ""}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_query(
+            command="Check t.",
+            preamble="",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+            file=str(vfile),
+            timeout=120,
+        )
+        assert captured["tool"] == "rocq_query"
+        assert captured["timeout"] == 120
+
+    @_pytest_tf.mark.asyncio
+    async def test_run_query_file_mode_default_timeout_is_none(
+        self, monkeypatch, tmp_path
+    ):
+        """Without explicit timeout, run_query forwards None."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import run_query
+
+        vfile = tmp_path / "t.v"
+        vfile.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            return {"success": True, "output": ""}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_query(
+            command="Check t.",
+            preamble="",
+            workspace=str(tmp_path),
+            lifespan_state=lifespan_state,
+            file=str(vfile),
+        )
+        assert captured.get("timeout") is None

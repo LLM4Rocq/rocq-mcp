@@ -635,6 +635,8 @@ async def run_assumptions(
     file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_assumptions (testable without FastMCP Context).
 
@@ -686,6 +688,7 @@ async def run_assumptions(
         workspace=workspace,
         lifespan_state=lifespan_state,
         file=file,
+        timeout=int(timeout) if timeout is not None and timeout > 0 else None,
     )
     if not query_result.get("success"):
         # Best-effort enrichment: attach the file's symbol list so the
@@ -1084,6 +1087,8 @@ async def run_toc(
     file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_toc (testable without FastMCP Context)."""
     # Path traversal + existence check (before entering thread)
@@ -1114,6 +1119,7 @@ async def run_toc(
         _do_toc,
         lifespan_state,
         "rocq_toc",
+        timeout=timeout,
     )
 
 
@@ -1127,6 +1133,8 @@ async def run_notations(
     preamble: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_notations (testable without FastMCP Context)."""
     forbidden = _check_forbidden_commands(statement)
@@ -1196,6 +1204,7 @@ async def run_notations(
         lifespan_state,
         "rocq_notations",
         on_timeout=_on_timeout,
+        timeout=timeout,
     )
 
 

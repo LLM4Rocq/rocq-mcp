@@ -740,6 +740,101 @@ class TestCheckProofTactics:
 
 
 # ---------------------------------------------------------------------------
+# TestCheckBulletFocusPayload
+# ---------------------------------------------------------------------------
+
+
+class TestCheckBulletFocusPayload:
+    """Bullet / focus-management commands return enriched payload.
+
+    A body consisting of exactly
+    ``{``, ``}``, or a ``-``/``+``/``*`` run should add ``focus_command``,
+    ``goals_before``, ``goals_after``, ``focus_depth_before``,
+    ``focus_depth_after`` to the response so the agent can see the
+    focus transition.
+    """
+
+    @pytest.mark.asyncio
+    async def test_open_brace_focuses_first_subgoal(self, workspace, lifespan_state):
+        """``{`` after a ``destruct`` should push a focus frame and
+        narrow the focused goals from 2 to 1."""
+        from rocq_mcp.interactive import run_start, run_check
+
+        vfile = workspace / "check_bullet_focus.v"
+        vfile.write_text(
+            "Theorem t : forall b : bool, b = b.\n"
+            "Proof. intros b. destruct b. { reflexivity. } { reflexivity. } Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        # Advance to a 2-subgoal state.
+        cr1 = await run_check(
+            body="intros b. destruct b.",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr1["success"] is True
+        assert cr1["proof_finished"] is False
+
+        # Now execute the bullet/focus command ``{`` on its own.
+        cr2 = await run_check(
+            body="{",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=cr1["state_id"],
+        )
+        assert cr2["success"] is True
+        # focus payload — additive keys.
+        assert cr2["focus_command"] == "{"
+        assert cr2["goals_before"] == 2
+        assert cr2["goals_after"] == 1
+        # Opening a brace pushes a frame onto the focus stack.
+        assert cr2["focus_depth_after"] == cr2["focus_depth_before"] + 1
+
+    @pytest.mark.asyncio
+    async def test_non_bullet_body_unaffected(self, workspace, lifespan_state):
+        """Plain tactics must NOT gain the focus-payload keys."""
+        from rocq_mcp.interactive import run_start, run_check
+
+        vfile = workspace / "check_no_bullet.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\n" "Proof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+
+        cr = await run_check(
+            body="intros.",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert cr["success"] is True
+        for k in (
+            "focus_command",
+            "goals_before",
+            "goals_after",
+            "focus_depth_before",
+            "focus_depth_after",
+        ):
+            assert k not in cr
+
+
+# ---------------------------------------------------------------------------
 # TestCheckMultiCommandTimeout: per-command Rocq timeout (TL-2)
 # ---------------------------------------------------------------------------
 

@@ -2476,6 +2476,22 @@ async def rocq_check(
     as a list of ``[command, output]`` pairs (truncated per step at 50K
     chars).  Omitted when no command produces output.
 
+    **Bullet / focus payload.**  When the body is exactly one
+    bullet or focus-management command (``{``, ``}``, or a run of
+    ``-``/``+``/``*`` such as ``-``, ``--``, ``+++``), the response is
+    enriched with extra keys so the agent can see the focus
+    transition rather than an empty ``goals`` string:
+
+    - ``focus_command`` — the detected token (without trailing ``.``).
+    - ``goals_before`` / ``goals_after`` — count of focused open
+      goals before / after the command.
+    - ``focus_depth_before`` / ``focus_depth_after`` — number of
+      suspended ``{ ... }`` focus frames on the stack (i.e.
+      ``len(complete_goals(state).stack)``).
+
+    All five keys are additive: they only appear for bullet/focus
+    bodies and do not affect any other response shape.
+
     **Note:** If the underlying .v file is modified after rocq_start, the
     session state becomes stale. A ``stale_warning`` field is returned when
     this is detected. Restart the session with rocq_start after file edits.

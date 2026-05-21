@@ -193,6 +193,111 @@ class TestStartByPosition:
         )
         assert result["success"] is False
 
+    @pytest.mark.asyncio
+    async def test_position_rounds_forward_through_sentence(
+        self, workspace, lifespan_state
+    ):
+        """Pin the position semantics documented in ``rocq_start``.
+
+        Petanque's ``get_state_at_pos`` rounds the cursor *forward*
+        through the sentence containing it.  This test probes every
+        category of cursor placement against a known file and asserts
+        which sentence has executed:
+
+            Line 0: Theorem foo : forall n : nat, n = n.
+            Line 1: Proof. intros n. reflexivity. Qed.
+                    0123456789012345678901234567890123
+                          ^      ^       ^   ^   ^
+                          space  i.intros .   space-after-.
+                                         period
+
+        Distinguishing signals:
+        - Before ``intros n.``: goal still contains ``forall``.
+        - After  ``intros n.``: goal lacks ``forall`` and an ``n :
+          nat`` hypothesis is in scope.
+        - After  ``reflexivity.``: ``proof_finished`` flips to True.
+
+        Each of these is what the docstring promises will be reachable
+        from the corresponding cursor position; if petanque ever
+        changes the rounding rule, this test will catch it before the
+        docstring goes stale.
+        """
+        from rocq_mcp.interactive import run_start
+
+        vfile = workspace / "pos_semantics.v"
+        vfile.write_text(
+            "Theorem foo : forall n : nat, n = n.\n"
+            "Proof. intros n. reflexivity. Qed.\n"
+        )
+
+        async def probe(character: int) -> dict:
+            return await run_start(
+                file=str(vfile),
+                theorem="",
+                workspace=str(workspace),
+                lifespan_state=lifespan_state,
+                line=1,
+                character=character,
+            )
+
+        # Sentence layout on line 1: "Proof. intros n. reflexivity. Qed."
+        # period positions: 5, 15, 28, 33
+        # whitespace gaps:  6, 16, 29
+
+        # --- BEFORE `intros n.` -------------------------------------------------
+        # char 6 is the space immediately preceding `intros` -- whitespace
+        # before a sentence yields the state BEFORE that sentence.  The
+        # `Proof.` keyword is a no-op here, so the goal is the bare theorem
+        # statement.
+        r6 = await probe(6)
+        assert r6["success"] is True
+        assert r6["proof_finished"] is False
+        assert "forall" in r6["goals"], (
+            "Cursor at whitespace before `intros n.` should yield state BEFORE "
+            f"intros (goal should still contain forall). Got: {r6['goals']!r}"
+        )
+
+        # --- AFTER `intros n.` (three equivalent cursor placements) ------------
+        # Per the docstring, all of these resolve to the SAME state: after
+        # `intros n.` has executed.  Once `intros n.` runs, `n : nat` is in
+        # scope and `forall` is gone from the goal.
+        after_intros_positions = {
+            7: "first letter of `intros`",
+            10: "middle of `intros`",
+            15: "the period terminating `intros n.`",
+            16: "whitespace immediately after the period",
+        }
+        for ch, label in after_intros_positions.items():
+            r = await probe(ch)
+            assert r["success"] is True, f"probe at char {ch} ({label}) failed"
+            assert r["proof_finished"] is False, (
+                f"char {ch} ({label}): proof should still be open "
+                f"(reflexivity not yet run)"
+            )
+            assert "forall" not in r["goals"], (
+                f"char {ch} ({label}): goal should no longer contain forall "
+                f"after `intros n.`. Got: {r['goals']!r}"
+            )
+            assert "n : nat" in r["goals"] or "n: nat" in r["goals"], (
+                f"char {ch} ({label}): expected `n : nat` hypothesis after "
+                f"`intros n.`. Got: {r['goals']!r}"
+            )
+
+        # --- AFTER `reflexivity.` ----------------------------------------------
+        # char 17 is the first letter of `reflexivity` -- rounding forward
+        # through that sentence runs it, which closes the only goal.
+        r17 = await probe(17)
+        assert r17["success"] is True
+        assert r17["proof_finished"] is True, (
+            "Cursor on first letter of `reflexivity` should yield state AFTER "
+            "reflexivity, with proof finished."
+        )
+        # And the period of `reflexivity.` plus the whitespace after it agree.
+        r28 = await probe(28)
+        assert r28["proof_finished"] is True
+        r29 = await probe(29)
+        assert r29["proof_finished"] is True
+
 
 # ---------------------------------------------------------------------------
 # TestStartByPreamble

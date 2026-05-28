@@ -459,8 +459,13 @@ class TestGetFileEndState:
         call_args = mock_pet.get_state_at_pos.call_args
         assert call_args[0][1] == 1  # 0 + 1
 
-    def test_forces_workspace_reset(self, tmp_path):
-        """File mode should force workspace re-set for coq-lsp re-indexing."""
+    def test_skips_workspace_reset_when_unchanged(self, tmp_path):
+        """File mode delegates workspace management to
+        ``_set_workspace_if_needed``: when the workspace path matches
+        the cached value, no ``pet.set_workspace`` call should fire.
+        The previous eager-reset behaviour thrashed pet across sibling
+        calls on the same project for no Rocq-semantic benefit
+        (coq-lsp re-reads the .v file on every get_state_at_pos)."""
         from rocq_mcp.interactive import _get_file_end_state
         from unittest.mock import MagicMock
 
@@ -470,14 +475,12 @@ class TestGetFileEndState:
         mock_pet = MagicMock()
         mock_pet.get_state_at_pos.return_value = MagicMock()
 
-        # Set current_workspace to the same workspace (would skip re-set normally)
         ws = str(Path(tmp_path).resolve())
         lifespan_state = {"current_workspace": ws}
 
         _get_file_end_state(mock_pet, "test.v", str(tmp_path), lifespan_state)
 
-        # Should have been forced to None then re-set
-        mock_pet.set_workspace.assert_called_once()
+        mock_pet.set_workspace.assert_not_called()
 
     def test_permission_error_gives_clean_message(self, tmp_path):
         """PermissionError should not leak the resolved absolute path."""

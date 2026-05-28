@@ -251,8 +251,6 @@ def _get_file_end_state(
     This is used by tools that accept a ``file`` parameter as an
     alternative to ``preamble`` (e.g., ``rocq_query``, ``rocq_assumptions``).
 
-    Forces a workspace re-set so coq-lsp re-indexes modified files.
-
     Raises:
         ValueError: If the file path is outside the workspace.
         FileNotFoundError: If the file does not exist or is not readable.
@@ -264,10 +262,11 @@ def _get_file_end_state(
     except PermissionError:
         raise FileNotFoundError(f"File not accessible: {file}")
 
-    # Force workspace re-set so coq-lsp re-indexes any file changes.
-    # Unlike preamble mode (which has a content-hash cache), file mode
-    # has no way to know if the file changed since the last call.
-    lifespan_state["current_workspace"] = None
+    # coq-lsp re-reads individual files on every get_state_at_pos call,
+    # so the workspace itself only needs re-setting when the workspace
+    # path changes — _set_workspace_if_needed handles that.  Eagerly
+    # invalidating ``current_workspace`` here used to defeat that cache
+    # on every sibling call against the same project.
     _server._set_workspace_if_needed(pet, workspace, lifespan_state)
 
     # Position past the last line so all definitions are in scope.

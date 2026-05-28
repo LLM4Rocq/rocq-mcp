@@ -805,8 +805,8 @@ class TestQueryFromStateUnit:
         # Force _state_get_or_error to return an "expired" error.
         def fake_lookup(state_id):
             return None, (
-                f"State {state_id} expired: evicted from the table, lost to a "
-                f"pet restart, or clobbered by another agent.  Call rocq_start."
+                f"State {state_id} expired: it aged out of the LRU table or "
+                f"pet was restarted.  Call rocq_start to begin a fresh session."
             )
 
         monkeypatch.setattr(_interactive, "_state_get_or_error", fake_lookup)

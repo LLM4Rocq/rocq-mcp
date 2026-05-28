@@ -1786,10 +1786,17 @@ async def rocq_start(
         line: 0-based line number for position-based start.
         character: 0-based character offset for position-based start.
         preamble: Import commands for preamble mode (e.g., "Require Import Lia.").
-        force_restart: If True, kill the current PET process and clear all
-            cached state before starting.  Use when PET is alive but in a
-            bad state (e.g., coq-lsp indexing corruption).  You rarely need
-            this — PET auto-restarts on crash/timeout.  Default: False.
+        force_restart: If True, kill pet, clear the state table, and
+            respawn before starting.  Recovery primitive for the rare
+            cases where the shared pet is in a bad state: accumulated
+            RAM bloat after long shared use, indexing corruption, or a
+            "State N expired" that repeats after a plain ``rocq_start``
+            retry (suggesting a peer caller is also force-restarting).
+            Actively-used states survive peer churn via LRU eviction —
+            ``force_restart=True`` is *not* needed as routine insurance
+            and is unhelpful when a recent response already carried
+            ``pet_restarted: True`` (pet is already fresh).  See README
+            "Concurrency model".  Default: False.
 
     On theorem-not-found errors: response includes ``available_in_file:
     list[str]`` with the file's defined names (sorted, capped — see
@@ -1985,6 +1992,14 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
       headroom against ``max_rss_mb_threshold``.
     - You want to know which proof states are currently live in pet's
       state table.
+    - You suspect another agent is sharing this rocq-mcp process.
+      Heuristic: compare ``live_states[*].file`` against the files you
+      opened this session — entries you did not create signal a foreign
+      caller (works only when agents are on disjoint files).  Actively
+      used states are LRU-protected against peer churn, so sharing is
+      mostly a latency and RAM concern; if repeated state expiries
+      survive that floor, ``rocq_start(..., force_restart=True)`` is
+      the recovery — see README "Concurrency model".
 
     Does NOT spawn pet if it's not running; just reports state.
 

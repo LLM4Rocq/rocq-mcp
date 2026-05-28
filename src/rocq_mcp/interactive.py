@@ -369,8 +369,12 @@ def _state_get_or_error(state_id: int) -> tuple[_StateEntry | None, str | None]:
     # Distinguish eviction from never-existed
     if state_id < _state_next_id:
         return None, (
-            f"State {state_id} expired (evicted from table or lost to pet restart). "
-            f"Use rocq_start to begin a new session."
+            f"State {state_id} expired: it aged out of the LRU table (no calls "
+            f"to from_state={state_id} while many other states were active), or "
+            f"pet was restarted (auto-recovery from a timeout or crash, or a "
+            f"peer caller's force_restart=True).  Call rocq_start to begin a "
+            f"fresh session — you do not need force_restart=True unless this "
+            f"expiry repeats."
         )
     return None, f"State {state_id} does not exist."
 

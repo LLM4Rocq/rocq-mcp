@@ -1440,6 +1440,47 @@ class TestStateTableEviction:
         assert err is not None
         assert "does not exist" in err.lower()
 
+    def test_lru_touch_keeps_active_state_alive(self, monkeypatch):
+        """A state being actively queried via ``_state_get_or_error``
+        survives eviction pressure from a parallel caller churning new
+        states.  This is the two-sub-agents-different-files case: one
+        agent parks on state N while the other adds many states; the
+        parked state must NOT be evicted as long as it's being read."""
+        import rocq_mcp.interactive as intermod
+        from rocq_mcp.interactive import _state_get_or_error, _state_table
+
+        monkeypatch.setattr(intermod, "_MAX_STATES", 5)
+
+        # Agent A creates state 1 and keeps using it.
+        parked = add_mock_state(None, "agent_a_intro.", step=0)
+
+        # Agent B churns through many states, exceeding the cap.
+        for i in range(8):
+            add_mock_state(None, f"agent_b_step_{i}.", step=i)
+            # Agent A touches its parked state between each of B's writes.
+            entry, err = _state_get_or_error(parked)
+            assert err is None
+            assert entry is not None
+
+        # The parked state must still be alive despite B writing 8 entries
+        # against a cap of 5 — LRU promotion kept it from being evicted.
+        assert parked in _state_table
+
+    def test_lru_evicts_genuinely_oldest_unused(self, monkeypatch):
+        """When no state is touched, eviction order matches insertion
+        order (FIFO degenerate case of LRU)."""
+        import rocq_mcp.interactive as intermod
+        from rocq_mcp.interactive import _state_table
+
+        monkeypatch.setattr(intermod, "_MAX_STATES", 3)
+
+        ids = [add_mock_state(None, f"t_{i}.", step=i) for i in range(5)]
+        # First two evicted, last three remain.
+        assert ids[0] not in _state_table
+        assert ids[1] not in _state_table
+        for sid in ids[2:]:
+            assert sid in _state_table
+
 
 # =========================================================================
 # _set_workspace_if_needed -- triggers _parse_project_flags side effect

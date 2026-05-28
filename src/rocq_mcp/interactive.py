@@ -26,6 +26,7 @@ import os
 import re
 import tempfile
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -287,7 +288,7 @@ def _invalidate_import_cache() -> None:
 # State table
 # ---------------------------------------------------------------------------
 
-_MAX_STATES: int = int(os.environ.get("ROCQ_MAX_STATES", "200"))
+_MAX_STATES: int = int(os.environ.get("ROCQ_MAX_STATES", "1000"))
 
 
 @dataclass
@@ -308,7 +309,12 @@ class _StateEntry:
     created_at: float = field(default_factory=time.time)
 
 
-_state_table: dict[int, _StateEntry] = {}
+# LRU-ordered: ``_state_get`` / ``_state_get_or_error`` move accessed
+# entries to the most-recently-used end; eviction pops from the
+# least-recently-used end.  Keeps actively-used states alive even when
+# a parallel caller is churning through fresh states (e.g. two sub-agents
+# on different files sharing one rocq-mcp process).
+_state_table: "OrderedDict[int, _StateEntry]" = OrderedDict()
 _state_next_id: int = 1
 _state_current_id: int | None = None
 
@@ -342,15 +348,23 @@ def _state_add(
         resolved_file=resolved_file,
     )
     _state_current_id = sid
-    # Evict oldest entries when table exceeds max size
+    # Evict LRU entries when table exceeds max size.
     while len(_state_table) > _MAX_STATES:
-        del _state_table[min(_state_table)]
+        _state_table.popitem(last=False)
     return sid
 
 
 def _state_get(state_id: int) -> _StateEntry | None:
-    """Look up a state by ID.  Returns None if not found."""
-    return _state_table.get(state_id)
+    """Look up a state by ID and promote it to most-recently-used.
+
+    Returns None if not found.  Promotion is the read-side of LRU: a
+    parked state that's still being queried by ``from_state=N`` survives
+    eviction pressure from a parallel caller churning through new states.
+    """
+    entry = _state_table.get(state_id)
+    if entry is not None:
+        _state_table.move_to_end(state_id)
+    return entry
 
 
 def _state_remove(state_id: int) -> None:
@@ -362,9 +376,14 @@ def _state_remove(state_id: int) -> None:
 
 
 def _state_get_or_error(state_id: int) -> tuple[_StateEntry | None, str | None]:
-    """Look up a state by ID, returning (entry, None) or (None, error_msg)."""
+    """Look up a state by ID, returning (entry, None) or (None, error_msg).
+
+    On hit, promotes the entry to most-recently-used (same LRU semantics
+    as ``_state_get``).
+    """
     entry = _state_table.get(state_id)
     if entry is not None:
+        _state_table.move_to_end(state_id)
         return entry, None
     # Distinguish eviction from never-existed
     if state_id < _state_next_id:

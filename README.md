@@ -131,6 +131,7 @@ When a tool returns `pet_restarted: True`, call `rocq_diag` for memory headroom 
 | `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of `rocq_query`; larger values are clamped and the response carries `clamped_timeout: <cap>` |
 | `ROCQ_ENRICHMENT_TIMEOUT_CAP` | `5.0` | Cap (seconds) on per-call proof-state capture after a `rocq_compile` / `rocq_compile_file` failure |
 | `ROCQ_MAX_PET_RSS_MB` | `min(50% of system RAM, 16384)` | Maximum pet subprocess RSS (MB). On breach, the call aborts via the timeout recovery path; response includes `reason: "memory_exhausted"` and `pet_restarted: True`. |
+| `ROCQ_MAX_STATES` | `1000` | Cap on the in-memory state table (LRU-evicted). The entry itself is tiny; the real cost lives in pet's Fleche cache and is bounded by `ROCQ_MAX_PET_RSS_MB`. Bump if two or more callers share this process (e.g. parallel sub-agents) and parked states get evicted before they're reused. |
 | `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
 | `ROCQ_MAX_SOURCE_SIZE` | `1000000` | Maximum source size in bytes |
 

@@ -1181,3 +1181,61 @@ class TestStartTimeoutForwarding:
             lifespan_state=lifespan_state,
         )
         assert captured.get("timeout") is None
+
+    @pytest.mark.asyncio
+    async def test_wrapper_clamps_to_pet_timeout_cap(self, monkeypatch, tmp_path):
+        """rocq_start clamps timeout to ROCQ_QUERY_TIMEOUT_CAP and echoes it."""
+        from types import SimpleNamespace
+
+        import rocq_mcp.server as srv
+
+        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 60)
+        monkeypatch.setattr(srv, "_validate_workspace", lambda ws: None)
+
+        captured: dict = {}
+
+        async def fake_run_start(**kw):
+            captured.update(kw)
+            return {"success": True, "state_id": 1}
+
+        monkeypatch.setattr(srv, "run_start", fake_run_start)
+
+        ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
+        result = await srv.rocq_start(
+            file="t.v",
+            theorem="t",
+            workspace=str(tmp_path),
+            timeout=600,
+            ctx=ctx,
+        )
+        assert captured["timeout"] == 60.0
+        assert result["clamped_timeout"] == 60
+
+    @pytest.mark.asyncio
+    async def test_wrapper_does_not_clamp_below_cap(self, monkeypatch, tmp_path):
+        """A timeout under the cap is forwarded unchanged with no clamped_timeout."""
+        from types import SimpleNamespace
+
+        import rocq_mcp.server as srv
+
+        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+        monkeypatch.setattr(srv, "_validate_workspace", lambda ws: None)
+
+        captured: dict = {}
+
+        async def fake_run_start(**kw):
+            captured.update(kw)
+            return {"success": True, "state_id": 1}
+
+        monkeypatch.setattr(srv, "run_start", fake_run_start)
+
+        ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
+        result = await srv.rocq_start(
+            file="t.v",
+            theorem="t",
+            workspace=str(tmp_path),
+            timeout=120,
+            ctx=ctx,
+        )
+        assert captured["timeout"] == 120.0
+        assert "clamped_timeout" not in result

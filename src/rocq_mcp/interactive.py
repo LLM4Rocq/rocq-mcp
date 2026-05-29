@@ -1800,7 +1800,7 @@ async def run_step_multi(
     from_state: int | None = None,
     *,
     include_warnings: bool = True,
-    timeout: float | None = None,
+    timeout: float = 0.0,
 ) -> dict[str, Any]:
     """Core implementation of rocq_step_multi (testable without FastMCP Context).
 
@@ -1830,14 +1830,8 @@ async def run_step_multi(
                 f"Forbidden in tactic {tac!r}: {forbidden}",
             )
 
-    effective_timeout: float = (
-        timeout if timeout is not None and timeout > 0
-        else lifespan_state["pet_timeout"]
-    )
-    hard_timeout = _compute_hard_timeout(effective_timeout)
-    # Rebind so the rest of the function (per-tactic budget) uses the
-    # per-call value rather than the session default.
-    timeout = effective_timeout
+    _timeout: float = timeout if timeout > 0 else lifespan_state["pet_timeout"]
+    hard_timeout = _compute_hard_timeout(_timeout)
 
     # Quick pre-check to avoid acquiring lock for invalid states.
     # Re-validated inside _execute (state may be invalidated between checks).
@@ -1882,10 +1876,10 @@ async def run_step_multi(
             if tac not in ("{", "}") and not tac.endswith("."):
                 tac += "."
 
-            per_tactic_budget = max(1, int(timeout / len(tactics)))
+            per_tactic_budget = max(1, int(_timeout / len(tactics)))
             tac_rocq_timeout = (
                 per_tactic_budget
-                if _is_timeout_eligible(tac) and timeout >= 1
+                if _is_timeout_eligible(tac) and _timeout >= 1
                 else None
             )
 

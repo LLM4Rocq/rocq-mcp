@@ -439,28 +439,45 @@ def _check_staleness(entry: _StateEntry) -> str | None:
     return None
 
 
-def _reconstruct_tactic_path(state_id: int) -> tuple[list[str], bool]:
-    """Walk the parent_id chain backward and return (tactics in root→leaf order, complete).
+def _reconstruct_tactic_path(
+    state_id: int,
+) -> tuple[list[str], bool, int | None, str | None]:
+    """Walk the parent_id chain backward and report the result.
 
-    Returns (tactics, True) if the full chain to root was traversed.
-    Returns (tactics, False) if the chain was broken by eviction or cycle.
+    Returns ``(tactics, complete, broken_at, status)`` where ``tactics`` is
+    the root→leaf sequence; ``complete`` is True only if the walk reached
+    the root (``parent_id=None``); ``broken_at`` is the first state id the
+    walk could not resolve (or the cycling id), or None when complete;
+    ``status`` is "ancestor_evicted" or "cycle" when not complete, else
+    None.
+
+    The caller decides what to surface on the response.  ``rocq_check``
+    drops the partial ``proof_tactics`` field on incomplete walks because
+    a half-chain reads as a complete proof in clients that do not honour
+    ``proof_tactics_complete``.
     """
     tactics: list[str] = []
     current_id: int | None = state_id
     visited: set[int] = set()
+    broken_at: int | None = None
+    status: str | None = None
     while current_id is not None:
         if current_id in visited:
-            break  # cycle detected
+            broken_at = current_id
+            status = "cycle"
+            break
         visited.add(current_id)
         entry = _state_get(current_id)
         if entry is None:
-            break  # chain broken by eviction
+            broken_at = current_id
+            status = "ancestor_evicted"
+            break
         if entry.tactic is not None:
             tactics.append(entry.tactic)
         current_id = entry.parent_id
     tactics.reverse()
     complete = current_id is None  # True only if we reached root (parent_id=None)
-    return tactics, complete
+    return tactics, complete, broken_at, status
 
 
 # ---------------------------------------------------------------------------
@@ -1570,11 +1587,18 @@ def _build_check_success_dict(
     if complete and complete.given_up:
         result["given_up_goals"] = len(complete.given_up)
     if proof_finished and state_id is not None:
-        tactics, chain_complete = _reconstruct_tactic_path(state_id)
-        if tactics:
-            result["proof_tactics"] = tactics
-        if not chain_complete:
+        tactics, chain_complete, broken_at, status = _reconstruct_tactic_path(state_id)
+        if chain_complete:
+            if tactics:
+                result["proof_tactics"] = tactics
+        else:
+            # Do not surface a partial chain: clients that ignore
+            # ``proof_tactics_complete`` would display it as a finished
+            # proof.  Report the truncation as structured fields the
+            # agent can dispatch on.
             result["proof_tactics_complete"] = False
+            result["proof_tactics_status"] = status
+            result["proof_tactics_broken_at"] = broken_at
         result["proof_hint"] = (
             "Proof complete! Assemble imports + theorem statement "
             "+ Proof. + tactics + Qed. then validate with "

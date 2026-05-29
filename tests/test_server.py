@@ -1152,9 +1152,11 @@ class TestReconstructTacticPath:
 
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "intros.", step=1)
-        tactics, complete = _reconstruct_tactic_path(s1)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s1)
         assert tactics == ["intros."]
         assert complete is True
+        assert broken_at is None
+        assert status is None
 
     def test_multi_step_chain(self):
         """Chain: root → t1 → t2 → t3."""
@@ -1164,22 +1166,26 @@ class TestReconstructTacticPath:
         s1 = add_mock_state(root, "intros.", step=1)
         s2 = add_mock_state(s1, "induction n.", step=2)
         s3 = add_mock_state(s2, "reflexivity.", step=3)
-        tactics, complete = _reconstruct_tactic_path(s3)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s3)
         assert tactics == [
             "intros.",
             "induction n.",
             "reflexivity.",
         ]
         assert complete is True
+        assert broken_at is None
+        assert status is None
 
     def test_root_state_returns_empty(self):
         """Root state (tactic=None) returns empty list."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
         root = add_mock_state(None, None, step=0)
-        tactics, complete = _reconstruct_tactic_path(root)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(root)
         assert tactics == []
         assert complete is True
+        assert broken_at is None
+        assert status is None
 
     def test_branching_follows_parent_chain(self):
         """Two branches from root — each returns only its own path."""
@@ -1193,23 +1199,25 @@ class TestReconstructTacticPath:
         b1 = add_mock_state(root, "intro n.", step=1)
         b2 = add_mock_state(b1, "lia.", step=2)
 
-        tactics_a, complete_a = _reconstruct_tactic_path(a2)
+        tactics_a, complete_a, _, _ = _reconstruct_tactic_path(a2)
         assert tactics_a == ["intros.", "auto."]
         assert complete_a is True
-        tactics_b, complete_b = _reconstruct_tactic_path(b2)
+        tactics_b, complete_b, _, _ = _reconstruct_tactic_path(b2)
         assert tactics_b == ["intro n.", "lia."]
         assert complete_b is True
 
-    def test_nonexistent_state_returns_empty(self):
-        """Querying a non-existent state_id returns empty list."""
+    def test_nonexistent_state_reports_eviction(self):
+        """Querying a non-existent state_id reports ancestor_evicted with broken_at."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        tactics, complete = _reconstruct_tactic_path(9999)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(9999)
         assert tactics == []
         assert complete is False
+        assert broken_at == 9999
+        assert status == "ancestor_evicted"
 
-    def test_broken_chain_returns_partial(self):
-        """If ancestor is evicted, returns partial chain from first found."""
+    def test_broken_chain_reports_eviction(self):
+        """If ancestor is evicted, reports broken_at == evicted-ancestor id."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1221,13 +1229,16 @@ class TestReconstructTacticPath:
         # Simulate eviction of root and s1
         del _state_table[root]
         del _state_table[s1]
-        # Only s2 survives — chain is broken
-        tactics, complete = _reconstruct_tactic_path(s2)
+        # Only s2 survives — chain is broken at s1 (the first ancestor we
+        # try to resolve after s2).
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s2)
         assert tactics == ["auto."]
         assert complete is False
+        assert broken_at == s1
+        assert status == "ancestor_evicted"
 
     def test_cycle_detection(self):
-        """A state whose parent_id points to itself terminates without infinite loop."""
+        """A state whose parent_id points to itself terminates and reports cycle."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1236,24 +1247,28 @@ class TestReconstructTacticPath:
         s1 = add_mock_state(None, "intros.", step=0)
         # Manually create a cycle: s1's parent_id points to itself
         _state_table[s1].parent_id = s1
-        tactics, complete = _reconstruct_tactic_path(s1)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s1)
         # Should terminate; chain is not complete (cycle detected before reaching root)
         assert isinstance(tactics, list)
         assert complete is False
+        assert broken_at == s1
+        assert status == "cycle"
 
     def test_completeness_flag_true(self):
-        """A normal chain root->s1->s2 returns (tactics, True)."""
+        """A normal chain root->s1->s2 returns (tactics, True, None, None)."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "t1.", step=1)
         s2 = add_mock_state(s1, "t2.", step=2)
-        tactics, complete = _reconstruct_tactic_path(s2)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s2)
         assert tactics == ["t1.", "t2."]
         assert complete is True
+        assert broken_at is None
+        assert status is None
 
     def test_completeness_flag_false_on_eviction(self):
-        """When the root is evicted, returns (partial_tactics, False)."""
+        """When the root is evicted, broken_at names it and status is ancestor_evicted."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1264,10 +1279,78 @@ class TestReconstructTacticPath:
         s2 = add_mock_state(s1, "auto.", step=2)
         # Evict root
         del _state_table[root]
-        tactics, complete = _reconstruct_tactic_path(s2)
+        tactics, complete, broken_at, status = _reconstruct_tactic_path(s2)
         assert complete is False
-        # Should still have the tactics from surviving states
+        assert broken_at == root
+        assert status == "ancestor_evicted"
+        # Surviving tactics are still returned (the caller decides what to do)
         assert "auto." in tactics
+
+
+class TestCheckSuccessProofTacticsShape:
+    """Response shape of ``_build_check_success_dict`` around ``proof_tactics``.
+
+    Pins the contract on chain breaks: drop the partial ``proof_tactics``
+    list entirely, surface ``proof_tactics_status`` and
+    ``proof_tactics_broken_at`` instead.  Defends against clients that
+    ignore ``proof_tactics_complete`` and would otherwise display a half-
+    chain as if it were a finished proof.
+    """
+
+    def _call(self, state_id):
+        from rocq_mcp.interactive import _build_check_success_dict
+
+        return _build_check_success_dict(
+            goals_text="",
+            proof_finished=True,
+            commands_run=1,
+            check_time_ms=0,
+            state_id=state_id,
+            from_state_id=state_id,
+            feedback_pairs=[],
+            stale_warning=None,
+            complete=None,
+        )
+
+    def test_complete_chain_includes_proof_tactics(self):
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "reflexivity.", step=2)
+
+        result = self._call(s2)
+        assert result["proof_tactics"] == ["intros.", "reflexivity."]
+        assert "proof_tactics_complete" not in result
+        assert "proof_tactics_status" not in result
+        assert "proof_tactics_broken_at" not in result
+
+    def test_broken_chain_drops_proof_tactics_and_surfaces_status(self):
+        from rocq_mcp.interactive import _state_table
+
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "reflexivity.", step=2)
+        del _state_table[root]
+        del _state_table[s1]
+
+        result = self._call(s2)
+        # Partial chain MUST NOT leak: a client ignoring the completeness
+        # flag would render ["reflexivity."] as a finished proof.
+        assert "proof_tactics" not in result
+        assert result["proof_tactics_complete"] is False
+        assert result["proof_tactics_status"] == "ancestor_evicted"
+        assert result["proof_tactics_broken_at"] == s1
+
+    def test_cycle_surfaces_cycle_status(self):
+        from rocq_mcp.interactive import _state_table
+
+        s1 = add_mock_state(None, "intros.", step=0)
+        _state_table[s1].parent_id = s1  # self-cycle
+
+        result = self._call(s1)
+        assert "proof_tactics" not in result
+        assert result["proof_tactics_complete"] is False
+        assert result["proof_tactics_status"] == "cycle"
+        assert result["proof_tactics_broken_at"] == s1
 
 
 # =========================================================================

@@ -1969,7 +1969,12 @@ async def rocq_check(
 
     When proof_finished=True, also returns proof_tactics (ordered list of
     all tactics from root to current state) and proof_hint (instructions
-    for assembling the final .v file).
+    for assembling the final .v file).  If that chain cannot be fully
+    reconstructed (an ancestor state was LRU-evicted, or a cycle is
+    detected), proof_tactics is omitted and proof_tactics_status
+    ("ancestor_evicted" or "cycle") plus proof_tactics_broken_at (the
+    offending state_id) are returned instead, so a partial chain is never
+    mistaken for a complete proof.
 
     Recommended workflow (each step threads ``state_id`` explicitly):
     1. ``s0 = rocq_start(file=..., theorem=...)["state_id"]``

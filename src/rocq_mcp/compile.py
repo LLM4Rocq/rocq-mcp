@@ -177,6 +177,73 @@ _COQC_POS_RE = re.compile(
 )
 
 
+# Pattern → diagnostic-hint table for common configuration errors.
+# Each entry pairs a compiled regex against an error string with a
+# template.  Templates may reference named groups from the match
+# (``{name}``) to incorporate the offending identifier into the hint.
+#
+# Why this exists: the bare coqc error tells the agent what failed
+# but not *why* — and the why is almost always a workspace/load-path
+# misconfiguration, not a proof bug.  Hints here steer the agent
+# toward fixing config instead of grinding tactics.
+_MISSING_LOAD_PATH_RE = re.compile(
+    r"Cannot find a physical path bound to logical path\s+(?P<name>[\w.]+)",
+    re.IGNORECASE,
+)
+_VERSION_MISMATCH_RE = re.compile(
+    r"makes inconsistent assumptions over library\s+(?P<library>[\w.]+)",
+    re.IGNORECASE,
+)
+
+
+def _diagnostic_hint_for_error(error: str | None) -> str | None:
+    """Return an actionable diagnostic hint for *error*, or None.
+
+    Pattern-matches the coqc error text against known configuration
+    failure modes.  Returns a one-line hint mentioning the
+    misconfigured surface (load path, Coq version) and the offending
+    identifier from the error, when extractable.
+
+    Recovery-style hints (use rocq_start at the position, etc.) are
+    set elsewhere and remain in the response.  This function returns
+    a *separate* string that callers can attach as
+    ``diagnostic_hint`` so the agent can choose to read both.
+
+    Returns None when:
+    - *error* is empty or None
+    - no pattern matched (likely a proof-level error — the existing
+      recovery hint is the right guidance)
+    """
+    if not error:
+        return None
+    m = _MISSING_LOAD_PATH_RE.search(error)
+    if m is not None:
+        # Strip the trailing sentence period that the regex's [\w.]+
+        # greedily captures — the user expects a clean logical name.
+        name = m.group("name").rstrip(".")
+        return (
+            f"Load-path mismatch: no -Q / -R mapping for logical "
+            f"path '{name}'. Check the workspace's _CoqProject "
+            f"(or _RocqProject) for a line like '-Q <dir> {name}' "
+            f"and verify <dir> exists and contains compiled .vo "
+            f"files. If the directory lives outside the workspace, "
+            f"see the path-containment rules in README.md."
+        )
+    m = _VERSION_MISMATCH_RE.search(error)
+    if m is not None:
+        library = m.group("library").rstrip(".")
+        return (
+            f"Probable Coq version mismatch: the workspace's .vo "
+            f"files were compiled against a different Coq version "
+            f"than the coqc currently in PATH (offending library: "
+            f"'{library}'). Run `coqc --version` and compare with "
+            f"the version that produced your dependencies, then "
+            f"either install the matching Coq via opam or rebuild "
+            f"the .vo files with the current coqc."
+        )
+    return None
+
+
 def _parse_coqc_error_positions(
     stderr: str,
     *,
@@ -435,6 +502,13 @@ def _build_compile_result(
             "Use rocq_check for faster iteration, "
             "or rocq_step_multi to explore alternative tactics."
         )
+    # Attach a pattern-based diagnostic_hint when the error looks like
+    # a recognised configuration failure (load path missing, Coq
+    # version mismatch).  Recovery hints alone don't help the agent
+    # *fix the cause* — diagnostic_hint does.
+    diagnostic_hint = _diagnostic_hint_for_error(error_text)
+    if diagnostic_hint:
+        result_dict["diagnostic_hint"] = diagnostic_hint
     return result_dict
 
 

@@ -112,6 +112,17 @@ Every failure response carries `{success: False, error: str, reason: str}` so an
 
 When a tool returns `pet_restarted: True`, call `rocq_diag` for memory headroom and recent-error history.
 
+### `file_diagnostics`: surfacing silent file-level errors
+
+`rocq_start` and `rocq_toc` may attach a `file_diagnostics: str` field to their response when the file under inspection has coqc-visible errors that pet's RPC interface doesn't expose. Two common triggers:
+
+- A `Require Import` resolves to no physical path (`-Q` flag missing or wrong) — pet silently treats the module body as empty, so any downstream `pet.start` finds no theorems and pet.toc returns an empty outline. The user gets `Theorem_not_found` or an empty TOC instead of "your load path is broken."
+- An earlier declaration in the file failed to type-check (e.g. referenced a symbol from the failed import). The target theorem might still parse fine, so `rocq_start` returns `success=True` with no warning — yet the file's environment is degraded.
+
+When a `file_diagnostics` field is present, **trust it as the actual cause**. The primary error message (`Theorem_not_found`, empty TOC) is downstream; `file_diagnostics` carries the upstream coqc output that explains why.
+
+The check uses coqc out-of-band (independent of pet) and skips silently if coqc isn't on PATH, the file compiles cleanly, or the check times out. Latency cost is one coqc invocation per call site that triggers the check (theorem-mode `rocq_start` success and failure; `rocq_toc` when pet returns an empty outline).
+
 ### Concurrency model
 
 *Background (both audiences):* `rocq-mcp` is **single-tenant per process**.  All agent-facing state — the live `state_id` table, the import cache, the active workspace, and the single `pet` subprocess — is process-global.  Actively-used states are LRU-protected: a `state_id` you keep querying via `from_state` will not be evicted by a peer caller churning through new states (see `ROCQ_MAX_STATES`).  The remaining cross-agent costs are workspace-swap latency, pet RAM growth from accumulated Fleche cache, and the rare case of a peer calling `force_restart=True` (which kills pet under everyone).

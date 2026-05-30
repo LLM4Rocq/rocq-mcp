@@ -159,7 +159,11 @@ class TestStepMultiReal:
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
         result = asyncio.run(
-            run_step_multi(tactics=["auto"] * 25, lifespan_state=lifespan_state)
+            run_step_multi(
+                tactics=["auto"] * 25,
+                lifespan_state=lifespan_state,
+                from_state=1,
+            )
         )
         assert result["success"] is False
         assert "25" in result["error"]
@@ -174,6 +178,7 @@ class TestStepMultiReal:
             run_step_multi(
                 tactics=["auto.", 'Load "evil".', "lia."],
                 lifespan_state=lifespan_state,
+                from_state=1,
             )
         )
         assert result["success"] is False
@@ -181,8 +186,7 @@ class TestStepMultiReal:
 
     def test_valid_tactics_with_mocked_pet(self):
         """run_step_multi with valid tactics returns structured results."""
-        from rocq_mcp.interactive import run_step_multi
-        from rocq_mcp.interactive import _state_add, _state_current_id
+        from rocq_mcp.interactive import _state_add, _state_table, run_step_multi
 
         # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
@@ -222,6 +226,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["auto", "lia", "ring"],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -237,11 +242,9 @@ class TestStepMultiReal:
             assert "goals" in entry
             assert "proof_finished" in entry
 
-        # State table current_id should NOT have changed
-        # (step_multi is read-only exploration)
-        from rocq_mcp.interactive import _state_current_id as cur_id
-
-        assert cur_id == injected_id
+        # step_multi is read-only — the injected state must still be in the
+        # table, not consumed/replaced by the exploration.
+        assert injected_id in _state_table
 
     def test_valid_tactics_with_from_state(self):
         """run_step_multi with from_state uses the specified state."""
@@ -299,8 +302,8 @@ class TestStepMultiReal:
         call_args = mock_pet.run.call_args
         assert call_args[0][0] is state_a
 
-    def test_no_state_error(self):
-        """run_step_multi with no active state returns error."""
+    def test_unknown_state_error(self):
+        """run_step_multi with a never-existed state id returns a clear error."""
         from rocq_mcp.interactive import run_step_multi
 
         lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
@@ -308,11 +311,15 @@ class TestStepMultiReal:
         mock_pet = MagicMock()
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
-                run_step_multi(tactics=["auto"], lifespan_state=lifespan_state)
+                run_step_multi(
+                    tactics=["auto"],
+                    lifespan_state=lifespan_state,
+                    from_state=999999,
+                )
             )
 
         assert result["success"] is False
-        assert "no active" in result["error"].lower()
+        assert "does not exist" in result["error"].lower()
 
     def test_broken_pipe_returns_pet_restarted(self):
         """run_step_multi returns pet_restarted=True on BrokenPipeError."""
@@ -321,7 +328,7 @@ class TestStepMultiReal:
 
         # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
-        _state_add(
+        injected_id = _state_add(
             state=parent_state,
             file="test.v",
             theorem="t",
@@ -346,6 +353,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["auto."],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -360,7 +368,7 @@ class TestStepMultiReal:
 
         # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
-        _state_add(
+        injected_id = _state_add(
             state=parent_state,
             file="test.v",
             theorem="t",
@@ -385,6 +393,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["auto."],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -405,7 +414,7 @@ class TestStepMultiReal:
 
         # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
-        _state_add(
+        injected_id = _state_add(
             state=parent_state,
             file="test.v",
             theorem="t",
@@ -435,6 +444,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["auto."],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -456,7 +466,7 @@ class TestStepMultiReal:
 
         # Inject a mock state into the state table
         parent_state = _make_mock_state(proof_finished=False)
-        _state_add(
+        injected_id = _state_add(
             state=parent_state,
             file="test.v",
             theorem="t",
@@ -486,6 +496,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["auto."],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -503,7 +514,7 @@ class TestStepMultiReal:
         from rocq_mcp.interactive import run_step_multi, _state_add
 
         parent_state = _make_mock_state(proof_finished=False)
-        _state_add(
+        injected_id = _state_add(
             state=parent_state,
             file="test.v",
             theorem="t",
@@ -532,6 +543,7 @@ class TestStepMultiReal:
                 run_step_multi(
                     tactics=["omega_bad_tactic.", "lia."],
                     lifespan_state=lifespan_state,
+                    from_state=injected_id,
                 )
             )
 
@@ -575,12 +587,12 @@ class TestStepMultiIntegration:
         and verifies the state table is not corrupted.
         """
         from rocq_mcp.interactive import (
-            run_start,
+            _state_table,
             run_check,
+            run_start,
             run_step_multi,
         )
         from rocq_mcp.server import _invalidate_pet
-        from rocq_mcp.interactive import _state_current_id
 
         vfile = workspace / "step_multi_test.v"
         vfile.write_text(
@@ -609,8 +621,8 @@ class TestStepMultiIntegration:
             assert r2["success"] is True
             intros_state_id = r2["state_id"]
 
-            # Record the current state id before exploration
-            from rocq_mcp.interactive import _state_current_id as saved_current
+            # Snapshot the state-table keys before exploration.
+            keys_before = set(_state_table.keys())
 
             # Try multiple tactics via run_step_multi (read-only exploration)
             r3 = await run_step_multi(
@@ -625,10 +637,9 @@ class TestStepMultiIntegration:
             assert r3["results"][0]["success"] is True
             assert r3["results"][0]["proof_finished"] is True
 
-            # State table current_id should NOT have changed
-            from rocq_mcp.interactive import _state_current_id as after_current
-
-            assert after_current == saved_current
+            # step_multi is read-only: no new persistent entries should
+            # have been added to the table.
+            assert set(_state_table.keys()) == keys_before
 
             # Commit the winning tactic via run_check
             r4 = await run_check(

@@ -316,7 +316,6 @@ class _StateEntry:
 # on different files sharing one rocq-mcp process).
 _state_table: "OrderedDict[int, _StateEntry]" = OrderedDict()
 _state_next_id: int = 1
-_state_current_id: int | None = None
 
 
 def _state_add(
@@ -332,7 +331,7 @@ def _state_add(
     resolved_file: str | None = None,
 ) -> int:
     """Add a state to the table and return its integer ID."""
-    global _state_next_id, _state_current_id
+    global _state_next_id
     sid = _state_next_id
     _state_next_id += 1
     _state_table[sid] = _StateEntry(
@@ -347,7 +346,6 @@ def _state_add(
         file_mtime=file_mtime,
         resolved_file=resolved_file,
     )
-    _state_current_id = sid
     # Evict LRU entries when table exceeds max size.
     while len(_state_table) > _MAX_STATES:
         _state_table.popitem(last=False)
@@ -368,11 +366,8 @@ def _state_get(state_id: int) -> _StateEntry | None:
 
 
 def _state_remove(state_id: int) -> None:
-    """Drop a state from the table; clear ``_state_current_id`` if it pointed here."""
-    global _state_current_id
+    """Drop a state from the table."""
     _state_table.pop(state_id, None)
-    if _state_current_id == state_id:
-        _state_current_id = None
 
 
 def _state_get_or_error(state_id: int) -> tuple[_StateEntry | None, str | None]:
@@ -400,34 +395,23 @@ def _state_get_or_error(state_id: int) -> tuple[_StateEntry | None, str | None]:
 
 def _state_invalidate_all() -> None:
     """Clear all states (called on pet crash/invalidation)."""
-    global _state_current_id
     _state_table.clear()
-    _state_current_id = None
 
 
 def _resolve_check_base_state(
-    from_state: int | None,
+    from_state: int,
 ) -> tuple["_StateEntry | None", int | None, str | None]:
     """Resolve the base state for ``run_check`` / friends.
 
     Returns ``(entry, base_state_id, error_message)``.  Exactly one of
-    *error_message* / ``(entry, base_state_id)`` is set.  When
-    *from_state* is ``None``, falls back to ``_state_current_id``
-    (the most recently mutated state).
+    *error_message* / ``(entry, base_state_id)`` is set.  ``from_state``
+    is required — there is no implicit "current state" fallback, which
+    avoids a peer-caller hazard in shared-process deployments.
     """
-    if from_state is not None:
-        entry, err = _state_get_or_error(from_state)
-        if err:
-            return None, None, err
-        return entry, from_state, None
-
-    cur_id = _state_current_id
-    if cur_id is None:
-        return None, None, "No active state. Use rocq_start first."
-    entry = _state_get(cur_id)
-    if entry is None:
-        return None, None, "No active state. Use rocq_start first."
-    return entry, cur_id, None
+    entry, err = _state_get_or_error(from_state)
+    if err:
+        return None, None, err
+    return entry, from_state, None
 
 
 def _check_staleness(entry: _StateEntry) -> str | None:
@@ -1601,7 +1585,7 @@ async def run_check(
     body: str,
     timeout: float,
     lifespan_state: dict[str, Any],
-    from_state: int | None = None,
+    from_state: int,
     *,
     include_warnings: bool = True,
 ) -> dict[str, Any]:
@@ -1795,7 +1779,7 @@ async def run_check(
 async def run_step_multi(
     tactics: list[str],
     lifespan_state: dict[str, Any],
-    from_state: int | None = None,
+    from_state: int,
     *,
     include_warnings: bool = True,
 ) -> dict[str, Any]:

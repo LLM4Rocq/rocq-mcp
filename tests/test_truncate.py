@@ -102,7 +102,6 @@ class TestFeedbackCollection:
 
         _interactive._state_table.clear()
         _interactive._state_next_id = 1
-        _interactive._state_current_id = None
 
         mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
         sid = _interactive._state_add(
@@ -570,7 +569,6 @@ class TestStepMultiFeedback:
 
         _interactive._state_table.clear()
         _interactive._state_next_id = 1
-        _interactive._state_current_id = None
 
         mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
         sid = _interactive._state_add(
@@ -729,7 +727,6 @@ class _MockPetBase:
 
         _interactive._state_table.clear()
         _interactive._state_next_id = 1
-        _interactive._state_current_id = None
 
         mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
         sid = _interactive._state_add(

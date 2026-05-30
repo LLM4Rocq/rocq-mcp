@@ -315,21 +315,21 @@ class TestCheckEdgeCases:
     """Edge cases for run_check."""
 
     @pytest.mark.asyncio
-    async def test_no_active_state(self, workspace, lifespan_state):
-        """Call run_check with no prior run_start and from_state=None, expect error."""
+    async def test_unknown_state_id(self, workspace, lifespan_state):
+        """Call run_check with a state ID that has never existed; expect a
+        clear 'does not exist' error.  Replaces the previous 'no active
+        state' test from when ``from_state`` was optional."""
         from rocq_mcp.interactive import run_check
 
         cr = await run_check(
             body="intros.",
             timeout=30.0,
             lifespan_state=lifespan_state,
-            from_state=None,
+            from_state=999999,
         )
         assert cr["success"] is False
         assert "error" in cr
-        # Should indicate there is no active state
-        err_lower = cr["error"].lower()
-        assert "no active" in err_lower or "state" in err_lower
+        assert "does not exist" in cr["error"].lower()
 
     @pytest.mark.asyncio
     async def test_empty_body(self, workspace, lifespan_state):
@@ -738,7 +738,6 @@ class TestCheckMultiCommandTimeout:
         # Set up state
         _interactive._state_table.clear()
         _interactive._state_next_id = 1
-        _interactive._state_current_id = None
 
         mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
         sid = _interactive._state_add(

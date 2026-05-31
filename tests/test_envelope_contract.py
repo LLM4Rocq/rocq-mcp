@@ -108,6 +108,7 @@ class TestUnifiedFailureEnvelope:
             body="x" * (ROCQ_MAX_SOURCE_SIZE + 1),
             timeout=30.0,
             lifespan_state=ls,
+            from_state=1,
         )
         _assert_failure_envelope(result, expected_reason="validation")
 
@@ -119,6 +120,7 @@ class TestUnifiedFailureEnvelope:
         result = await run_step_multi(
             tactics=[],
             lifespan_state=ls,
+            from_state=1,
         )
         _assert_failure_envelope(result, expected_reason="validation")
 
@@ -169,7 +171,7 @@ class TestWrapperNoContextEnvelope:
         from rocq_mcp.server import rocq_check
 
         _assert_failure_envelope(
-            await rocq_check(body="reflexivity.", ctx=None),
+            await rocq_check(body="reflexivity.", from_state=1, ctx=None),
             expected_reason="validation",
         )
 
@@ -178,7 +180,7 @@ class TestWrapperNoContextEnvelope:
         from rocq_mcp.server import rocq_step_multi
 
         _assert_failure_envelope(
-            await rocq_step_multi(tactics=["reflexivity."], ctx=None),
+            await rocq_step_multi(tactics=["reflexivity."], from_state=1, ctx=None),
             expected_reason="validation",
         )
 

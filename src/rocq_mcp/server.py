@@ -1864,14 +1864,14 @@ async def rocq_start(
 @mcp.tool
 async def rocq_step_multi(
     tactics: list[str],
-    from_state: int | None = None,
+    from_state: int,
     include_warnings: bool = True,
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try multiple tactics at once — find what works without guessing.
 
-    Tests each tactic against the current proof state and returns all
+    Tests each tactic against a specific proof state and returns all
     results. Does NOT advance the state — commit the winner with
     rocq_check.
 
@@ -1891,11 +1891,6 @@ async def rocq_step_multi(
     Each result entry includes a ``feedback`` field (truncated string)
     when the tactic produces visible output (e.g., ``Print``, ``Search``).
 
-    Requires an active state from rocq_start or rocq_check (or use from_state).
-    With ``from_state=None`` and no current state in the table, returns a
-    validation failure with reason ``"validation"`` and a hint to call
-    rocq_start first.
-
     **Canonical exploration pattern:** if the first few steps of a proof
     are a confident prefix, advance with ``rocq_check`` first and pass
     the resulting ``state_id`` as ``from_state`` here — don't repeat the
@@ -1904,11 +1899,11 @@ async def rocq_step_multi(
 
     Args:
         tactics: List of tactics to try (max 20).
-        from_state: Try from a specific state (default: current state).
-            For exploring alternatives, prefer advancing the prefix via
-            ``rocq_check(from_state=S, body=prefix)`` and passing that
-            new ``state_id`` here over re-running the prefix inside each
-            tactic.
+        from_state: State ID to try the tactics from.  Required — use the
+            ``state_id`` returned by ``rocq_start`` or a previous
+            ``rocq_check``.  There is no implicit "current state"
+            fallback (avoids cross-agent state confusion when peers
+            share this rocq-mcp process).
         include_warnings: If True (default), per-tactic ``feedback`` includes
             all severities.  If False, drop entries at LSP Warning severity.
         timeout: Per-call timeout in seconds for the whole batch.  The
@@ -1959,7 +1954,7 @@ async def rocq_step_multi(
 @mcp.tool
 async def rocq_check(
     body: str,
-    from_state: int | None = None,
+    from_state: int,
     workspace: str = "",
     timeout: int = 0,
     include_warnings: bool = True,
@@ -1976,11 +1971,11 @@ async def rocq_check(
     all tactics from root to current state) and proof_hint (instructions
     for assembling the final .v file).
 
-    Recommended workflow:
-    1. rocq_start(file=..., theorem=...) to open the proof
-    2. rocq_check(body="intros. simpl.") to advance
-    3. If stuck: rocq_step_multi(tactics=[...]) to explore
-    4. rocq_check(body="winning_tactic.") to commit
+    Recommended workflow (each step threads ``state_id`` explicitly):
+    1. ``s0 = rocq_start(file=..., theorem=...)["state_id"]``
+    2. ``s1 = rocq_check(from_state=s0, body="intros. simpl.")["state_id"]``
+    3. If stuck: ``rocq_step_multi(from_state=s1, tactics=[...])`` to explore
+    4. ``rocq_check(from_state=s1, body="winning_tactic.")`` to commit
 
     When commands produce visible output (e.g., ``Print``, ``Check``,
     ``vm_compute``, ``native_compute``), a ``feedback`` field is included
@@ -1993,7 +1988,11 @@ async def rocq_check(
 
     Args:
         body: Commands to execute (one or more Rocq sentences).
-        from_state: Execute from a specific state ID (default: current state).
+        from_state: State ID to execute from.  Required — use the
+            ``state_id`` returned by ``rocq_start`` or a previous
+            ``rocq_check``.  There is no implicit "current state"
+            fallback (avoids cross-agent state confusion when peers
+            share this rocq-mcp process).
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
         timeout: Timeout in seconds (default: ROCQ_PET_TIMEOUT env var).
         include_warnings: If True (default), per-step ``feedback`` includes

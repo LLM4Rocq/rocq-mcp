@@ -572,6 +572,7 @@ class TestValidationErrorsRecorded:
             body="Drop.",  # forbidden
             timeout=1.0,
             lifespan_state=ls,
+            from_state=1,
         )
         assert result["success"] is False
         assert any(e["tool"] == "rocq_check" for e in ls["recent_errors"])
@@ -585,6 +586,7 @@ class TestValidationErrorsRecorded:
         result = await run_step_multi(
             tactics=["auto."] * 25,
             lifespan_state=ls,
+            from_state=1,
         )
         assert result["success"] is False
         assert any(e["tool"] == "rocq_step_multi" for e in ls["recent_errors"])

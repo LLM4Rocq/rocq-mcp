@@ -1028,6 +1028,7 @@ class TestStepMultiTimeoutForwarding:
         ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
         result = await srv.rocq_step_multi(
             tactics=["auto."],
+            from_state=1,
             timeout=600,
             ctx=ctx,
         )
@@ -1052,6 +1053,7 @@ class TestStepMultiTimeoutForwarding:
         ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
         result = await srv.rocq_step_multi(
             tactics=["auto."],
+            from_state=1,
             timeout=120,
             ctx=ctx,
         )

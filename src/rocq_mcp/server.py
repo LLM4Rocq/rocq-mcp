@@ -1754,6 +1754,7 @@ async def rocq_start(
     character: int | None = None,
     preamble: str = "",
     force_restart: bool = False,
+    timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Start an interactive proof session — see goals, explore tactics.
@@ -1797,6 +1798,13 @@ async def rocq_start(
             and is unhelpful when a recent response already carried
             ``pet_restarted: True`` (pet is already fresh).  See README
             "Concurrency model".  Default: False.
+        timeout: Per-call timeout in seconds for opening the session.
+            Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).
+            Raise this for files with heavy import chains.
+            Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s) so a stray
+            large value cannot park the pet lock indefinitely; when
+            clamping fires the response includes ``clamped_timeout:
+            <cap>`` so the caller can diagnose unexpected timeouts.
 
     On theorem-not-found errors: response includes ``available_in_file:
     list[str]`` with the file's defined names (sorted, capped — see
@@ -1810,6 +1818,13 @@ async def rocq_start(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
+    effective_timeout: float | None
+    if timeout and timeout > 0:
+        effective_timeout = float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP))
+    else:
+        effective_timeout = None
+    clamped = effective_timeout is not None and timeout > ROCQ_QUERY_TIMEOUT_CAP
+
     workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
 
     err = _validate_workspace(workspace)
@@ -1825,7 +1840,7 @@ async def rocq_start(
             "error": "Internal error: no MCP context.",
         }
 
-    return await run_start(
+    result = await run_start(
         file=file,
         theorem=theorem,
         workspace=workspace,
@@ -1834,7 +1849,11 @@ async def rocq_start(
         character=character,
         preamble=preamble,
         force_restart=force_restart,
+        timeout=effective_timeout,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1847,6 +1866,7 @@ async def rocq_step_multi(
     tactics: list[str],
     from_state: int,
     include_warnings: bool = True,
+    timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try multiple tactics at once — find what works without guessing.
@@ -1886,6 +1906,16 @@ async def rocq_step_multi(
             share this rocq-mcp process).
         include_warnings: If True (default), per-tactic ``feedback`` includes
             all severities.  If False, drop entries at LSP Warning severity.
+        timeout: Per-call timeout in seconds for the whole batch.  The
+            per-tactic budget is ``timeout / len(tactics)`` (subject to the
+            usual ``Timeout`` eligibility rules).  Default 0 uses
+            ``ROCQ_PET_TIMEOUT`` (env var, default 30).  Raise this when
+            individual tactics in the batch are expensive.  Clamped to
+            ``ROCQ_QUERY_TIMEOUT_CAP``
+            (default 300s) so a stray large value cannot park the pet
+            lock indefinitely; when clamping fires the response includes
+            ``clamped_timeout: <cap>`` so the caller can diagnose
+            unexpected timeouts.
 
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
@@ -1897,12 +1927,23 @@ async def rocq_step_multi(
             "error": "Internal error: no MCP context.",
         }
 
-    return await run_step_multi(
+    if timeout and timeout > 0:
+        effective_timeout = float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP))
+        clamped = timeout > ROCQ_QUERY_TIMEOUT_CAP
+    else:
+        effective_timeout = 0.0
+        clamped = False
+
+    result = await run_step_multi(
         tactics=tactics,
         lifespan_state=ctx.lifespan_context,
         from_state=from_state,
         include_warnings=include_warnings,
+        timeout=effective_timeout,
     )
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    return result
 
 
 # ---------------------------------------------------------------------------

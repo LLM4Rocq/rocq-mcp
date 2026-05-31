@@ -133,7 +133,7 @@ The remaining cross-agent costs are pure latency: workspace-swap thrash when pee
 | `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` |
 | `ROCQ_VERIFY_TIMEOUT` | `120` | Timeout (seconds) for `rocq_verify` |
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for pytanque-based tools |
-| `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of `rocq_query`; larger values are clamped and the response carries `clamped_timeout: <cap>` |
+| `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of pytanque-based tools (`rocq_query`, `rocq_check`, `rocq_start`, `rocq_step_multi`); larger values are clamped and the response carries `clamped_timeout: <cap>` |
 | `ROCQ_ENRICHMENT_TIMEOUT_CAP` | `5.0` | Cap (seconds) on per-call proof-state capture after a `rocq_compile` / `rocq_compile_file` failure |
 | `ROCQ_MAX_PET_RSS_MB` | `min(50% of system RAM, 16384)` | Maximum pet subprocess RSS (MB). On breach, the call aborts via the timeout recovery path; response includes `reason: "memory_exhausted"` and `pet_restarted: True`. |
 | `ROCQ_MAX_STATES` | `1000` | Cap on the in-memory state table (LRU-evicted). The entry itself is tiny; the real cost lives in pet's Fleche cache and is bounded by `ROCQ_MAX_PET_RSS_MB`. Bump if two or more callers share this process (e.g. parallel sub-agents) and parked states get evicted before they're reused. |

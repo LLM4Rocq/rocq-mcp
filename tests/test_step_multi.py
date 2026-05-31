@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import PET_AVAILABLE
+from tests.conftest import PET_AVAILABLE, add_mock_state
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock states and goals
@@ -945,3 +945,117 @@ class TestStepMultiDeadPetDetection:
 
         assert result["success"] is False
         assert result.get("pet_restarted") is True
+
+
+# ---------------------------------------------------------------------------
+# TestStepMultiTimeoutForwarding: per-call timeout reaches _run_with_pet
+# ---------------------------------------------------------------------------
+
+
+class TestStepMultiTimeoutForwarding:
+    """Per-call ``timeout`` is plumbed from run_step_multi to _run_with_pet.
+
+    The wrapper passes ``timeout=hard_timeout`` (= timeout + grace).
+    Verifies the per-call value drives the budget, not the session default.
+    """
+
+    @pytest.mark.asyncio
+    async def test_forwards_per_call_timeout(self, monkeypatch):
+        """run_step_multi(timeout=120) → _run_with_pet sees 120 + grace."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _PET_TIMEOUT_GRACE, run_step_multi
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            captured["tool"] = tool
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        sid = add_mock_state(parent_id=None, tactic=None)
+
+        lifespan_state = {"pet_timeout": 30.0}
+        await run_step_multi(
+            tactics=["auto."],
+            lifespan_state=lifespan_state,
+            from_state=sid,
+            timeout=120.0,
+        )
+        assert captured["tool"] == "rocq_step_multi"
+        assert captured["timeout"] == 120.0 + _PET_TIMEOUT_GRACE
+
+    @pytest.mark.asyncio
+    async def test_default_uses_session_timeout(self, monkeypatch):
+        """Without timeout, falls back to lifespan_state['pet_timeout']."""
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _PET_TIMEOUT_GRACE, run_step_multi
+
+        captured: dict = {}
+
+        async def fake_run_with_pet(fn, lifespan_state, tool, **kw):
+            captured.update(kw)
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+
+        sid = add_mock_state(parent_id=None, tactic=None)
+
+        lifespan_state = {"pet_timeout": 45.0}
+        await run_step_multi(
+            tactics=["auto."],
+            lifespan_state=lifespan_state,
+            from_state=sid,
+        )
+        assert captured["timeout"] == 45.0 + _PET_TIMEOUT_GRACE
+
+    @pytest.mark.asyncio
+    async def test_wrapper_clamps_to_pet_timeout_cap(self, monkeypatch):
+        """rocq_step_multi clamps timeout to ROCQ_QUERY_TIMEOUT_CAP and echoes it."""
+        import rocq_mcp.server as srv
+
+        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 60)
+
+        captured: dict = {}
+
+        async def fake_run_step_multi(**kw):
+            captured.update(kw)
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "run_step_multi", fake_run_step_multi)
+
+        ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
+        result = await srv.rocq_step_multi(
+            tactics=["auto."],
+            from_state=1,
+            timeout=600,
+            ctx=ctx,
+        )
+        assert captured["timeout"] == 60.0
+        assert result["clamped_timeout"] == 60
+
+    @pytest.mark.asyncio
+    async def test_wrapper_does_not_clamp_below_cap(self, monkeypatch):
+        """A timeout under the cap is forwarded unchanged with no clamped_timeout."""
+        import rocq_mcp.server as srv
+
+        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+
+        captured: dict = {}
+
+        async def fake_run_step_multi(**kw):
+            captured.update(kw)
+            return {"success": True, "results": []}
+
+        monkeypatch.setattr(srv, "run_step_multi", fake_run_step_multi)
+
+        ctx = SimpleNamespace(lifespan_context={"pet_timeout": 30.0})
+        result = await srv.rocq_step_multi(
+            tactics=["auto."],
+            from_state=1,
+            timeout=120,
+            ctx=ctx,
+        )
+        assert captured["timeout"] == 120.0
+        assert "clamped_timeout" not in result

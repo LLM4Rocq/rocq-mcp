@@ -63,6 +63,8 @@ The server exposes eleven MCP tools:
 
 > **Workspace warning:** When the resolved workspace contains no `_RocqProject` / `_CoqProject` / `dune-project` marker AND the call provided explicit `workspace=` or a `file=` hint, the response carries `workspace_warning: str` advising on the load-path resolution. Source-string tools without `workspace=` / `file=` (the legitimate scratch / one-off workflow) stay quiet.
 
+> **.vo rebuild warning:** When `rocq_compile_file` rewrites `.vo` artifacts in a workspace that has one or more active interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`), the response carries `vo_rebuild_warning: str` advising the other agents to call `rocq_start` again to refresh held dependency state. Quiet when no `.vo` changed, when no interactive session lives in this workspace, or when the workspace exceeds the internal scan cap.
+
 > **Per-call timeout clamp:** When any pet-routed tool (`rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) is invoked with `timeout=<seconds>` exceeding `ROCQ_QUERY_TIMEOUT_CAP` (default 300), the call runs with the cap as the actual budget and the response carries `clamped_timeout: <cap>`. The `timeout=` parameter is the user's request; `clamped_timeout` is the server-side ceiling.
 
 ### Choosing a tool

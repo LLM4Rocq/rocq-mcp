@@ -283,7 +283,23 @@ async def run_compile_file_with_state(
     except (ValueError, FileNotFoundError):
         resolved_file = None
 
+    # Snapshot .vo mtimes around the coqc call so we can detect rewrites
+    # that may invalidate cached dependency state held by sibling
+    # interactive sessions in the same workspace.  Both snapshots use
+    # the same helper; the before/after diff is the only signal.
+    ws_path = Path(workspace).resolve()
+    vo_before = _server._snapshot_vo_mtimes(ws_path)
     result = run_compile_file(file, workspace, timeout, include_warnings)
+    vo_after = _server._snapshot_vo_mtimes(ws_path)
+
+    vo_warning = _server._maybe_vo_rebuild_warning(
+        str(ws_path),
+        before_mtimes=vo_before,
+        after_mtimes=vo_after,
+    )
+    if vo_warning and isinstance(result, dict):
+        result["vo_rebuild_warning"] = vo_warning
+
     if lifespan_state is None:
         return result
     if result.get("success"):

@@ -2448,6 +2448,276 @@ class TestFormatGoalsDefField:
 
 
 # =========================================================================
+# vo_rebuild_warning — .vo rebuild detection for rocq_compile_file
+# =========================================================================
+
+
+class TestVoRebuildHelpers:
+    """Unit tests for the helper trio: snapshot / diff / count_sessions."""
+
+    def test_diff_vo_mtimes_detects_modified(self):
+        from rocq_mcp.server import _diff_vo_mtimes
+
+        before = {"/a.vo": 1.0, "/b.vo": 2.0}
+        after = {"/a.vo": 1.0, "/b.vo": 2.5}
+        assert _diff_vo_mtimes(before, after) == ["/b.vo"]
+
+    def test_diff_vo_mtimes_detects_new(self):
+        from rocq_mcp.server import _diff_vo_mtimes
+
+        before = {"/a.vo": 1.0}
+        after = {"/a.vo": 1.0, "/c.vo": 9.0}
+        assert _diff_vo_mtimes(before, after) == ["/c.vo"]
+
+    def test_diff_vo_mtimes_ignores_deletions(self):
+        from rocq_mcp.server import _diff_vo_mtimes
+
+        before = {"/a.vo": 1.0, "/gone.vo": 2.0}
+        after = {"/a.vo": 1.0}
+        assert _diff_vo_mtimes(before, after) == []
+
+    def test_diff_vo_mtimes_unchanged(self):
+        from rocq_mcp.server import _diff_vo_mtimes
+
+        before = {"/a.vo": 1.0}
+        after = {"/a.vo": 1.0}
+        assert _diff_vo_mtimes(before, after) == []
+
+    def test_snapshot_vo_mtimes_finds_files(self, tmp_path):
+        from rocq_mcp.server import _snapshot_vo_mtimes
+
+        (tmp_path / "a.vo").write_text("x")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.vo").write_text("y")
+        (sub / "ignored.txt").write_text("z")
+
+        snap = _snapshot_vo_mtimes(tmp_path)
+        assert snap is not None
+        keys = {Path(k).name for k in snap.keys()}
+        assert keys == {"a.vo", "b.vo"}
+
+    def test_snapshot_vo_mtimes_prunes_hidden(self, tmp_path):
+        from rocq_mcp.server import _snapshot_vo_mtimes
+
+        (tmp_path / "a.vo").write_text("x")
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "skip.vo").write_text("y")
+
+        snap = _snapshot_vo_mtimes(tmp_path)
+        assert snap is not None
+        keys = {Path(k).name for k in snap.keys()}
+        assert keys == {"a.vo"}
+
+    def test_snapshot_vo_mtimes_returns_none_over_cap(self, tmp_path, monkeypatch):
+        from rocq_mcp import server as _server
+
+        monkeypatch.setattr(_server, "_VO_SCAN_FILE_CAP", 2)
+        for i in range(5):
+            (tmp_path / f"f{i}.vo").write_text("x")
+
+        assert _server._snapshot_vo_mtimes(tmp_path) is None
+
+    def test_count_sessions_in_workspace_under_ws(self, tmp_path):
+        from rocq_mcp.interactive import _state_add
+        from rocq_mcp.server import _count_sessions_in_workspace
+
+        f = tmp_path / "thm.v"
+        f.write_text("")
+        st = mock.MagicMock()
+        st.proof_finished = False
+        _state_add(
+            state=st,
+            file="thm.v",
+            theorem="t",
+            workspace=str(tmp_path),
+            parent_id=None,
+            tactic=None,
+            step=0,
+            resolved_file=str(f.resolve()),
+        )
+
+        assert _count_sessions_in_workspace(tmp_path) == 1
+
+    def test_count_sessions_in_workspace_outside_ws(self, tmp_path):
+        from rocq_mcp.interactive import _state_add
+        from rocq_mcp.server import _count_sessions_in_workspace
+
+        other = tmp_path / "other"
+        other.mkdir()
+        f = other / "thm.v"
+        f.write_text("")
+        st = mock.MagicMock()
+        st.proof_finished = False
+        _state_add(
+            state=st,
+            file="thm.v",
+            theorem="t",
+            workspace=str(other),
+            parent_id=None,
+            tactic=None,
+            step=0,
+            resolved_file=str(f.resolve()),
+        )
+
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        assert _count_sessions_in_workspace(ws) == 0
+
+
+class TestVoRebuildWarning:
+    """End-to-end: rocq_compile_file attaches vo_rebuild_warning iff
+    rebuilt .vo files coincide with active sessions in the workspace.
+
+    Stubs the actual coqc call via run_compile_file so we exercise only
+    the snapshot/diff/warning wiring.
+    """
+
+    @pytest.fixture
+    def _ctx(self):
+        from tests.conftest import _MockContext
+
+        return _MockContext({"pet_client": None, "pet_timeout": 30.0})
+
+    @staticmethod
+    def _stub_run_compile_file(monkeypatch, result=None):
+        """Replace ``run_compile_file`` (the source of the coqc call) with
+        a stub that returns *result* unchanged.  Patched on the
+        compile_enrichment module because that's where it's looked up.
+        """
+        from rocq_mcp import compile_enrichment as _ce
+
+        if result is None:
+            result = {"success": True, "output": ""}
+
+        def _stub(*_a, **_kw):
+            return dict(result)
+
+        monkeypatch.setattr(_ce, "run_compile_file", _stub)
+
+    @staticmethod
+    def _add_session(workspace: Path, file_under_ws: Path):
+        """Register one interactive session whose resolved_file lives
+        under *workspace*.
+        """
+        from rocq_mcp.interactive import _state_add
+
+        st = mock.MagicMock()
+        st.proof_finished = False
+        _state_add(
+            state=st,
+            file=file_under_ws.name,
+            theorem="t",
+            workspace=str(workspace),
+            parent_id=None,
+            tactic=None,
+            step=0,
+            resolved_file=str(file_under_ws.resolve()),
+        )
+
+    async def test_no_rebuild_no_warning(self, tmp_path, _ctx, monkeypatch):
+        """coqc succeeds without touching any .vo → no warning."""
+        from rocq_mcp import server as _server
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        f = tmp_path / "foo.v"
+        f.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+        # Pre-existing .vo that won't change between snapshots.
+        (tmp_path / "stale.vo").write_text("x")
+
+        # Even with an active session, no rebuild → quiet.
+        self._add_session(tmp_path, f)
+        self._stub_run_compile_file(monkeypatch)
+
+        result = await _server.rocq_compile_file(
+            file=str(f), workspace=str(tmp_path), ctx=_ctx
+        )
+        assert "vo_rebuild_warning" not in result
+
+    async def test_rebuild_no_sessions_no_warning(self, tmp_path, _ctx, monkeypatch):
+        """Rebuild detected, but no interactive session in workspace → quiet."""
+        from rocq_mcp import server as _server
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        f = tmp_path / "foo.v"
+        f.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        snapshots = [
+            {"/x.vo": 1.0},
+            {"/x.vo": 2.0},  # mtime changed → "rebuilt"
+        ]
+
+        def _fake_snapshot(_ws):
+            return snapshots.pop(0)
+
+        monkeypatch.setattr(_server, "_snapshot_vo_mtimes", _fake_snapshot)
+        self._stub_run_compile_file(monkeypatch)
+
+        result = await _server.rocq_compile_file(
+            file=str(f), workspace=str(tmp_path), ctx=_ctx
+        )
+        assert "vo_rebuild_warning" not in result
+
+    async def test_rebuild_with_sessions_warning_present(
+        self, tmp_path, _ctx, monkeypatch
+    ):
+        """Rebuild + active session in workspace → warning fires and
+        names the workspace path and the session count.
+        """
+        from rocq_mcp import server as _server
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        f = tmp_path / "foo.v"
+        f.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        snapshots = [
+            {"/x.vo": 1.0, "/y.vo": 1.0},
+            {"/x.vo": 2.0, "/y.vo": 3.0},  # both rewritten → 2 rebuilt
+        ]
+
+        def _fake_snapshot(_ws):
+            return snapshots.pop(0)
+
+        monkeypatch.setattr(_server, "_snapshot_vo_mtimes", _fake_snapshot)
+        self._stub_run_compile_file(monkeypatch)
+        self._add_session(tmp_path, f)
+
+        result = await _server.rocq_compile_file(
+            file=str(f), workspace=str(tmp_path), ctx=_ctx
+        )
+        assert "vo_rebuild_warning" in result
+        warning = result["vo_rebuild_warning"]
+        assert str(tmp_path) in warning
+        assert "1 interactive session(s)" in warning
+        assert "2 .vo file(s)" in warning
+        assert "rocq_start" in warning
+
+    async def test_over_cap_quiet(self, tmp_path, _ctx, monkeypatch):
+        """Workspace exceeds _VO_SCAN_FILE_CAP → snapshot returns None and
+        the warning stays quiet even with mtime changes and active sessions.
+        """
+        from rocq_mcp import server as _server
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        f = tmp_path / "foo.v"
+        f.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        # Cap to 2 .vo paths; create 5 to blow past it.
+        monkeypatch.setattr(_server, "_VO_SCAN_FILE_CAP", 2)
+        for i in range(5):
+            (tmp_path / f"f{i}.vo").write_text("x")
+
+        self._add_session(tmp_path, f)
+        self._stub_run_compile_file(monkeypatch)
+
+        result = await _server.rocq_compile_file(
+            file=str(f), workspace=str(tmp_path), ctx=_ctx
+        )
+        assert "vo_rebuild_warning" not in result
+
+
+# =========================================================================
 # README documentation patterns smoke test
 # =========================================================================
 

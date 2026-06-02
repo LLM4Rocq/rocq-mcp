@@ -352,6 +352,146 @@ def _maybe_workspace_warning(
     return _WORKSPACE_NO_MARKER_WARNING.format(ws=workspace)
 
 
+# Advisory warning attached when ``rocq_compile_file`` rewrites ``.vo``
+# files in a workspace that has active interactive sessions.  Multi-agent
+# setups can otherwise hit confusing failures: pet keeps memo-serving the
+# pre-rebuild dependency, and downstream errors look like phantom name
+# resolution / type mismatches.  Tells the affected agent to restart.
+_VO_REBUILD_WARNING = (
+    "rocq_compile_file rebuilt {n} .vo file(s) in workspace '{ws}'. "
+    "{m} interactive session(s) in this workspace may be holding stale "
+    "dependency state — call rocq_start again to refresh."
+)
+
+
+# Bound on how many .vo paths we will mtime-snapshot per call.  Cheap
+# insurance against pathological workspaces (e.g. a vendored opam switch
+# accidentally pointed at as the workspace root).  Workspaces above this
+# cap stay quiet rather than slow down every compile.
+_VO_SCAN_FILE_CAP: int = 5000
+
+
+# Directory names skipped during the .vo walk: VCS metadata and common
+# cache / build areas that won't carry interactively-loaded dependencies
+# we care about for staleness.
+_VO_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
+    {".git", ".hg", ".svn", ".cache", "__pycache__", "node_modules"}
+)
+
+
+def _snapshot_vo_mtimes(workspace: Path) -> dict[str, float] | None:
+    """Walk *workspace* for ``.vo`` files and return ``{abspath: mtime}``.
+
+    Returns ``None`` (sentinel for "unscanned") when the workspace exceeds
+    :data:`_VO_SCAN_FILE_CAP` or when the walk hits an :class:`OSError` —
+    better to stay quiet than to emit a half-truth warning.  Does not
+    follow symlinks for directory descent; prunes hidden / build / cache
+    dirs.
+
+    Uses :func:`os.scandir` so the per-file ``stat`` is served from the
+    ``DirEntry`` cache — at the file cap, that's the difference between
+    one and two syscalls per ``.vo``.
+    """
+    try:
+        ws_abs = workspace.resolve()
+    except OSError:
+        return None
+    result: dict[str, float] = {}
+    stack: list[str] = [str(ws_abs)]
+    try:
+        while stack:
+            cur = stack.pop()
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in _VO_SCAN_SKIP_DIRS:
+                                stack.append(entry.path)
+                            continue
+                        if not entry.name.endswith(".vo"):
+                            continue
+                        # follow_symlinks=False keeps the DirEntry stat cache hot;
+                        # symlinked .vo files are rare in real Rocq projects.
+                        st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        # A racing rebuild may have replaced the file mid-walk;
+                        # skip rather than abort the whole scan.
+                        continue
+                    result[os.path.abspath(entry.path)] = st.st_mtime
+                    if len(result) > _VO_SCAN_FILE_CAP:
+                        return None
+    except OSError:
+        return None
+    return result
+
+
+def _diff_vo_mtimes(before: dict[str, float], after: dict[str, float]) -> list[str]:
+    """Return abspaths whose mtime changed or that are newly present.
+
+    Deletions (in ``before`` but not ``after``) are not counted: they
+    cannot make a held pet session stale on their own — only rewrites
+    and new compiled artifacts can.
+    """
+    changed: list[str] = []
+    for path, mtime in after.items():
+        prev = before.get(path)
+        if prev is None or prev != mtime:
+            changed.append(path)
+    return changed
+
+
+def _count_sessions_in_workspace(workspace: Path) -> int:
+    """Number of state-table entries with a resolved file under *workspace*.
+
+    Function-body import of ``_state_table`` to avoid the circular import
+    that would land if ``server.py`` pulled ``interactive`` in at module
+    load (server defines shared infra ``interactive`` consumes).  Mirrors
+    the pattern used by ``compile_enrichment._capture_compile_error_state``.
+    """
+    from rocq_mcp.interactive import _state_table
+
+    try:
+        ws_abs = workspace.resolve()
+    except OSError:
+        return 0
+    count = 0
+    for entry in _state_table.values():
+        rf = entry.resolved_file
+        if rf is None:
+            continue
+        try:
+            rf_path = Path(rf).resolve()
+        except OSError:
+            continue
+        if _path_within(rf_path, ws_abs):
+            count += 1
+    return count
+
+
+def _maybe_vo_rebuild_warning(
+    workspace: str,
+    *,
+    before_mtimes: dict[str, float] | None,
+    after_mtimes: dict[str, float] | None,
+) -> str | None:
+    """Return an advisory warning when rebuilt .vo files coincide with
+    active interactive sessions in the same workspace.
+
+    Quiet when either snapshot is ``None`` (workspace too large to scan
+    or an I/O error during the walk), when no ``.vo`` was rewritten, or
+    when no interactive session in this workspace would be affected.
+    """
+    if before_mtimes is None or after_mtimes is None:
+        return None
+    rebuilt = _diff_vo_mtimes(before_mtimes, after_mtimes)
+    if not rebuilt:
+        return None
+    sessions = _count_sessions_in_workspace(Path(workspace))
+    if sessions == 0:
+        return None
+    return _VO_REBUILD_WARNING.format(n=len(rebuilt), m=sessions, ws=workspace)
+
+
 _DUNE_HEADER = "# Auto-generated by rocq-mcp from dune\n"
 
 
@@ -1444,6 +1584,14 @@ async def rocq_compile_file(
 
     Compilation artifacts (``.vo``/``.vok``/``.vos``/``.glob``/``.aux``)
     are cleaned up; the source file is preserved.
+
+    When the call rewrites ``.vo`` files in a workspace that has active
+    interactive sessions, the result also includes ``vo_rebuild_warning``:
+    a soft advisory naming the workspace and the count of potentially
+    affected sessions, with a hint to call ``rocq_start`` again to refresh
+    held dependency state.  Quiet when no ``.vo`` changed, when no
+    interactive session in this workspace exists, or when the workspace
+    exceeds ``_VO_SCAN_FILE_CAP`` (.vo paths).
 
     Args:
         file: Path to the .v file (relative to workspace).

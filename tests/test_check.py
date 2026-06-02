@@ -647,11 +647,14 @@ class TestCheckProofTactics:
         assert "intro." not in tactics
 
     @pytest.mark.asyncio
-    async def test_proof_tactics_completeness_flag(self, workspace, lifespan_state):
-        """When chain is complete, proof_tactics_complete should NOT be present.
+    async def test_proof_tactics_status_omitted_on_complete_chain(
+        self, workspace, lifespan_state
+    ):
+        """On a complete walk, proof_tactics is present and no status keys appear.
 
-        proof_tactics_complete is only set to False when the chain is broken.
-        A complete proof with a full chain from root omits the key entirely.
+        The status / broken_at / hint envelope is reserved for the
+        broken-walk paths; the happy path carries only proof_tactics and
+        proof_hint, with no status field at all.
         """
         from rocq_mcp.interactive import run_start, run_check
 
@@ -675,9 +678,65 @@ class TestCheckProofTactics:
         assert cr["success"] is True
         assert cr["proof_finished"] is True
         assert "proof_tactics" in cr
-        # proof_tactics_complete should NOT be present when chain is complete
-        # (it is only set to False when the chain is broken)
+        assert "proof_hint" in cr
+        # None of the broken-walk envelope keys should appear, including
+        # the now-removed legacy proof_tactics_complete.
+        assert "proof_tactics_status" not in cr
+        assert "proof_tactics_broken_at" not in cr
+        assert "proof_tactics_hint" not in cr
         assert "proof_tactics_complete" not in cr
+
+    @pytest.mark.asyncio
+    async def test_proof_tactics_status_ancestor_evicted(
+        self, workspace, lifespan_state
+    ):
+        """When an ancestor is evicted before the leaf finishes the proof,
+        the result drops proof_tactics and reports ancestor_evicted at the
+        first missing id.
+        """
+        from rocq_mcp.interactive import run_start, run_check, _state_remove
+
+        vfile = workspace / "check_pt_evicted.v"
+        vfile.write_text(
+            "Theorem t : forall n : nat, n = n.\nProof. intros. reflexivity. Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+        root_id = sr["state_id"]
+
+        cr_mid = await run_check(
+            body="intros.",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=root_id,
+        )
+        assert cr_mid["success"] is True
+        mid_id = cr_mid["state_id"]
+
+        # Evict the *root* state. The leaf state (created next) and the
+        # mid state both stay alive, so resolution succeeds and the
+        # proof_finished branch runs — but the parent walk dies at root.
+        _state_remove(root_id)
+
+        cr = await run_check(
+            body="reflexivity.",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=mid_id,
+        )
+        assert cr["success"] is True
+        assert cr["proof_finished"] is True
+        assert "proof_tactics" not in cr
+        assert cr["proof_tactics_status"] == "ancestor_evicted"
+        assert cr["proof_tactics_broken_at"] == root_id
+        assert "proof_tactics_hint" in cr
+        assert "proof_hint" not in cr
 
 
 # ---------------------------------------------------------------------------

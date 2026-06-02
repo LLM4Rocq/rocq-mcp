@@ -65,6 +65,8 @@ The server exposes eleven MCP tools:
 
 > **.vo rebuild warning:** When `rocq_compile_file` rewrites `.vo` artifacts in a workspace that has one or more active interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`), the response carries `vo_rebuild_warning: str` advising the other agents to call `rocq_start` again to refresh held dependency state. Quiet when no `.vo` changed, when no interactive session lives in this workspace, or when the workspace exceeds the internal scan cap.
 
+> **Proof-tactics chain status:** When a `rocq_check` call finishes a proof (`proof_finished: True`), the server walks the LRU state table backward from the leaf to reconstruct `proof_tactics`. If an ancestor state was LRU-evicted, or (defensively) a cycle is detected, the walk cannot complete; the response then **omits** `proof_tactics` and `proof_hint` and carries `proof_tactics_status` (`"ancestor_evicted"` or `"cycle"`), `proof_tactics_broken_at: int` (the state id where the walk gave up), and a short `proof_tactics_hint` instead. Clients that ignore these keys see no half-chain — they never render a partial walk as a finished proof.
+
 > **Per-call timeout clamp:** When any pet-routed tool (`rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) is invoked with `timeout=<seconds>` exceeding `ROCQ_QUERY_TIMEOUT_CAP` (default 300), the call runs with the cap as the actual budget and the response carries `clamped_timeout: <cap>`. The `timeout=` parameter is the user's request; `clamped_timeout` is the server-side ceiling.
 
 ### Choosing a tool

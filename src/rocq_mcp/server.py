@@ -2351,7 +2351,12 @@ async def rocq_check(
 
     When proof_finished=True, also returns proof_tactics (ordered list of
     all tactics from root to current state) and proof_hint (instructions
-    for assembling the final .v file).
+    for assembling the final .v file).  On a broken walk (an ancestor
+    state was LRU-evicted, or a cycle was detected), proof_tactics and
+    proof_hint are omitted; the response carries ``proof_tactics_status``
+    (``"ancestor_evicted"`` or ``"cycle"``), ``proof_tactics_broken_at``
+    (the state id where the walk gave up), and ``proof_tactics_hint``
+    instead — clients that ignore these keys see no half-chain at all.
 
     Recommended workflow (each step threads ``state_id`` explicitly):
     1. ``s0 = rocq_start(file=..., theorem=...)["state_id"]``

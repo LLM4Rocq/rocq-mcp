@@ -1462,9 +1462,10 @@ class TestReconstructTacticPath:
 
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "intros.", step=1)
-        tactics, complete = _reconstruct_tactic_path(s1)
-        assert tactics == ["intros."]
-        assert complete is True
+        path = _reconstruct_tactic_path(s1)
+        assert path.tactics == ["intros."]
+        assert path.status == "complete"
+        assert path.broken_at is None
 
     def test_multi_step_chain(self):
         """Chain: root → t1 → t2 → t3."""
@@ -1474,22 +1475,24 @@ class TestReconstructTacticPath:
         s1 = add_mock_state(root, "intros.", step=1)
         s2 = add_mock_state(s1, "induction n.", step=2)
         s3 = add_mock_state(s2, "reflexivity.", step=3)
-        tactics, complete = _reconstruct_tactic_path(s3)
-        assert tactics == [
+        path = _reconstruct_tactic_path(s3)
+        assert path.tactics == [
             "intros.",
             "induction n.",
             "reflexivity.",
         ]
-        assert complete is True
+        assert path.status == "complete"
+        assert path.broken_at is None
 
     def test_root_state_returns_empty(self):
         """Root state (tactic=None) returns empty list."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
         root = add_mock_state(None, None, step=0)
-        tactics, complete = _reconstruct_tactic_path(root)
-        assert tactics == []
-        assert complete is True
+        path = _reconstruct_tactic_path(root)
+        assert path.tactics == []
+        assert path.status == "complete"
+        assert path.broken_at is None
 
     def test_branching_follows_parent_chain(self):
         """Two branches from root — each returns only its own path."""
@@ -1503,20 +1506,23 @@ class TestReconstructTacticPath:
         b1 = add_mock_state(root, "intro n.", step=1)
         b2 = add_mock_state(b1, "lia.", step=2)
 
-        tactics_a, complete_a = _reconstruct_tactic_path(a2)
-        assert tactics_a == ["intros.", "auto."]
-        assert complete_a is True
-        tactics_b, complete_b = _reconstruct_tactic_path(b2)
-        assert tactics_b == ["intro n.", "lia."]
-        assert complete_b is True
+        path_a = _reconstruct_tactic_path(a2)
+        assert path_a.tactics == ["intros.", "auto."]
+        assert path_a.status == "complete"
+        assert path_a.broken_at is None
+        path_b = _reconstruct_tactic_path(b2)
+        assert path_b.tactics == ["intro n.", "lia."]
+        assert path_b.status == "complete"
+        assert path_b.broken_at is None
 
-    def test_nonexistent_state_returns_empty(self):
-        """Querying a non-existent state_id returns empty list."""
+    def test_nonexistent_state_returns_ancestor_evicted(self):
+        """Querying a non-existent state_id reports ancestor_evicted at that id."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
-        tactics, complete = _reconstruct_tactic_path(9999)
-        assert tactics == []
-        assert complete is False
+        path = _reconstruct_tactic_path(9999)
+        assert path.tactics == []
+        assert path.status == "ancestor_evicted"
+        assert path.broken_at == 9999
 
     def test_broken_chain_returns_partial(self):
         """If ancestor is evicted, returns partial chain from first found."""
@@ -1531,10 +1537,11 @@ class TestReconstructTacticPath:
         # Simulate eviction of root and s1
         del _state_table[root]
         del _state_table[s1]
-        # Only s2 survives — chain is broken
-        tactics, complete = _reconstruct_tactic_path(s2)
-        assert tactics == ["auto."]
-        assert complete is False
+        # Only s2 survives — chain is broken at s1 (first missing ancestor)
+        path = _reconstruct_tactic_path(s2)
+        assert path.tactics == ["auto."]
+        assert path.status == "ancestor_evicted"
+        assert path.broken_at == s1
 
     def test_cycle_detection(self):
         """A state whose parent_id points to itself terminates without infinite loop."""
@@ -1546,24 +1553,41 @@ class TestReconstructTacticPath:
         s1 = add_mock_state(None, "intros.", step=0)
         # Manually create a cycle: s1's parent_id points to itself
         _state_table[s1].parent_id = s1
-        tactics, complete = _reconstruct_tactic_path(s1)
-        # Should terminate; chain is not complete (cycle detected before reaching root)
-        assert isinstance(tactics, list)
-        assert complete is False
+        path = _reconstruct_tactic_path(s1)
+        assert isinstance(path.tactics, list)
+        assert path.status == "cycle"
+        assert path.broken_at == s1
 
-    def test_completeness_flag_true(self):
-        """A normal chain root->s1->s2 returns (tactics, True)."""
+    def test_cycle_detection_multi_state(self):
+        """A multi-state cycle (s2 -> s1 -> s2) reports the repeating id."""
+        from rocq_mcp.interactive import (
+            _reconstruct_tactic_path,
+            _state_table,
+        )
+
+        s1 = add_mock_state(None, "t1.", step=0)
+        s2 = add_mock_state(s1, "t2.", step=1)
+        # Splice s1's parent back to s2 to form s2 -> s1 -> s2 -> ...
+        _state_table[s1].parent_id = s2
+        path = _reconstruct_tactic_path(s2)
+        assert path.status == "cycle"
+        # Walk visits s2, s1, then would revisit s2 → breaks at s2
+        assert path.broken_at == s2
+
+    def test_status_complete_on_normal_chain(self):
+        """A normal chain root->s1->s2 returns status=complete."""
         from rocq_mcp.interactive import _reconstruct_tactic_path
 
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "t1.", step=1)
         s2 = add_mock_state(s1, "t2.", step=2)
-        tactics, complete = _reconstruct_tactic_path(s2)
-        assert tactics == ["t1.", "t2."]
-        assert complete is True
+        path = _reconstruct_tactic_path(s2)
+        assert path.tactics == ["t1.", "t2."]
+        assert path.status == "complete"
+        assert path.broken_at is None
 
-    def test_completeness_flag_false_on_eviction(self):
-        """When the root is evicted, returns (partial_tactics, False)."""
+    def test_status_ancestor_evicted_on_root_eviction(self):
+        """When the root is evicted, status=ancestor_evicted at root id."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1574,10 +1598,99 @@ class TestReconstructTacticPath:
         s2 = add_mock_state(s1, "auto.", step=2)
         # Evict root
         del _state_table[root]
-        tactics, complete = _reconstruct_tactic_path(s2)
-        assert complete is False
+        path = _reconstruct_tactic_path(s2)
+        assert path.status == "ancestor_evicted"
+        assert path.broken_at == root
         # Should still have the tactics from surviving states
-        assert "auto." in tactics
+        assert "auto." in path.tactics
+
+
+class TestBuildCheckSuccessDictTacticPath:
+    """Verify the proof-finished result envelope around _reconstruct_tactic_path."""
+
+    def test_complete_chain_emits_tactics_and_hint(self):
+        from rocq_mcp.interactive import _build_check_success_dict
+
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "reflexivity.", step=2)
+
+        result = _build_check_success_dict(
+            goals_text="",
+            proof_finished=True,
+            commands_run=1,
+            check_time_ms=10,
+            state_id=s2,
+            from_state_id=s1,
+            feedback_pairs=[],
+            stale_warning=None,
+            complete=None,
+        )
+        assert result["proof_tactics"] == ["intros.", "reflexivity."]
+        assert "proof_hint" in result
+        assert "proof_tactics_status" not in result
+        assert "proof_tactics_broken_at" not in result
+        assert "proof_tactics_hint" not in result
+        assert "proof_tactics_complete" not in result
+
+    def test_ancestor_evicted_drops_tactics_emits_status(self):
+        from rocq_mcp.interactive import (
+            _build_check_success_dict,
+            _state_remove,
+        )
+
+        root = add_mock_state(None, None, step=0)
+        s1 = add_mock_state(root, "intros.", step=1)
+        s2 = add_mock_state(s1, "reflexivity.", step=2)
+        _state_remove(s1)
+
+        result = _build_check_success_dict(
+            goals_text="",
+            proof_finished=True,
+            commands_run=1,
+            check_time_ms=10,
+            state_id=s2,
+            from_state_id=s1,
+            feedback_pairs=[],
+            stale_warning=None,
+            complete=None,
+        )
+        assert result["proof_finished"] is True
+        assert "proof_tactics" not in result
+        assert result["proof_tactics_status"] == "ancestor_evicted"
+        assert result["proof_tactics_broken_at"] == s1
+        assert "proof_tactics_hint" in result
+        assert "proof_hint" not in result
+        assert "proof_tactics_complete" not in result
+
+    def test_cycle_drops_tactics_emits_status(self):
+        from rocq_mcp.interactive import (
+            _build_check_success_dict,
+            _state_table,
+        )
+
+        s1 = add_mock_state(None, "t1.", step=0)
+        s2 = add_mock_state(s1, "t2.", step=1)
+        # Splice s1's parent back to s2 to form s2 -> s1 -> s2 -> ...
+        _state_table[s1].parent_id = s2
+
+        result = _build_check_success_dict(
+            goals_text="",
+            proof_finished=True,
+            commands_run=1,
+            check_time_ms=10,
+            state_id=s2,
+            from_state_id=s1,
+            feedback_pairs=[],
+            stale_warning=None,
+            complete=None,
+        )
+        assert result["proof_finished"] is True
+        assert "proof_tactics" not in result
+        assert result["proof_tactics_status"] == "cycle"
+        assert result["proof_tactics_broken_at"] == s2
+        assert "proof_tactics_hint" in result
+        assert "proof_hint" not in result
 
 
 # =========================================================================

@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 try:
     from pytanque import PetanqueError as _PetanqueError
@@ -439,28 +439,58 @@ def _check_staleness(entry: _StateEntry) -> str | None:
     return None
 
 
-def _reconstruct_tactic_path(state_id: int) -> tuple[list[str], bool]:
-    """Walk the parent_id chain backward and return (tactics in root→leaf order, complete).
+@dataclass(frozen=True)
+class _TacticPathResult:
+    """Outcome of walking the ``parent_id`` chain back from a leaf state.
 
-    Returns (tactics, True) if the full chain to root was traversed.
-    Returns (tactics, False) if the chain was broken by eviction or cycle.
+    ``tactics`` is in root→leaf order and is only meaningful when
+    ``status == "complete"``.  On a broken walk it holds whatever was
+    collected before the break; the caller should not surface it as a
+    finished tactic chain.
+
+    ``status`` is one of:
+
+    - ``"complete"`` — walk reached the root (``parent_id`` is ``None``)
+    - ``"ancestor_evicted"`` — an ancestor entry was missing from the
+      state table (LRU eviction or pet restart)
+    - ``"cycle"`` — a ``current_id`` reappeared during the walk
+
+    ``broken_at`` is the ``current_id`` at the break point in the
+    ``ancestor_evicted`` / ``cycle`` cases, and ``None`` when complete.
+    """
+
+    tactics: list[str]
+    status: Literal["complete", "ancestor_evicted", "cycle"]
+    broken_at: int | None
+
+
+def _reconstruct_tactic_path(state_id: int) -> _TacticPathResult:
+    """Walk the parent_id chain backward; return a ``_TacticPathResult``.
+
+    See ``_TacticPathResult`` for the meaning of each field and the
+    three possible status values.
     """
     tactics: list[str] = []
     current_id: int | None = state_id
     visited: set[int] = set()
+    status: Literal["complete", "ancestor_evicted", "cycle"] = "complete"
+    broken_at: int | None = None
     while current_id is not None:
         if current_id in visited:
-            break  # cycle detected
+            status = "cycle"
+            broken_at = current_id
+            break
         visited.add(current_id)
         entry = _state_get(current_id)
         if entry is None:
-            break  # chain broken by eviction
+            status = "ancestor_evicted"
+            broken_at = current_id
+            break
         if entry.tactic is not None:
             tactics.append(entry.tactic)
         current_id = entry.parent_id
     tactics.reverse()
-    complete = current_id is None  # True only if we reached root (parent_id=None)
-    return tactics, complete
+    return _TacticPathResult(tactics=tactics, status=status, broken_at=broken_at)
 
 
 # ---------------------------------------------------------------------------
@@ -1589,16 +1619,24 @@ def _build_check_success_dict(
     if complete and complete.given_up:
         result["given_up_goals"] = len(complete.given_up)
     if proof_finished and state_id is not None:
-        tactics, chain_complete = _reconstruct_tactic_path(state_id)
-        if tactics:
-            result["proof_tactics"] = tactics
-        if not chain_complete:
-            result["proof_tactics_complete"] = False
-        result["proof_hint"] = (
-            "Proof complete! Assemble imports + theorem statement "
-            "+ Proof. + tactics + Qed. then validate with "
-            "rocq_compile and rocq_verify."
-        )
+        path = _reconstruct_tactic_path(state_id)
+        if path.status == "complete":
+            if path.tactics:
+                result["proof_tactics"] = path.tactics
+            result["proof_hint"] = (
+                "Proof complete! Assemble imports + theorem statement "
+                "+ Proof. + tactics + Qed. then validate with "
+                "rocq_compile and rocq_verify."
+            )
+        else:
+            result["proof_tactics_status"] = path.status
+            result["proof_tactics_broken_at"] = path.broken_at
+            result["proof_tactics_hint"] = (
+                f"Tactic chain unrecoverable ({path.status} at state "
+                f"{path.broken_at}). Call rocq_check(from_state="
+                f"{state_id}) to commit the proof, or rocq_start to "
+                f"restart from a fresh session."
+            )
     return result
 
 

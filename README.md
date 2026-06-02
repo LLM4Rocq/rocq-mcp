@@ -156,6 +156,15 @@ The remaining cross-agent costs are pure latency: workspace-swap thrash when pee
 
 **Operator-side hardening:** the cleanest deployment is one `rocq-mcp` subprocess per concurrent agent.  Over stdio this happens naturally when each MCP client launches its own server; the case that needs care is parallel sub-agents within one client, which inherit the parent's MCP connections and share one `rocq-mcp`.  If you're orchestrating parallel Rocq work, prefer separate top-level invocations over one parent with concurrent sub-agents.
 
+*Claude Code escape hatch.*  Sub-agents in `.claude/agents/<name>.md` accept an inline `mcpServers` entry in their frontmatter ([Claude Code docs](https://code.claude.com/docs/en/sub-agents#scope-mcp-servers-to-a-subagent)); an inline definition gives that sub-agent its own `rocq-mcp` subprocess (its own `pet`, `_state_table`, and `current_workspace`), connected when the sub-agent starts and torn down when it finishes.  A string reference instead shares the parent's connection.  Inline definitions let parallel sub-agents each pay the import-load cost once on their own pet rather than thrashing a shared one:
+
+```yaml
+mcpServers:
+  - rocq-mcp:
+      type: stdio
+      command: rocq-mcp
+```
+
 **Per-call timeout override.**  Pytanque-based tools (those routed through `_run_with_pet`: `rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) accept a `timeout=<seconds>` kwarg that overrides `ROCQ_PET_TIMEOUT` for that one call (clamped to `ROCQ_QUERY_TIMEOUT_CAP`).  On a timeout, prefer bumping `timeout=` per-call rather than raising the global default.
 
 ## Briefing sub-agents

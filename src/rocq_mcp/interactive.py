@@ -489,7 +489,7 @@ async def run_query(
     max_results: int | None = None,
     *,
     include_warnings: bool = True,
-    timeout: int | None = None,
+    timeout: float | None = None,
     from_state: int | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context).
@@ -635,6 +635,8 @@ async def run_assumptions(
     file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_assumptions (testable without FastMCP Context).
 
@@ -686,6 +688,7 @@ async def run_assumptions(
         workspace=workspace,
         lifespan_state=lifespan_state,
         file=file,
+        timeout=timeout,
     )
     if not query_result.get("success"):
         # Best-effort enrichment: attach the file's symbol list so the
@@ -1084,8 +1087,15 @@ async def run_toc(
     file: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Core implementation of rocq_toc (testable without FastMCP Context)."""
+    """Core implementation of rocq_toc (testable without FastMCP Context).
+
+    ``timeout`` (when not ``None``) is forwarded to :func:`_run_with_pet`;
+    otherwise the helper falls back to ``lifespan_state["pet_timeout"]``.
+    Caller (the MCP wrapper) is expected to apply ``ROCQ_QUERY_TIMEOUT_CAP``.
+    """
     # Path traversal + existence check (before entering thread)
     try:
         file_path = _server._resolve_file_in_workspace(file, workspace)
@@ -1114,6 +1124,7 @@ async def run_toc(
         _do_toc,
         lifespan_state,
         "rocq_toc",
+        timeout=timeout,
     )
 
 
@@ -1127,8 +1138,15 @@ async def run_notations(
     preamble: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Core implementation of rocq_notations (testable without FastMCP Context)."""
+    """Core implementation of rocq_notations (testable without FastMCP Context).
+
+    ``timeout`` (when not ``None``) is forwarded to :func:`_run_with_pet`;
+    otherwise the helper falls back to ``lifespan_state["pet_timeout"]``.
+    Caller (the MCP wrapper) is expected to apply ``ROCQ_QUERY_TIMEOUT_CAP``.
+    """
     forbidden = _check_forbidden_commands(statement)
     if forbidden:
         return _server._fail(lifespan_state, "rocq_notations", forbidden)
@@ -1196,6 +1214,7 @@ async def run_notations(
         lifespan_state,
         "rocq_notations",
         on_timeout=_on_timeout,
+        timeout=timeout,
     )
 
 
@@ -1585,10 +1604,10 @@ def _build_check_success_dict(
 
 async def run_check(
     body: str,
-    timeout: float,
     lifespan_state: dict[str, Any],
     from_state: int,
     *,
+    timeout: float | None = None,
     include_warnings: bool = True,
 ) -> dict[str, Any]:
     """Execute commands sequentially from a state.
@@ -1634,7 +1653,11 @@ async def run_check(
             "check_time_ms": 0,
         }
 
-    _timeout = timeout if timeout > 0 else lifespan_state["pet_timeout"]
+    _timeout: float = (
+        timeout
+        if timeout is not None and timeout > 0
+        else lifespan_state["pet_timeout"]
+    )
     is_single = len(commands) == 1
 
     # Track progress so partial work survives an asyncio-level timeout.
@@ -1784,7 +1807,7 @@ async def run_step_multi(
     from_state: int,
     *,
     include_warnings: bool = True,
-    timeout: float = 0.0,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     """Core implementation of rocq_step_multi (testable without FastMCP Context).
 
@@ -1814,7 +1837,11 @@ async def run_step_multi(
                 f"Forbidden in tactic {tac!r}: {forbidden}",
             )
 
-    _timeout: float = timeout if timeout > 0 else lifespan_state["pet_timeout"]
+    _timeout: float = (
+        timeout
+        if timeout is not None and timeout > 0
+        else lifespan_state["pet_timeout"]
+    )
     hard_timeout = _compute_hard_timeout(_timeout)
 
     # Quick pre-check to avoid acquiring lock for invalid states.

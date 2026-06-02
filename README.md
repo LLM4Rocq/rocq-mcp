@@ -35,9 +35,9 @@ The server exposes eleven MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. For iterative development, prefer `rocq_check`. |
-| **`rocq_compile_file`** | Like `rocq_compile` but takes a file path instead of source string. More efficient for large files (avoids transmitting full source over MCP). Cleans up compilation artifacts but preserves the source file. When `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position via `state_capture_status`. |
-| **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` succeeds. |
+| **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). |
+| **`rocq_compile_file`** | Whole-file `coqc` compile of a `.v` file on disk. Best for finished proofs, axiom audits, and final verification. Preferred over `rocq_compile` for large files (source stays on disk, no full-text transmission over MCP). On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. Cleans up compilation artifacts but preserves the source file. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). |
+| **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` or `rocq_compile_file` succeeds. |
 
 ### Interactive tools (pytanque-based, require `pet`)
 
@@ -50,11 +50,38 @@ The server exposes eleven MCP tools:
 | **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. **Requires `from_state`**. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
 | **`rocq_toc`** | Get the structure of a `.v` file: all definitions, lemmas, theorems, and sections as a hierarchical outline. Does not require an active session. |
 | **`rocq_notations`** | List all notations in a Rocq statement and how they resolve (which scope, which module). Helps debug notation ambiguity (e.g., is `+` in `nat_scope` or `Z_scope`?). |
-| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, recent errors. Use after `pet_restarted: True` to diagnose what happened, or before a long `vm_compute` to check memory headroom. |
+
+### Diagnostic tools
+
+| Tool | Description |
+|------|-------------|
+| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, recent errors. Use after `pet_restarted: True` to diagnose what happened, or before a long `vm_compute` to check memory headroom. Does not spawn pet if it is not running; safe to call without `pet` installed. |
 
 > **Stale file warning:** Interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`) read the `.v` file at session start and do not track subsequent edits. If another process or agent modifies the file while a session is active, the proof state becomes stale and tactics may fail or produce wrong results. In multi-agent setups, **work on a copy of the file** for interactive proving, or restart the session with `rocq_start` after edits. A `stale_warning` field is returned when a file modification is detected. See also the [Concurrency model](#concurrency-model) section below.
 
 > **Workspace auto-detection:** When a file-accepting tool (`rocq_compile_file`, `rocq_query`, `rocq_assumptions`, `rocq_toc`, `rocq_start`) is called without an explicit `workspace`, the server walks up from the file's directory looking for `_RocqProject`, `_CoqProject`, or `dune-project` markers and uses the directory of the innermost match. Falls back to `ROCQ_WORKSPACE` if no marker is found. Pass `workspace=` explicitly to override (e.g. for monorepos with nested project files).
+
+> **Workspace warning:** When the resolved workspace contains no `_RocqProject` / `_CoqProject` / `dune-project` marker AND the call provided explicit `workspace=` or a `file=` hint, the response carries `workspace_warning: str` advising on the load-path resolution. Source-string tools without `workspace=` / `file=` (the legitimate scratch / one-off workflow) stay quiet.
+
+> **Per-call timeout clamp:** When any pet-routed tool (`rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) is invoked with `timeout=<seconds>` exceeding `ROCQ_QUERY_TIMEOUT_CAP` (default 300), the call runs with the cap as the actual budget and the response carries `clamped_timeout: <cap>`. The `timeout=` parameter is the user's request; `clamped_timeout` is the server-side ceiling.
+
+### Choosing a tool
+
+The tools table above is reference-style.  This subsection is intent → tool: find the row that matches what you want to do, then read its tool's full entry above for details.
+
+| If you want to... | Use |
+|---|---|
+| Iteratively develop a single proof, trying tactics | `rocq_start` + `rocq_check` / `rocq_step_multi` |
+| Inspect proof state at a specific line / character | `rocq_start(file=..., line=..., character=...)` |
+| Search for a lemma by pattern (e.g. `Search _.`) | `rocq_query` |
+| Compile a finished `.v` file (whole-file check, axiom audit) | `rocq_compile_file` |
+| Compile a finished proof from a string buffer | `rocq_compile` |
+| **Probe a scratch file in `/tmp`** | `rocq_start(file='/tmp/probe.v', theorem=...)` — **never `coqc /tmp/probe.v`** (coqc reloads all imports each call; `rocq_start` keeps them warm) |
+| Verify a proof matches its stated theorem | `rocq_verify` |
+| Audit which axioms a proof depends on | `rocq_assumptions` |
+| List definitions / lemmas in a file | `rocq_toc` |
+| List notations available at a position | `rocq_notations` |
+| Check pet health, memory, recent errors | `rocq_diag` |
 
 ## Recommended usage patterns
 
@@ -125,6 +152,28 @@ The remaining cross-agent costs are pure latency: workspace-swap thrash when pee
 
 **Operator-side hardening:** the cleanest deployment is one `rocq-mcp` subprocess per concurrent agent.  Over stdio this happens naturally when each MCP client launches its own server; the case that needs care is parallel sub-agents within one client, which inherit the parent's MCP connections and share one `rocq-mcp`.  If you're orchestrating parallel Rocq work, prefer separate top-level invocations over one parent with concurrent sub-agents.
 
+**Per-call timeout override.**  Pytanque-based tools (those routed through `_run_with_pet`: `rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) accept a `timeout=<seconds>` kwarg that overrides `ROCQ_PET_TIMEOUT` for that one call (clamped to `ROCQ_QUERY_TIMEOUT_CAP`).  On a timeout, prefer bumping `timeout=` per-call rather than raising the global default.
+
+## Briefing sub-agents
+
+When spawning a sub-agent that will write or check Rocq/Coq proofs,
+prefix its task prompt with this preamble.  Without it, sub-agents
+fall into a `Write` → `coqc /tmp/<file>.v` → `bash grep error` loop
+that re-pays the import cost on every iteration; with it, they use
+the held-pet primitives and keep heavy imports (e.g. `mathcomp`,
+`stdpp`) warm across attempts.
+
+````
+Before any Write or `coqc` on a .v file:
+  1. Consult any project-specific Rocq guidance first (e.g. a project
+     CLAUDE.md, AGENTS.md, or Skill if your environment has one).
+  2. For scratch iteration on a single proof, use rocq-mcp:
+       rocq_start file=/tmp/<name>.v theorem=<lemma>
+       rocq_step_multi tactics=[...]   (NOT  coqc /tmp/<name>.v)
+  3. Use `coqc` only for: full-project rebuilds, axiom audits via
+     `Print Assumptions`, and final compile verification.
+````
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -133,7 +182,7 @@ The remaining cross-agent costs are pure latency: workspace-swap thrash when pee
 | `ROCQ_COQC_TIMEOUT` | `60` | Timeout (seconds) for `rocq_compile` |
 | `ROCQ_VERIFY_TIMEOUT` | `120` | Timeout (seconds) for `rocq_verify` |
 | `ROCQ_PET_TIMEOUT` | `30` | Timeout (seconds) for pytanque-based tools |
-| `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of pytanque-based tools (`rocq_query`, `rocq_check`, `rocq_start`, `rocq_step_multi`); larger values are clamped and the response carries `clamped_timeout: <cap>` |
+| `ROCQ_QUERY_TIMEOUT_CAP` | `300` | Cap (seconds) on the per-call `timeout` parameter of any pytanque-based tool (`rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`); larger values are clamped and the response carries `clamped_timeout: <cap>` |
 | `ROCQ_ENRICHMENT_TIMEOUT_CAP` | `5.0` | Cap (seconds) on per-call proof-state capture after a `rocq_compile` / `rocq_compile_file` failure |
 | `ROCQ_MAX_PET_RSS_MB` | `min(50% of system RAM, 16384)` | Maximum pet subprocess RSS (MB). On breach, the call aborts via the timeout recovery path; response includes `reason: "memory_exhausted"` and `pet_restarted: True`. |
 | `ROCQ_MAX_STATES` | `1000` | Cap on the in-memory state table (LRU-evicted). The entry itself is tiny; the real cost lives in pet's Fleche cache and is bounded by `ROCQ_MAX_PET_RSS_MB`. Bump if two or more callers share this process (e.g. parallel sub-agents) and parked states get evicted before they're reused. |

@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
+import rocq_mcp.server as _server
 from rocq_mcp.interactive import (
     _is_timeout_eligible,
     _compute_hard_timeout,
     _PET_TIMEOUT_GRACE,
+)
+from rocq_mcp.server import _run_with_pet
+from tests.conftest import (
+    make_lifespan_state,
+    mock_pet as _mock_pet,
+    patch_psutil_rss as _patch_psutil_rss,
 )
 
 # ---------------------------------------------------------------------------
@@ -84,3 +94,58 @@ class TestComputeHardTimeout:
 
     def test_zero(self):
         assert _compute_hard_timeout(0.0) == _PET_TIMEOUT_GRACE
+
+
+# ---------------------------------------------------------------------------
+# Timeout error message — actionable retry hint
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutErrorHint:
+    """The pet timeout error string must include an actionable retry hint
+    that names the per-call ``timeout=`` arg and the env-var cap."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_pet_state(self, monkeypatch):
+        _server._pet_semaphore = None
+        monkeypatch.setattr(_server, "_pet_lock", threading.Lock())
+        yield
+        _server._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _fast_watchdog(self, monkeypatch):
+        monkeypatch.setattr(_server, "_MEMORY_WATCHDOG_INTERVAL", 0.01)
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_includes_retry_hint(self, monkeypatch):
+        """When _run_with_pet times out, the error string includes
+        ``Retry with`` so agents see the actionable knob name."""
+        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        _patch_psutil_rss(monkeypatch, 1)
+
+        pet = _mock_pet()
+        ls = make_lifespan_state(pet_timeout=0.05, full=True)
+        ls["pet_client"] = pet
+        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: pet)
+        monkeypatch.setattr(
+            _server,
+            "_invalidate_pet",
+            lambda lstate: lstate.update(pet_client=None),
+        )
+
+        def fn_slow(p):
+            time.sleep(1.0)
+            return {"success": True}
+
+        result = await _run_with_pet(fn_slow, ls, "rocq_check")
+        # Envelope contract:
+        assert result["success"] is False
+        assert isinstance(result.get("error"), str)
+        assert result["reason"] == "timeout"
+        assert result["pet_restarted"] is True
+        # Actionable hint substrings (load-bearing pieces, not the
+        # illustrative timeout value):
+        assert "Retry with" in result["error"]
+        assert "rocq_check(..., timeout=" in result["error"]
+        assert "ROCQ_PET_TIMEOUT" in result["error"]
+        assert "ROCQ_QUERY_TIMEOUT_CAP" in result["error"]

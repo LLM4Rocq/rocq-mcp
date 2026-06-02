@@ -786,3 +786,42 @@ class TestCheckMultiCommandTimeout:
         assert len(recorded_timeouts) == 3
         for t in recorded_timeouts:
             assert t == 10, f"Expected per-command timeout of 10, got {t}"
+
+
+# ---------------------------------------------------------------------------
+# TestCheckClamp: mock-based clamp test (no pet required)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckClamp:
+    """Mock-based test for the rocq_check wrapper's timeout-clamping path."""
+
+    # Override module-level skip — this class uses mocks, not real pet.
+    pytestmark = []
+
+    @pytest.mark.asyncio
+    async def test_rocq_check_clamps_timeout(self, monkeypatch):
+        """Wrapper clamps an over-cap timeout and echoes ``clamped_timeout``."""
+        from rocq_mcp.server import rocq_check
+        from tests.conftest import _MockContext
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_check(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "state_id": 1, "goals": ""}
+
+        monkeypatch.setattr(_server, "run_check", mock_run_check)
+
+        mock_ctx = _MockContext({"pet_client": None})
+
+        result = await rocq_check(
+            body="intros.",
+            from_state=1,
+            timeout=5000,
+            ctx=mock_ctx,
+        )
+
+        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)

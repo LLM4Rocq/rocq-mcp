@@ -313,3 +313,38 @@ class TestRunNotationsReal:
         assert "_ + _" in lines[1]
         assert "_ = _" in lines[2]
         assert "_ * _" in lines[3]
+
+
+# ---------------------------------------------------------------------------
+# MCP wrapper tests for the ``timeout=`` clamp.
+# ---------------------------------------------------------------------------
+
+
+class TestRocqNotationsTimeout:
+    """timeout on the rocq_notations MCP wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_above_cap_clamped_with_signal(self, monkeypatch, tmp_path):
+        from rocq_mcp.server import rocq_notations
+        from tests.conftest import _MockContext
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_notations(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "run_notations", mock_run_notations)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+
+        result = await rocq_notations(
+            statement="n + 0 = n",
+            preamble="",
+            workspace=str(tmp_path),
+            timeout=5000,
+            ctx=_MockContext({"pet_client": None}),
+        )
+
+        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)

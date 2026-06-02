@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 import psutil
 
+import rocq_mcp as _rocq_mcp  # for __version__
 import rocq_mcp.server as _server
 from rocq_mcp.interactive import _state_table
 
@@ -111,6 +112,7 @@ def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     total_spawns = int(lifespan_state.get("total_spawns", 0))
     return {
         "success": True,
+        "server_version": _rocq_mcp.__version__,
         "pet": {
             "pid": pet_pid,
             "uptime_seconds": uptime,

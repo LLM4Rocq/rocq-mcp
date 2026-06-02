@@ -36,6 +36,7 @@ from rocq_mcp.server import (
     _parse_dune_flags,
     _parse_project_flags,
     _PetLockTimeout,
+    _resolve_call_timeout,
     _run_with_pet,
     _validate_workspace,
 )
@@ -290,6 +291,52 @@ class TestValidateWorkspace:
         """When ROCQ_WORKSPACE is not explicitly set, containment is not checked."""
         with mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", False):
             assert _validate_workspace(str(tmp_path)) is None
+
+
+# =========================================================================
+# _resolve_call_timeout
+# =========================================================================
+
+
+class TestResolveCallTimeout:
+    """Test _resolve_call_timeout: clamp-and-resolve helper shared by every
+    pet-routed wrapper.  Locks in the (effective_timeout, clamped) contract
+    that the wrappers depend on for the ``clamped_timeout`` echo."""
+
+    def test_zero_falls_through_to_pet_timeout(self):
+        """timeout=0 (the default) → (None, False), so the caller falls back
+        to ``ROCQ_PET_TIMEOUT``."""
+        effective, clamped = _resolve_call_timeout(0)
+        assert effective is None
+        assert clamped is False
+
+    def test_negative_falls_through_to_pet_timeout(self):
+        """A negative timeout is treated like the default sentinel."""
+        effective, clamped = _resolve_call_timeout(-1)
+        assert effective is None
+        assert clamped is False
+
+    def test_under_cap_passes_through_as_float(self):
+        """A positive timeout under the cap is forwarded as a float, no clamp."""
+        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+            effective, clamped = _resolve_call_timeout(10)
+        assert effective == 10.0
+        assert isinstance(effective, float)
+        assert clamped is False
+
+    def test_at_cap_passes_through_unclamped(self):
+        """A timeout exactly equal to the cap is not flagged as clamped."""
+        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+            effective, clamped = _resolve_call_timeout(300)
+        assert effective == 300.0
+        assert clamped is False
+
+    def test_over_cap_is_clamped(self):
+        """A timeout above the cap is clamped to the cap, clamped=True."""
+        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+            effective, clamped = _resolve_call_timeout(400)
+        assert effective == 300.0
+        assert clamped is True
 
 
 # =========================================================================
@@ -1039,6 +1086,269 @@ class TestWrapperWorkspaceAutoDetect:
         await _server.rocq_toc(file=str(f), workspace=explicit, ctx=ctx)
 
         assert seen["workspace"] == explicit
+
+
+# =========================================================================
+# Workspace warning on synthetic fallback (P1-2)
+# =========================================================================
+
+
+class TestWorkspaceHasProjectMarker:
+    """Tests for the ``_workspace_has_project_marker`` helper."""
+
+    def test_empty_dir_returns_false(self, tmp_path):
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        assert _workspace_has_project_marker(tmp_path) is False
+
+    def test_rocqproject_marker(self, tmp_path):
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        assert _workspace_has_project_marker(tmp_path) is True
+
+    def test_coqproject_marker(self, tmp_path):
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        (tmp_path / "_CoqProject").write_text("-Q . M\n")
+        assert _workspace_has_project_marker(tmp_path) is True
+
+    def test_dune_project_marker(self, tmp_path):
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
+        assert _workspace_has_project_marker(tmp_path) is True
+
+    def test_directory_named_like_marker_is_not_a_marker(self, tmp_path):
+        """A *directory* named _RocqProject doesn't count — only files do."""
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        (tmp_path / "_RocqProject").mkdir()
+        assert _workspace_has_project_marker(tmp_path) is False
+
+    def test_dune_project_ancestor_subdir(self, tmp_path):
+        """A subdir of a dune workspace (no local marker file) still counts
+        because ``_parse_project_flags`` falls through to dune-aware
+        resolution that walks UP via ``_find_dune_root``.  Without this,
+        e.g. ``mathcomp/theories/algebra/`` would trigger a spurious
+        warning.
+        """
+        from rocq_mcp.server import _workspace_has_project_marker
+
+        (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
+        sub = tmp_path / "theories" / "algebra"
+        sub.mkdir(parents=True)
+        assert _workspace_has_project_marker(sub) is True
+
+
+class TestWorkspaceWarning:
+    """End-to-end: each entry-point attaches workspace_warning when the
+    resolved workspace lacks a project marker.
+
+    Mirrors ``TestWrapperWorkspaceAutoDetect`` — spies validation and
+    stubs the downstream impl so we exercise the wrapper logic in
+    isolation.  Confirms the fix for the silent synthetic-flags
+    fallback when a workspace has no project marker.
+    """
+
+    @staticmethod
+    def _setup_spies(monkeypatch):
+        from rocq_mcp import server as _server
+
+        async def stub(*_args, **_kwargs):
+            return {"success": True, "output": ""}
+
+        # Validation always passes; we're testing the warning branch.
+        monkeypatch.setattr(_server, "_validate_workspace", lambda _ws: None)
+        for impl in (
+            "run_compile_with_state",
+            "run_compile_file_with_state",
+            "run_verify",
+            "run_query",
+            "run_assumptions",
+            "run_toc",
+            "run_notations",
+            "run_start",
+        ):
+            monkeypatch.setattr(_server, impl, stub)
+
+    @pytest.fixture
+    def markerless_dir(self, tmp_path):
+        """A directory with no _RocqProject / _CoqProject / dune-project."""
+        sub = tmp_path / "no_marker"
+        sub.mkdir()
+        return sub
+
+    @pytest.fixture
+    def marker_dir(self, tmp_path):
+        """A directory with a _RocqProject file."""
+        sub = tmp_path / "with_marker"
+        sub.mkdir()
+        (sub / "_RocqProject").write_text("-Q . M\n")
+        return sub
+
+    @pytest.fixture
+    def _ctx(self):
+        from tests.conftest import _MockContext
+
+        return _MockContext({"pet_client": None, "pet_timeout": 30.0})
+
+    # ---- explicit workspace= without marker → warning fires --------------
+
+    @pytest.mark.parametrize(
+        "tool_name,extra_kwargs",
+        [
+            ("rocq_compile", {"source": "Theorem t : True. Proof. exact I. Qed."}),
+            ("rocq_compile_file", {"file": "foo.v"}),
+            (
+                "rocq_verify",
+                {
+                    "proof": "Theorem t : True. Proof. exact I. Qed.",
+                    "problem_name": "t",
+                    "problem_statement": "Theorem t : True. Admitted.",
+                },
+            ),
+            ("rocq_query", {"command": "Check nat."}),
+            ("rocq_assumptions", {"name": "t", "file": "foo.v"}),
+            ("rocq_toc", {"file": "foo.v"}),
+            ("rocq_notations", {"statement": "True"}),
+            ("rocq_start", {"file": "foo.v", "theorem": "t"}),
+        ],
+    )
+    async def test_explicit_workspace_without_marker_warns(
+        self, tool_name, extra_kwargs, markerless_dir, _ctx, monkeypatch
+    ):
+        from rocq_mcp import server as _server
+
+        self._setup_spies(monkeypatch)
+        tool = getattr(_server, tool_name)
+        result = await tool(workspace=str(markerless_dir), ctx=_ctx, **extra_kwargs)
+
+        assert "workspace_warning" in result, tool_name
+        warning = result["workspace_warning"]
+        # Canonical text components.
+        assert "No _RocqProject / _CoqProject / dune-project" in warning
+        assert str(markerless_dir) in warning
+        # Generic phrasing about unqualified library references (no
+        # project-specific example symbol).
+        assert "unqualified library references" in warning
+        # Action-first recovery hint covering the file= path.
+        assert "auto-detect from" in warning
+
+    @pytest.mark.parametrize(
+        "tool_name,extra_kwargs",
+        [
+            ("rocq_compile", {"source": "Theorem t : True. Proof. exact I. Qed."}),
+            ("rocq_compile_file", {"file": "foo.v"}),
+            (
+                "rocq_verify",
+                {
+                    "proof": "Theorem t : True. Proof. exact I. Qed.",
+                    "problem_name": "t",
+                    "problem_statement": "Theorem t : True. Admitted.",
+                },
+            ),
+            ("rocq_query", {"command": "Check nat."}),
+            ("rocq_assumptions", {"name": "t", "file": "foo.v"}),
+            ("rocq_toc", {"file": "foo.v"}),
+            ("rocq_notations", {"statement": "True"}),
+            ("rocq_start", {"file": "foo.v", "theorem": "t"}),
+        ],
+    )
+    async def test_explicit_workspace_with_marker_quiet(
+        self, tool_name, extra_kwargs, marker_dir, _ctx, monkeypatch
+    ):
+        """A workspace that DOES have a marker is quiet."""
+        from rocq_mcp import server as _server
+
+        self._setup_spies(monkeypatch)
+        tool = getattr(_server, tool_name)
+        result = await tool(workspace=str(marker_dir), ctx=_ctx, **extra_kwargs)
+
+        assert "workspace_warning" not in result, tool_name
+
+    # ---- auto-detect cases -----------------------------------------------
+
+    async def test_auto_detect_with_marker_quiet(self, tmp_path, _ctx, monkeypatch):
+        """When auto-detect finds a project root, no warning fires even
+        though the user didn't pass workspace= explicitly.
+
+        Strict policy: a successful walk-up is the happy path.
+        """
+        from rocq_mcp import server as _server
+
+        (tmp_path / "_RocqProject").write_text("-Q . M\n")
+        sub = tmp_path / "src"
+        sub.mkdir()
+        f = sub / "foo.v"
+        f.write_text("")
+
+        self._setup_spies(monkeypatch)
+        result = await _server.rocq_toc(file=str(f), ctx=_ctx)
+        assert "workspace_warning" not in result
+
+    async def test_auto_detect_misses_with_file_hint_warns(
+        self, markerless_dir, _ctx, monkeypatch
+    ):
+        """When the user passes file= but no marker is found anywhere up
+        the tree AND ROCQ_WORKSPACE has no marker either, the warning
+        fires — they're trying to work with a real project and the
+        synthetic fallback will likely surprise them.
+        """
+        from rocq_mcp import server as _server
+
+        f = markerless_dir / "foo.v"
+        f.write_text("")
+        # Point ROCQ_WORKSPACE at the markerless dir so the fall-through
+        # chain (auto-detect None -> ROCQ_WORKSPACE) lands on it.
+        monkeypatch.setattr(_server, "ROCQ_WORKSPACE", str(markerless_dir))
+
+        self._setup_spies(monkeypatch)
+        result = await _server.rocq_toc(file=str(f), ctx=_ctx)
+
+        assert "workspace_warning" in result
+        assert str(markerless_dir) in result["workspace_warning"]
+
+    async def test_explicit_workspace_plus_file_hint_warns(
+        self, markerless_dir, _ctx, monkeypatch
+    ):
+        """Covers the matrix cell where the caller supplies BOTH
+        ``workspace=`` AND ``file=``.  Confirms that having ``file=`` does
+        not short-circuit the ``explicit=True`` branch — the warning still
+        fires because the resolved workspace lacks a marker.
+        """
+        from rocq_mcp import server as _server
+
+        f = markerless_dir / "foo.v"
+        f.write_text("")
+
+        self._setup_spies(monkeypatch)
+        result = await _server.rocq_toc(
+            workspace=str(markerless_dir), file=str(f), ctx=_ctx
+        )
+
+        assert "workspace_warning" in result
+        assert str(markerless_dir) in result["workspace_warning"]
+
+    async def test_no_file_no_explicit_workspace_quiet(self, _ctx, monkeypatch):
+        """A source-string tool with no file= and no explicit workspace=
+        is quiet — that's the legitimate scratch / one-off workflow,
+        not a config bug.
+        """
+        from rocq_mcp import server as _server
+
+        # ROCQ_WORKSPACE is whatever the test env has; force a markerless
+        # tmpdir to be sure.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            monkeypatch.setattr(_server, "ROCQ_WORKSPACE", td)
+            self._setup_spies(monkeypatch)
+            result = await _server.rocq_compile(
+                source="Theorem t : True. Proof. exact I. Qed.", ctx=_ctx
+            )
+
+        assert "workspace_warning" not in result
 
 
 # =========================================================================

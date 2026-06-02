@@ -188,3 +188,37 @@ class TestTocPathTraversal:
         )
         assert result["success"] is False
         assert "workspace" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# MCP wrapper tests for the ``timeout=`` clamp.
+# ---------------------------------------------------------------------------
+
+
+class TestRocqTocTimeout:
+    """timeout on the rocq_toc MCP wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_above_cap_clamped_with_signal(self, monkeypatch, tmp_path):
+        from rocq_mcp.server import rocq_toc
+        from tests.conftest import _MockContext
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_toc(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "run_toc", mock_run_toc)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+
+        result = await rocq_toc(
+            file="proof.v",
+            workspace=str(tmp_path),
+            timeout=5000,
+            ctx=_MockContext({"pet_client": None}),
+        )
+
+        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)

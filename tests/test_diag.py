@@ -65,6 +65,7 @@ class TestDiagSchema:
         snap = _build_diag_snapshot(ls)
         assert set(snap.keys()) == {
             "success",
+            "server_version",
             "pet",
             "memory",
             "live_states",
@@ -87,6 +88,23 @@ class TestDiagSchema:
         assert isinstance(snap["live_states"], list)
         assert isinstance(snap["live_states_total"], int)
         assert isinstance(snap["recent_errors"], list)
+
+    @pytest.mark.asyncio
+    async def test_diag_includes_server_version(self):
+        """``server_version`` matches the package's ``__version__`` export.
+
+        Asserting against ``rocq_mcp.__version__`` (rather than calling
+        ``importlib.metadata.version`` directly) tests the integration:
+        the snapshot must agree with the value the package itself
+        publishes.
+        """
+        import rocq_mcp
+
+        ls = _fresh_lifespan_state()
+        snap = _build_diag_snapshot(ls)
+        assert "server_version" in snap
+        assert snap["server_version"] == rocq_mcp.__version__
+        assert isinstance(snap["server_version"], str) and snap["server_version"]
 
     @pytest.mark.asyncio
     async def test_diag_when_pet_not_running(self):

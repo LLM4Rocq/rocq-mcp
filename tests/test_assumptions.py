@@ -482,6 +482,35 @@ class TestRocqAssumptionsWrapper:
         assert captured["file"] == "proof.v"
         assert captured["lifespan_state"] is mock_ctx.lifespan_context
 
+    @pytest.mark.asyncio
+    async def test_timeout_above_cap_clamped_with_signal(self, monkeypatch, tmp_path):
+        """Wrapper clamps an over-cap timeout and echoes ``clamped_timeout``."""
+        from rocq_mcp.server import rocq_assumptions
+        from tests.conftest import _MockContext
+        import rocq_mcp.server as _server
+
+        captured: dict = {}
+
+        async def mock_run_assumptions(**kwargs):
+            captured.update(kwargs)
+            return {"success": True, "theorem": "my_thm", "assumptions": []}
+
+        monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+
+        mock_ctx = _MockContext({"pet_client": None})
+
+        result = await rocq_assumptions(
+            name="my_thm",
+            file="proof.v",
+            workspace=str(tmp_path),
+            timeout=5000,
+            ctx=mock_ctx,
+        )
+
+        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)
+
 
 # ---------------------------------------------------------------------------
 # Tests for ``available_in_file`` enrichment on rocq_assumptions failures.

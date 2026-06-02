@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import PET_AVAILABLE
+from tests.conftest import PET_AVAILABLE, _MockPetBase
 
 pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
@@ -281,44 +281,6 @@ class TestStartEdgeCases:
 # ---------------------------------------------------------------------------
 
 
-class _MockPetBase:
-    """Shared fixtures for mock-based rocq_start tests (no real pet needed)."""
-
-    # Override module-level skip — this class uses mocks, not real pet
-    pytestmark = []
-
-    @pytest.fixture(autouse=True)
-    def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
-        from rocq_mcp.interactive import _state_invalidate_all
-
-        _state_invalidate_all()
-        srv._pet_semaphore = None
-        yield
-        _state_invalidate_all()
-        srv._pet_semaphore = None
-
-    @pytest.fixture(autouse=True)
-    def _mock_pytanque(self):
-        """Ensure pytanque is importable even if not installed."""
-        import sys
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock
-
-        if "pytanque" in sys.modules:
-            yield
-            return
-
-        mock_module = SimpleNamespace(
-            PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
-            Pytanque=MagicMock,
-            PytanqueMode=SimpleNamespace(STDIO="stdio"),
-        )
-        sys.modules["pytanque"] = mock_module
-        yield
-        sys.modules.pop("pytanque", None)
-
-
 class TestStartProofFinished(_MockPetBase):
     """Test that rocq_start includes proof_finished in response.
 
@@ -346,11 +308,9 @@ class TestStartProofFinished(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -388,11 +348,9 @@ class TestStartProofFinished(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -430,11 +388,9 @@ class TestStartProofFinished(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -474,11 +430,9 @@ class TestStartProofFinished(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -517,11 +471,9 @@ class TestStartProofFinished(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
@@ -566,11 +518,9 @@ class TestForceRestart(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -612,11 +562,9 @@ class TestForceRestart(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -659,11 +607,9 @@ class TestForceRestart(_MockPetBase):
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with tempfile.TemporaryDirectory() as ws:
             test_file = os.path.join(ws, "test.v")
@@ -1146,7 +1092,7 @@ class TestStartTimeoutForwarding:
 
         monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
 
-        lifespan_state = {"pet_timeout": 30.0}
+        lifespan_state = _make_lifespan_state()
         await run_start(
             file=str(vfile),
             theorem="t",
@@ -1173,7 +1119,7 @@ class TestStartTimeoutForwarding:
 
         monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
 
-        lifespan_state = {"pet_timeout": 30.0}
+        lifespan_state = _make_lifespan_state()
         await run_start(
             file=str(vfile),
             theorem="t",

@@ -752,7 +752,8 @@ class TestAssumptionsAvailableInFile:
         monkeypatch.setattr(_int, "_fetch_available_in_file", mock_fetch_available)
 
         recent_errors: deque = deque(maxlen=10)
-        lifespan_state = {"recent_errors": recent_errors}
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["recent_errors"] = recent_errors
 
         result = await run_assumptions(
             name="fool_bound",
@@ -776,27 +777,23 @@ class TestAssumptionsAvailableInFile:
         assert "fool_bound" in not_found_entries[0]["message"]
 
     @pytest.mark.asyncio
-    async def test_typo_failure_drops_prior_rocq_query_crashed_entry(self, monkeypatch):
-        """When the not_found re-tag fires, the rocq_query/crashed entry
-        that ``_run_with_pet`` recorded for the underlying live
-        PetanqueError must be dropped — otherwise rocq_diag reports the
-        same failure twice with conflicting attribution
-        (``rocq_query/crashed`` AND ``rocq_assumptions/not_found``)."""
+    async def test_typo_failure_does_not_record_under_rocq_query(self, monkeypatch):
+        """When the not_found re-tag fires, ``rocq_diag`` must show only
+        the ``rocq_assumptions/not_found`` entry — the underlying live
+        PetanqueError must NOT also appear as ``rocq_query/crashed``.
+
+        Under the auto_record=False contract, ``run_query`` propagates
+        the failure dict without pushing into ``recent_errors``; the
+        record happens once here at the ``rocq_assumptions`` layer with
+        the right tool / reason attribution.  The mock therefore does
+        NOT pre-populate any buffer entry on its own."""
         from collections import deque
         import rocq_mcp.interactive as _int
 
         async def mock_run_query(**kwargs):
-            # Simulate the buffer state after _run_with_pet has recorded
-            # the live PetanqueError as rocq_query/crashed (the real flow
-            # is run_assumptions -> run_query -> _run_with_pet -> _record_error).
-            kwargs["lifespan_state"]["recent_errors"].append(
-                {
-                    "tool": "rocq_query",
-                    "message": "Reference fool_bound not found.",
-                    "reason": "crashed",
-                    "occurred_at": 0.0,
-                }
-            )
+            # auto_record=False contract: the inner call propagates the
+            # failure dict but does not touch recent_errors.
+            assert kwargs.get("auto_record") is False
             return {
                 "success": False,
                 "error": "Reference fool_bound not found.",
@@ -810,7 +807,8 @@ class TestAssumptionsAvailableInFile:
         monkeypatch.setattr(_int, "_fetch_available_in_file", mock_fetch_available)
 
         recent_errors: deque = deque(maxlen=10)
-        lifespan_state = {"recent_errors": recent_errors}
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["recent_errors"] = recent_errors
 
         await run_assumptions(
             name="fool_bound",
@@ -820,8 +818,7 @@ class TestAssumptionsAvailableInFile:
         )
 
         # Buffer must contain exactly ONE entry — the re-tagged
-        # rocq_assumptions/not_found.  The original rocq_query/crashed
-        # was dropped.
+        # rocq_assumptions/not_found.  No transient rocq_query entry.
         assert len(recent_errors) == 1
         only = recent_errors[0]
         assert only["tool"] == "rocq_assumptions"
@@ -852,7 +849,8 @@ class TestAssumptionsAvailableInFile:
         monkeypatch.setattr(_int, "_fetch_available_in_file", mock_fetch_available)
 
         recent_errors: deque = deque(maxlen=10)
-        lifespan_state = {"recent_errors": recent_errors}
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["recent_errors"] = recent_errors
 
         result = await run_assumptions(
             name="foo",

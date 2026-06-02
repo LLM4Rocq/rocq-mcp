@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from rocq_mcp.interactive import run_query
-from tests.conftest import PET_AVAILABLE
+from tests.conftest import PET_AVAILABLE, _MockPetBase
 
 _pet_only = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
 
@@ -194,8 +194,13 @@ class TestQueryMaxResults:
 # ---------------------------------------------------------------------------
 
 
-class TestQueryFileMode:
-    """Tests for the file-based query mode (mutually exclusive with preamble)."""
+class TestQueryFileMode(_MockPetBase):
+    """Tests for the file-based query mode (mutually exclusive with preamble).
+
+    Inherits from _MockPetBase so the real _run_with_pet executes around a
+    mocked pet boundary — lock/semaphore/timeout/exception paths are
+    exercised, not bypassed.
+    """
 
     @pytest.mark.asyncio
     async def test_file_and_preamble_mutually_exclusive(self):
@@ -204,7 +209,7 @@ class TestQueryFileMode:
             command="Check nat.",
             preamble="Require Import Arith.",
             workspace="/tmp",
-            lifespan_state={},
+            lifespan_state=_make_lifespan_state(),
             file="test.v",
         )
         assert result["success"] is False
@@ -217,21 +222,23 @@ class TestQueryFileMode:
         vfile = tmp_path / "test.v"
         vfile.write_text("Definition x := 1.\n")
 
-        # Mock _run_with_pet to avoid needing actual pet
         import rocq_mcp.server as _server
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            # We just want to verify no mutual-exclusivity error was returned
-            # before reaching pet. Return a fake success.
-            return {"success": True, "output": "mock"}
+        def fake_run(state, cmd, timeout=None):
+            from types import SimpleNamespace
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+            return SimpleNamespace(feedback=[(3, "x : nat")], proof_finished=False)
+
+        _, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+        # File mode reads the file from disk and asks pet for an end-of-file state.
+        mock_pet.get_state_at_pos.return_value = mock_pet.run(None, None)
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         result = await run_query(
             command="Check x.",
             preamble="",
             workspace=str(tmp_path),
-            lifespan_state={},
+            lifespan_state=lifespan_state,
             file="test.v",
         )
         assert result["success"] is True
@@ -244,16 +251,20 @@ class TestQueryFileMode:
 
         import rocq_mcp.server as _server
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            return {"success": True, "output": "mock"}
+        def fake_run(state, cmd, timeout=None):
+            from types import SimpleNamespace
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+            return SimpleNamespace(feedback=[(3, "x : nat")], proof_finished=False)
+
+        _, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+        mock_pet.get_state_at_pos.return_value = mock_pet.run(None, None)
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         result = await run_query(
             command="Check x.",
             preamble="   ",
             workspace=str(tmp_path),
-            lifespan_state={},
+            lifespan_state=lifespan_state,
             file="test.v",
         )
         assert result["success"] is True
@@ -263,21 +274,17 @@ class TestQueryFileMode:
         """Path traversal via file parameter should be rejected."""
         import rocq_mcp.server as _server
 
-        # Mock _run_with_pet to exercise the _do_query inner function
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            # Call fn with a mock pet to trigger the path validation
-            from unittest.mock import MagicMock
+        def fake_run(state, cmd, timeout=None):
+            return None  # never reached — _get_file_end_state raises first
 
-            mock_pet = MagicMock()
-            return fn(mock_pet)
-
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        _, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         result = await run_query(
             command="Check nat.",
             preamble="",
             workspace=str(tmp_path),
-            lifespan_state={"current_workspace": None},
+            lifespan_state=lifespan_state,
             file="../../../etc/passwd",
         )
         assert result["success"] is False
@@ -288,19 +295,17 @@ class TestQueryFileMode:
         """Non-existent file should return error."""
         import rocq_mcp.server as _server
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            from unittest.mock import MagicMock
+        def fake_run(state, cmd, timeout=None):
+            return None
 
-            mock_pet = MagicMock()
-            return fn(mock_pet)
-
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        _, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         result = await run_query(
             command="Check nat.",
             preamble="",
             workspace=str(tmp_path),
-            lifespan_state={"current_workspace": None},
+            lifespan_state=lifespan_state,
             file="nonexistent.v",
         )
         assert result["success"] is False
@@ -311,19 +316,17 @@ class TestQueryFileMode:
         """Absolute file path should be rejected by containment check."""
         import rocq_mcp.server as _server
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            from unittest.mock import MagicMock
+        def fake_run(state, cmd, timeout=None):
+            return None
 
-            mock_pet = MagicMock()
-            return fn(mock_pet)
-
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        _, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
         result = await run_query(
             command="Check nat.",
             preamble="",
             workspace=str(tmp_path),
-            lifespan_state={"current_workspace": None},
+            lifespan_state=lifespan_state,
             file="/etc/passwd",
         )
         assert result["success"] is False
@@ -411,7 +414,7 @@ class TestGetFileEndState:
         mock_state = MagicMock()
         mock_pet.get_state_at_pos.return_value = mock_state
 
-        lifespan_state = {"current_workspace": None}
+        lifespan_state = _make_lifespan_state()
         result = _get_file_end_state(mock_pet, "test.v", str(tmp_path), lifespan_state)
 
         assert result is mock_state
@@ -432,7 +435,7 @@ class TestGetFileEndState:
         mock_state = MagicMock()
         mock_pet.get_state_at_pos.return_value = mock_state
 
-        lifespan_state = {"current_workspace": None}
+        lifespan_state = _make_lifespan_state()
         result = _get_file_end_state(mock_pet, "test.v", str(tmp_path), lifespan_state)
 
         assert result is mock_state
@@ -452,7 +455,7 @@ class TestGetFileEndState:
         mock_state = MagicMock()
         mock_pet.get_state_at_pos.return_value = mock_state
 
-        lifespan_state = {"current_workspace": None}
+        lifespan_state = _make_lifespan_state()
         result = _get_file_end_state(mock_pet, "test.v", str(tmp_path), lifespan_state)
 
         assert result is mock_state
@@ -476,7 +479,8 @@ class TestGetFileEndState:
         mock_pet.get_state_at_pos.return_value = MagicMock()
 
         ws = str(Path(tmp_path).resolve())
-        lifespan_state = {"current_workspace": ws}
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["current_workspace"] = ws
 
         _get_file_end_state(mock_pet, "test.v", str(tmp_path), lifespan_state)
 
@@ -491,7 +495,7 @@ class TestGetFileEndState:
         vfile.write_text("Definition x := 1.\n")
 
         mock_pet = MagicMock()
-        lifespan_state = {"current_workspace": None}
+        lifespan_state = _make_lifespan_state()
 
         with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
             with pytest.raises(FileNotFoundError, match="not accessible"):
@@ -631,7 +635,7 @@ class TestQueryTimeoutRunQuery:
             command="Check nat.",
             preamble="",
             workspace=str(tmp_path),
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=_make_lifespan_state(),
             **kwargs,
         )
         assert result["success"] is True
@@ -729,8 +733,12 @@ class TestRocqQueryTimeout:
 # ---------------------------------------------------------------------------
 
 
-class TestQueryFromStateUnit:
-    """Unit tests for run_query's from_state mode (no pet required)."""
+class TestQueryFromStateUnit(_MockPetBase):
+    """Unit tests for run_query's from_state mode (no pet required).
+
+    Inherits from _MockPetBase so the real _run_with_pet executes around a
+    mocked pet boundary — the orchestrator's exception / lock paths run.
+    """
 
     @pytest.mark.asyncio
     async def test_from_state_routes_to_state_lookup(self, monkeypatch):
@@ -772,23 +780,24 @@ class TestQueryFromStateUnit:
             _interactive, "_get_or_create_import_state", fail_import_state
         )
 
-        # Stub _run_with_pet to invoke _do_query with a mock pet.
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            mock_pet = MagicMock()
-            # Make pet.run return a fake state with empty feedback.
-            new_state = MagicMock()
-            new_state.feedback = []
-            new_state.proof_finished = False
-            mock_pet.run.return_value = new_state
-            return fn(mock_pet)
+        # Mock pet at the boundary: pet.run returns a fake state with empty feedback.
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        new_state = MagicMock()
+        new_state.feedback = []
+        new_state.proof_finished = False
+        mock_pet.run.return_value = new_state
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
 
         result = await run_query(
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=lifespan_state,
             from_state=sid,
         )
         assert result["success"] is True
@@ -811,17 +820,19 @@ class TestQueryFromStateUnit:
 
         monkeypatch.setattr(_interactive, "_state_get_or_error", fake_lookup)
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            mock_pet = MagicMock()
-            return fn(mock_pet)
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
 
         result = await run_query(
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=lifespan_state,
             from_state=42,
         )
         assert result["success"] is False
@@ -839,17 +850,19 @@ class TestQueryFromStateUnit:
 
         monkeypatch.setattr(_interactive, "_state_get_or_error", fake_lookup)
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            mock_pet = MagicMock()
-            return fn(mock_pet)
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
 
         result = await run_query(
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=lifespan_state,
             from_state=9999,
         )
         assert result["success"] is False
@@ -860,7 +873,6 @@ class TestQueryFromStateUnit:
     @pytest.mark.asyncio
     async def test_from_state_does_not_advance_state(self, monkeypatch):
         """The transient query state must NOT be added to the state table."""
-        import rocq_mcp.interactive as _interactive
         from rocq_mcp.interactive import _state_add, _state_table
         from unittest.mock import MagicMock
 
@@ -879,21 +891,23 @@ class TestQueryFromStateUnit:
         # Snapshot the table contents.
         table_keys_before = set(_state_table.keys())
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            mock_pet = MagicMock()
-            new_state = MagicMock()
-            new_state.feedback = []
-            new_state.proof_finished = False
-            mock_pet.run.return_value = new_state
-            return fn(mock_pet)
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        new_state = MagicMock()
+        new_state.feedback = []
+        new_state.proof_finished = False
+        mock_pet.run.return_value = new_state
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
 
         result = await run_query(
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=lifespan_state,
             from_state=sid,
         )
         assert result["success"] is True
@@ -908,8 +922,12 @@ class TestQueryFromStateUnit:
 # ---------------------------------------------------------------------------
 
 
-class TestQueryFromStateValidation:
-    """Validation tests for from_state — exercised against the core run_query."""
+class TestQueryFromStateValidation(_MockPetBase):
+    """Validation tests for from_state — exercised against the core run_query.
+
+    Inherits from _MockPetBase so the real _run_with_pet executes around a
+    mocked pet boundary.
+    """
 
     @pytest.mark.asyncio
     async def test_from_state_and_file_mutually_exclusive(self):
@@ -918,7 +936,7 @@ class TestQueryFromStateValidation:
             command="Check nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=_make_lifespan_state(),
             file="test.v",
             from_state=1,
         )
@@ -932,7 +950,7 @@ class TestQueryFromStateValidation:
             command="Check nat.",
             preamble="Require Import Foo.",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=_make_lifespan_state(),
             from_state=1,
         )
         assert result["success"] is False
@@ -942,7 +960,6 @@ class TestQueryFromStateValidation:
     @pytest.mark.asyncio
     async def test_from_state_with_blank_preamble_allowed(self, monkeypatch):
         """Whitespace-only preamble + from_state is fine (no information conveyed)."""
-        import rocq_mcp.interactive as _interactive
         from rocq_mcp.interactive import _state_add
         from unittest.mock import MagicMock
 
@@ -958,21 +975,23 @@ class TestQueryFromStateValidation:
             step=0,
         )
 
-        async def mock_run_with_pet(fn, lifespan_state, desc, **kw):
-            mock_pet = MagicMock()
-            new_state = MagicMock()
-            new_state.feedback = []
-            new_state.proof_finished = False
-            mock_pet.run.return_value = new_state
-            return fn(mock_pet)
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        new_state = MagicMock()
+        new_state.feedback = []
+        new_state.proof_finished = False
+        mock_pet.run.return_value = new_state
+        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
 
-        monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
 
         result = await run_query(
             command="Search nat.",
             preamble="   \n  ",
             workspace="/tmp",
-            lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+            lifespan_state=lifespan_state,
             from_state=sid,
         )
         assert result["success"] is True

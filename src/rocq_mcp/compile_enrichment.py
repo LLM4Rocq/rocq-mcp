@@ -56,6 +56,25 @@ _StateCaptureStatus = Literal[
 
 _VALID_STATE_CAPTURE_STATUSES: frozenset[str] = frozenset(get_args(_StateCaptureStatus))
 
+# Non-failure members of ``_StateCaptureStatus``: the orchestrator-derived
+# values produced after a *successful* enrichment lookup (or a structurally
+# absent position).  Their complement inside :data:`_VALID_STATE_CAPTURE_STATUSES`
+# is the set of pet-side failure modes that must stay aligned with
+# :data:`rocq_mcp.server._PET_SIDE_FAILURE_REASONS`.
+_NON_FAILURE_STATUSES: frozenset[str] = frozenset(
+    {
+        "ok",
+        "outside_proof",
+        "no_position",
+    }
+)
+
+assert _server._PET_SIDE_FAILURE_REASONS <= _VALID_STATE_CAPTURE_STATUSES
+assert (
+    _VALID_STATE_CAPTURE_STATUSES - _NON_FAILURE_STATUSES
+    == _server._PET_SIDE_FAILURE_REASONS
+)
+
 
 class _CaptureResult(TypedDict):
     """Return shape of :func:`_capture_compile_error_state`."""

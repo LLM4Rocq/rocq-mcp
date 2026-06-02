@@ -245,9 +245,15 @@ _PROJECT_MARKERS: tuple[str, ...] = ("_RocqProject", "_CoqProject", "dune-projec
 def _find_project_root_from_file(file: str | None) -> str | None:
     """Walk up from *file* looking for a Rocq project marker.
 
-    Returns the directory of the innermost ``_RocqProject``,
-    ``_CoqProject``, or ``dune-project`` (in that priority order),
-    or ``None`` if no marker is found before the filesystem root.
+    Walks UP from the file's directory; returns the deepest directory
+    containing any of :data:`_PROJECT_MARKERS` (``_RocqProject``,
+    ``_CoqProject``, ``dune-project``), or ``None`` if no marker is
+    found before the filesystem root.  Depth wins: a higher directory's
+    marker never overrides a deeper directory's marker, regardless of
+    marker type.  Tuple order on :data:`_PROJECT_MARKERS` is the
+    tiebreaker only when a single directory contains more than one
+    marker.
+
     Used by file-accepting tools to auto-detect ``workspace`` when the
     caller does not pass one explicitly; for monorepos with nested
     project files, callers can still pass ``workspace=`` to override.
@@ -292,6 +298,11 @@ def _find_dune_root(ws: Path) -> Path | None:
 
 def _workspace_has_project_marker(ws: Path) -> bool:
     """True iff *ws* (or an ancestor, for dune) has a project marker.
+
+    Existence check only — does not return *which* marker matched.  Marker
+    tuple order in :data:`_PROJECT_MARKERS` is irrelevant here; this helper
+    short-circuits on the first match in *ws* itself, then falls back to
+    the dune ancestor walk.
 
     Mirrors both paths _parse_project_flags consults before falling through
     to the synthetic ["-Q", ws, "Test"] last resort:
@@ -1026,18 +1037,28 @@ def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
 
 _RECENT_ERROR_MESSAGE_LIMIT: int = 500
 
-# Allowed values for the ``reason`` field on ``recent_errors`` entries.
-# A superset of :data:`compile_enrichment._StateCaptureStatus`'s failure modes plus
-# ``"validation"`` for early-return validation failures, ``"not_found"``
-# for name-resolution failures (rocq_start / rocq_assumptions typos),
-# and the rocq_verify-specific reasons.
-_RECENT_ERROR_REASONS: frozenset[str] = frozenset(
+# Failure reasons emitted by ``_run_with_pet``'s except arms — the
+# intersection of :data:`rocq_mcp.interactive._TRANSPORT_FAILURE_REASONS`
+# and the failure subset of
+# :data:`rocq_mcp.compile_enrichment._StateCaptureStatus`.  Single source
+# of truth so the three reason-sets cannot drift apart silently.
+_PET_SIDE_FAILURE_REASONS: frozenset[str] = frozenset(
     {
         "timeout",
         "crashed",
         "memory_exhausted",
         "lock_contended",
         "unavailable",
+    }
+)
+
+# Allowed values for the ``reason`` field on ``recent_errors`` entries.
+# A superset of :data:`compile_enrichment._StateCaptureStatus`'s failure modes plus
+# ``"validation"`` for early-return validation failures, ``"not_found"``
+# for name-resolution failures (rocq_start / rocq_assumptions typos),
+# and the rocq_verify-specific reasons.
+_RECENT_ERROR_REASONS: frozenset[str] = _PET_SIDE_FAILURE_REASONS | frozenset(
+    {
         "validation",
         "not_found",
         # rocq_check mid-batch failure (a tactic was rejected by Coq).
@@ -1048,6 +1069,8 @@ _RECENT_ERROR_REASONS: frozenset[str] = frozenset(
         "type_mismatch",
     }
 )
+
+assert _PET_SIDE_FAILURE_REASONS <= _RECENT_ERROR_REASONS
 
 
 def _record_error(
@@ -1126,18 +1149,132 @@ def _fail(
     return {"success": False, "error": message, "reason": reason, **extra}
 
 
+def _no_ctx_fail(tool: str) -> dict[str, Any]:
+    """Canonical "no MCP context" failure envelope for tool wrappers.
+
+    Routes through :func:`_fail` so the response shape and the
+    ``recent_errors`` side-effect policy stay defined in one place; when
+    ``ctx is None`` we have no ``lifespan_state`` to record into, so
+    ``_fail`` no-ops the buffer write (same policy as every other
+    ``lifespan_state is None`` caller).
+    """
+    return _fail(None, tool, "Internal error: no MCP context.")
+
+
+def _resolve_tool_envelope(
+    *,
+    tool: str,
+    ctx: Any,
+    workspace: str,
+    file: str | None = None,
+    timeout: int | float | None = None,
+    timeout_default: int | None = None,
+    ctx_optional: bool = False,
+) -> dict[str, Any] | tuple[str, dict[str, Any] | None, str | None, bool, float | None]:
+    """Resolve the shared envelope steps for ``@mcp.tool`` wrappers.
+
+    Runs the boilerplate every pet-routed / coqc-routed wrapper repeats:
+
+    1. ctx-check first — for pet-routed tools, a missing context is a
+       programmer error and is reported as the no-ctx envelope without
+       touching the workspace (``_no_ctx_fail``).  Pins the order so a
+       bad workspace + no-ctx caller gets the no-ctx envelope, not a
+       silent validation failure that ``recent_errors`` never sees.
+       Coqc-routed tools (``rocq_compile`` / ``rocq_compile_file`` /
+       ``rocq_verify``) pass ``ctx_optional=True``: they can run without
+       an MCP context — ``lifespan_state`` falls through as ``None`` and
+       the ``recent_errors`` recording is silently skipped.
+    2. Workspace resolution: explicit > project-marker walk-up from
+       *file* (when *file* is non-empty) > ``ROCQ_WORKSPACE``.
+    3. Timeout resolution.  *timeout_default* is the wrapper's
+       compile/verify fallback (seconds): when set, the helper
+       falls back to it for ``timeout<=0`` and does not clamp; when
+       ``None`` the helper routes through :func:`_resolve_call_timeout`
+       (the per-call cap that returns a ``clamped`` flag).
+    4. ``_validate_workspace`` against the resolved workspace; on
+       failure returns a :func:`_fail` envelope with the *already
+       resolved* lifespan_state so the failure lands in
+       ``recent_errors``.
+    5. ``_maybe_workspace_warning`` against the resolved workspace.
+
+    Returns either a failure envelope (caller returns it verbatim) or
+    the tuple ``(workspace, lifespan_state, ws_warning, clamped,
+    effective_timeout)``.
+    """
+    if ctx is None:
+        if not ctx_optional:
+            return _no_ctx_fail(tool)
+        lifespan_state: dict[str, Any] | None = None
+    else:
+        lifespan_state = ctx.lifespan_context
+
+    explicit_workspace = bool(workspace)
+    if file:
+        workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
+    else:
+        workspace = workspace or ROCQ_WORKSPACE
+
+    if timeout_default is not None:
+        effective_timeout = (
+            float(timeout)
+            if timeout is not None and timeout > 0
+            else float(timeout_default)
+        )
+        clamped = False
+    else:
+        effective_timeout, clamped = _resolve_call_timeout(timeout)
+
+    err = _validate_workspace(workspace)
+    if err:
+        return _fail(lifespan_state, tool, err, "validation")
+
+    ws_warning = _maybe_workspace_warning(
+        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    )
+    return workspace, lifespan_state, ws_warning, clamped, effective_timeout
+
+
+def _finalize_tool_envelope(
+    result: Any, *, clamped: bool, ws_warning: str | None
+) -> Any:
+    """Merge trailing envelope keys onto *result*.
+
+    Mirrors the trailing 3-line block of every wrapper:
+
+    - ``clamped_timeout``: echoes the cap value when the per-call
+      timeout was clamped by :func:`_resolve_call_timeout`.
+    - ``workspace_warning``: the advisory from
+      :func:`_maybe_workspace_warning`, when set.
+
+    Both merges are no-ops if *result* is not a ``dict`` so an
+    implementation that returns a non-dict (unexpected) passes through
+    untouched.
+    """
+    if not isinstance(result, dict):
+        return result
+    if clamped:
+        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+    if ws_warning:
+        result["workspace_warning"] = ws_warning
+    return result
+
+
 async def _build_memory_abort_response(
     lifespan_state: dict[str, Any],
     tool: str,
     on_timeout: Callable[[], None] | None,
     partial_state: dict[str, Any] | None,
+    *,
+    auto_record: bool = True,
 ) -> dict[str, Any]:
     """Run the memory-abort recovery path and return the response dict.
 
     Thin wrapper around :func:`_handle_pet_failure` that supplies the
     memory-specific error message; the recovery scaffold (invalidate
     pet, release lock, fire on_timeout, merge partial, record error)
-    is shared with every other killed-pet path.
+    is shared with every other killed-pet path.  When *auto_record* is
+    False, the ``recent_errors`` push is suppressed so the caller can
+    classify the failure at its own layer.
     """
     return await _handle_pet_failure(
         lifespan_state,
@@ -1151,6 +1288,7 @@ async def _build_memory_abort_response(
         ),
         killed_pet=True,
         on_timeout=on_timeout,
+        auto_record=auto_record,
         partial_state=partial_state,
     )
 
@@ -1215,6 +1353,7 @@ async def _handle_pet_failure(
     killed_pet: bool = False,
     on_timeout: Callable[[], None] | None = None,
     partial_state: dict[str, Any] | None = None,
+    auto_record: bool = True,
 ) -> dict[str, Any]:
     """Build a unified failure response for ``_run_with_pet``'s except arms.
 
@@ -1227,7 +1366,11 @@ async def _handle_pet_failure(
 
     Both paths merge *partial_state* (if any) into the response and
     record the failure into ``recent_errors`` so ``rocq_diag`` surfaces
-    it.
+    it.  When *auto_record* is False, the ``_record_error`` call is
+    skipped; the recovery side-effects (invalidate / lock release /
+    on_timeout) still fire so the pet stays healthy.  Used by callers
+    that need to classify the failure at their own layer (e.g.
+    ``run_assumptions`` distinguishing ``not_found`` from generic crash).
     """
     if killed_pet:
         _invalidate_pet(lifespan_state)
@@ -1239,7 +1382,8 @@ async def _handle_pet_failure(
         resp["pet_restarted"] = True
     if partial_state:
         _merge_partial_state(resp, partial_state)
-    _record_error(lifespan_state, tool, error, reason=reason)
+    if auto_record:
+        _record_error(lifespan_state, tool, error, reason=reason)
     return resp
 
 
@@ -1250,6 +1394,8 @@ async def _run_with_pet(
     on_timeout: Callable[[], None] | None = None,
     timeout: float | None = None,
     partial_state: dict[str, Any] | None = None,
+    *,
+    auto_record: bool = True,
 ) -> Any:
     """Run *fn(pet)* with the pet client, handling lock/semaphore/timeout/errors.
 
@@ -1280,6 +1426,14 @@ async def _run_with_pet(
     with intermediate results.  On timeout or error the dict contents
     are merged into the error response so partial work is not lost.
 
+    When *auto_record* is False (default True), failure paths still
+    return the same failure-envelope dict but skip the ``_record_error``
+    push into ``recent_errors``.  Callers that need to classify the
+    failure at their own layer (e.g. ``run_assumptions`` distinguishing
+    ``not_found`` from a generic ``rocq_query/crashed``) pass
+    ``auto_record=False`` to avoid the double-record / compensating-pop
+    dance.
+
     The return type is left as ``Any`` because the dict shape varies by
     failure mode (success path, ``pet_restarted``-tagged crashes,
     ``partial_state`` merges, etc.) and a TypedDict would be unwieldy.
@@ -1294,12 +1448,12 @@ async def _run_with_pet(
             "pytanque is not installed. "
             "Install with: pip install 'rocq-mcp[interactive]'"
         )
-        _record_error(lifespan_state, tool, msg, reason="unavailable")
-        return {
-            "success": False,
-            "error": msg,
-            "reason": "unavailable",
-        }
+        return _fail(
+            lifespan_state if auto_record else None,
+            tool,
+            msg,
+            "unavailable",
+        )
 
     _timeout: float = timeout if timeout is not None else lifespan_state["pet_timeout"]
     # Lock acquire uses a shorter timeout than wait_for so that
@@ -1342,7 +1496,11 @@ async def _run_with_pet(
             # cancel that should propagate.
             if mem_event.is_set():
                 return await _build_memory_abort_response(
-                    lifespan_state, tool, on_timeout, partial_state
+                    lifespan_state,
+                    tool,
+                    on_timeout,
+                    partial_state,
+                    auto_record=auto_record,
                 )
             raise
         except asyncio.TimeoutError:
@@ -1350,7 +1508,11 @@ async def _run_with_pet(
             # already be set; prefer the more specific memory_exhausted label.
             if mem_event.is_set():
                 return await _build_memory_abort_response(
-                    lifespan_state, tool, on_timeout, partial_state
+                    lifespan_state,
+                    tool,
+                    on_timeout,
+                    partial_state,
+                    auto_record=auto_record,
                 )
             return await _handle_pet_failure(
                 lifespan_state,
@@ -1370,6 +1532,7 @@ async def _run_with_pet(
                 killed_pet=True,
                 on_timeout=on_timeout,
                 partial_state=partial_state,
+                auto_record=auto_record,
             )
         except _PetLockTimeout:
             return await _handle_pet_failure(
@@ -1377,6 +1540,7 @@ async def _run_with_pet(
                 tool,
                 reason="lock_contended",
                 error=f"{tool}: pet is busy (lock contention). Try again.",
+                auto_record=auto_record,
             )
         except PetanqueError as e:
             if not _pet_alive(lifespan_state.get("pet_client")):
@@ -1387,12 +1551,14 @@ async def _run_with_pet(
                     error=f"Pet process died: {e.message}",
                     killed_pet=True,
                     partial_state=partial_state,
+                    auto_record=auto_record,
                 )
             return await _handle_pet_failure(
                 lifespan_state,
                 tool,
                 reason="crashed",
                 error=e.message,
+                auto_record=auto_record,
             )
         except (BrokenPipeError, ConnectionError) as e:
             return await _handle_pet_failure(
@@ -1403,6 +1569,7 @@ async def _run_with_pet(
                 killed_pet=True,
                 on_timeout=on_timeout,
                 partial_state=partial_state,
+                auto_record=auto_record,
             )
         except FileNotFoundError:
             return await _handle_pet_failure(
@@ -1410,6 +1577,7 @@ async def _run_with_pet(
                 tool,
                 reason="unavailable",
                 error="pet binary not found on PATH. Install coq-lsp.",
+                auto_record=auto_record,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as e:
             return await _handle_pet_failure(
@@ -1418,6 +1586,7 @@ async def _run_with_pet(
                 reason="crashed",
                 error=f"Unexpected error: {e}",
                 partial_state=partial_state,
+                auto_record=auto_record,
             )
 
 
@@ -1511,29 +1680,26 @@ async def rocq_compile(
     On ``pet_restarted: True`` (state-capture path crashed pet), call
     ``rocq_diag`` for memory headroom and recent error history.
     """
-    explicit_workspace = bool(workspace)
-    workspace = workspace or ROCQ_WORKSPACE
-    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None, "rocq_compile", err, "validation"
-        )
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=False
+    resolved = _resolve_tool_envelope(
+        tool="rocq_compile",
+        ctx=ctx,
+        workspace=workspace,
+        timeout=timeout,
+        timeout_default=ROCQ_COQC_TIMEOUT,
+        ctx_optional=True,
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_compile_with_state(
         source=source,
         workspace=workspace,
-        timeout=timeout,
+        timeout=effective_timeout,
         include_warnings=include_warnings,
-        lifespan_state=ctx.lifespan_context if ctx else None,
+        lifespan_state=lifespan_state,
     )
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -1607,33 +1773,27 @@ async def rocq_compile_file(
     On ``pet_restarted: True`` (state-capture path crashed pet), call
     ``rocq_diag`` for memory headroom and recent error history.
     """
-    # Workspace precedence: explicit arg > project marker walk-up > env default.
-    explicit_workspace = bool(workspace)
-    workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
-    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_COQC_TIMEOUT
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None,
-            "rocq_compile_file",
-            err,
-            "validation",
-        )
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    resolved = _resolve_tool_envelope(
+        tool="rocq_compile_file",
+        ctx=ctx,
+        workspace=workspace,
+        file=file,
+        timeout=timeout,
+        timeout_default=ROCQ_COQC_TIMEOUT,
+        ctx_optional=True,
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_compile_file_with_state(
         file=file,
         workspace=workspace,
-        timeout=timeout,
+        timeout=effective_timeout,
         include_warnings=include_warnings,
-        lifespan_state=ctx.lifespan_context if ctx else None,
+        lifespan_state=lifespan_state,
     )
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -1686,31 +1846,26 @@ async def rocq_verify(
     while extracting shared definitions), call ``rocq_diag`` for memory
     headroom and recent error history.
     """
-    explicit_workspace = bool(workspace)
-    workspace = workspace or ROCQ_WORKSPACE
-    timeout = timeout if timeout is not None and timeout > 0 else ROCQ_VERIFY_TIMEOUT
-
-    err = _validate_workspace(workspace)
-    if err:
-        _record_error(
-            ctx.lifespan_context if ctx else None,
-            "rocq_verify",
-            err,
-            reason="validation",
-        )
-        return {"success": False, "reason": "validation", "error": err}
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=False
+    resolved = _resolve_tool_envelope(
+        tool="rocq_verify",
+        ctx=ctx,
+        workspace=workspace,
+        timeout=timeout,
+        timeout_default=ROCQ_VERIFY_TIMEOUT,
+        ctx_optional=True,
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_verify(
         proof=proof,
         problem_name=problem_name,
         problem_statement=problem_statement,
         workspace=workspace,
-        timeout=timeout,
+        timeout=effective_timeout,
         include_warnings=include_warnings,
-        lifespan_state=ctx.lifespan_context if ctx else None,
+        lifespan_state=lifespan_state,
     )
     # Record verification failures (success=False with an error message)
     # so rocq_diag surfaces them.  Pet-level crashes routed through
@@ -1720,21 +1875,18 @@ async def rocq_verify(
     # tool="rocq_verify" with the right reason because _extract_problem_structure
     # passes that tool name to _run_with_pet.
     if (
-        ctx is not None
-        and isinstance(result, dict)
+        isinstance(result, dict)
         and result.get("success") is False
         and result.get("error")
         and not result.get("pet_restarted")
     ):
         _record_error(
-            ctx.lifespan_context,
+            lifespan_state,
             "rocq_verify",
             str(result["error"]),
             reason=str(result.get("reason") or "validation"),
         )
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -1819,43 +1971,25 @@ async def rocq_query(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
-    effective_timeout, clamped = _resolve_call_timeout(timeout)
-
-    explicit_workspace = bool(workspace)
-    workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None, "rocq_query", err, "validation"
-        )
-
-    if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    resolved = _resolve_tool_envelope(
+        tool="rocq_query", ctx=ctx, workspace=workspace, file=file, timeout=timeout
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_query(
         command=command,
         preamble=preamble,
         workspace=workspace,
-        lifespan_state=ctx.lifespan_context,
+        lifespan_state=lifespan_state,
         file=file,
         max_results=max_results,
         include_warnings=include_warnings,
         timeout=effective_timeout,
         from_state=from_state,
     )
-    if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -1932,42 +2066,25 @@ async def rocq_assumptions(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
-    effective_timeout, clamped = _resolve_call_timeout(timeout)
-    explicit_workspace = bool(workspace)
-
-    workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None,
-            "rocq_assumptions",
-            err,
-            "validation",
-        )
-
-    if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    resolved = _resolve_tool_envelope(
+        tool="rocq_assumptions",
+        ctx=ctx,
+        workspace=workspace,
+        file=file,
+        timeout=timeout,
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_assumptions(
         name=name,
         file=file,
         workspace=workspace,
-        lifespan_state=ctx.lifespan_context,
+        lifespan_state=lifespan_state,
         timeout=effective_timeout,
     )
-    if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -2007,38 +2124,20 @@ async def rocq_toc(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
-    effective_timeout, clamped = _resolve_call_timeout(timeout)
-    explicit_workspace = bool(workspace)
-
-    workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None, "rocq_toc", err, "validation"
-        )
-
-    if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    resolved = _resolve_tool_envelope(
+        tool="rocq_toc", ctx=ctx, workspace=workspace, file=file, timeout=timeout
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_toc(
         file=file,
         workspace=workspace,
-        lifespan_state=ctx.lifespan_context,
+        lifespan_state=lifespan_state,
         timeout=effective_timeout,
     )
-    if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -2080,39 +2179,21 @@ async def rocq_notations(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
-    effective_timeout, clamped = _resolve_call_timeout(timeout)
-    explicit_workspace = bool(workspace)
-
-    workspace = workspace or ROCQ_WORKSPACE
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None, "rocq_notations", err, "validation"
-        )
-
-    if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=False
+    resolved = _resolve_tool_envelope(
+        tool="rocq_notations", ctx=ctx, workspace=workspace, timeout=timeout
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_notations(
         statement=statement,
         preamble=preamble,
         workspace=workspace,
-        lifespan_state=ctx.lifespan_context,
+        lifespan_state=lifespan_state,
         timeout=effective_timeout,
     )
-    if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -2204,43 +2285,25 @@ async def rocq_start(
     On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
     recent error history.
     """
-    effective_timeout, clamped = _resolve_call_timeout(timeout)
-
-    explicit_workspace = bool(workspace)
-    workspace = workspace or _find_project_root_from_file(file) or ROCQ_WORKSPACE
-
-    err = _validate_workspace(workspace)
-    if err:
-        return _fail(
-            ctx.lifespan_context if ctx else None, "rocq_start", err, "validation"
-        )
-
-    if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
-
-    ws_warning = _maybe_workspace_warning(
-        workspace, explicit=explicit_workspace, file_provided=bool(file)
+    resolved = _resolve_tool_envelope(
+        tool="rocq_start", ctx=ctx, workspace=workspace, file=file, timeout=timeout
     )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
     result = await run_start(
         file=file,
         theorem=theorem,
         workspace=workspace,
-        lifespan_state=ctx.lifespan_context,
+        lifespan_state=lifespan_state,
         line=line,
         character=character,
         preamble=preamble,
         force_restart=force_restart,
         timeout=effective_timeout,
     )
-    if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
-    if ws_warning and isinstance(result, dict):
-        result["workspace_warning"] = ws_warning
-    return result
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------
@@ -2308,11 +2371,7 @@ async def rocq_step_multi(
     recent error history.
     """
     if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
+        return _no_ctx_fail("rocq_step_multi")
 
     effective_timeout, clamped = _resolve_call_timeout(timeout)
 
@@ -2402,11 +2461,7 @@ async def rocq_check(
     effective_timeout, clamped = _resolve_call_timeout(timeout)
 
     if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
+        return _no_ctx_fail("rocq_check")
 
     result = await run_check(
         body=body,
@@ -2472,11 +2527,7 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
       The full set is :data:`_RECENT_ERROR_REASONS`.
     """
     if ctx is None:
-        return {
-            "success": False,
-            "reason": "validation",
-            "error": "Internal error: no MCP context.",
-        }
+        return _no_ctx_fail("rocq_diag")
     return _build_diag_snapshot(ctx.lifespan_context)
 
 

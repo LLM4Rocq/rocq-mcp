@@ -6,7 +6,12 @@ import asyncio
 import glob as glob_mod
 import pytest
 
-from tests.conftest import COQC_AVAILABLE, _MockContext, _fake_coqc_result
+from tests.conftest import (
+    COQC_AVAILABLE,
+    _MockContext,
+    _fake_coqc_result,
+    make_lifespan_state,
+)
 from rocq_mcp.compile import run_compile_file
 
 pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
@@ -281,7 +286,7 @@ class TestCompileFileErrorStateCapture:
                 file="resolved_path_test.v",
                 workspace=str(workspace),
                 timeout=60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -316,7 +321,7 @@ class TestCompileFileErrorStateCapture:
                 file="../escaping_path.v",
                 workspace=str(workspace),
                 timeout=60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 

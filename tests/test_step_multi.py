@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import PET_AVAILABLE, add_mock_state
+from tests.conftest import PET_AVAILABLE, add_mock_state, make_lifespan_state
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock states and goals
@@ -157,7 +157,7 @@ class TestStepMultiReal:
         """run_step_multi rejects >20 tactics with success:False."""
         from rocq_mcp.interactive import run_step_multi
 
-        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        lifespan_state = make_lifespan_state()
         result = asyncio.run(
             run_step_multi(
                 tactics=["auto"] * 25,
@@ -173,7 +173,7 @@ class TestStepMultiReal:
         """run_step_multi rejects tactics with forbidden commands."""
         from rocq_mcp.interactive import run_step_multi
 
-        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        lifespan_state = make_lifespan_state()
         result = asyncio.run(
             run_step_multi(
                 tactics=["auto.", 'Load "evil".', "lia."],
@@ -215,11 +215,8 @@ class TestStepMultiReal:
             )
         )
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -279,11 +276,8 @@ class TestStepMultiReal:
         mock_pet.run = MagicMock(return_value=new_state)
         mock_pet.complete_goals = MagicMock(return_value=_make_complete_goals(goals=[]))
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -306,7 +300,7 @@ class TestStepMultiReal:
         """run_step_multi with a never-existed state id returns a clear error."""
         from rocq_mcp.interactive import run_step_multi
 
-        lifespan_state = {"pet_client": None, "pet_timeout": 30.0}
+        lifespan_state = make_lifespan_state()
 
         mock_pet = MagicMock()
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
@@ -342,11 +336,8 @@ class TestStepMultiReal:
         mock_pet = MagicMock()
         mock_pet.run = MagicMock(side_effect=BrokenPipeError("pet died"))
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -382,11 +373,8 @@ class TestStepMultiReal:
         mock_pet = MagicMock()
         mock_pet.run = MagicMock(side_effect=ConnectionError("connection lost"))
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -433,11 +421,9 @@ class TestStepMultiReal:
         mock_dead_pet.process = MagicMock()
         mock_dead_pet.process.poll = MagicMock(return_value=1)
 
-        lifespan_state = {
-            "pet_client": mock_dead_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_dead_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", side_effect=err):
             result = asyncio.run(
@@ -485,11 +471,9 @@ class TestStepMultiReal:
         mock_alive_pet.process = MagicMock()
         mock_alive_pet.process.poll = MagicMock(return_value=None)
 
-        lifespan_state = {
-            "pet_client": mock_alive_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_alive_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", side_effect=err):
             result = asyncio.run(
@@ -532,11 +516,9 @@ class TestStepMultiReal:
         mock_alive_pet.process.poll = MagicMock(return_value=None)
         mock_alive_pet.run = MagicMock(side_effect=err)
 
-        lifespan_state = {
-            "pet_client": mock_alive_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_alive_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_alive_pet):
             result = asyncio.run(
@@ -711,11 +693,8 @@ class TestStepMultiTimeoutBudget:
         mock_pet.run = fake_run
         mock_pet.complete_goals = MagicMock(return_value=_make_complete_goals(goals=[]))
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         with (
             patch("rocq_mcp.server._ensure_pet", return_value=mock_pet),
@@ -774,13 +753,10 @@ class TestStepMultiTimeoutBudget:
         mock_pet.run = fake_run
         mock_pet.complete_goals = MagicMock(return_value=_make_complete_goals(goals=[]))
 
-        lifespan_state = {
-            "pet_client": None,
-            # Very short timeout with many tactics: 2s / 20 tactics = 0.1
-            # Should clamp to 1 via max(1, int(...))
-            "pet_timeout": 2.0,
-            "current_workspace": "/tmp",
-        }
+        # Very short timeout with many tactics: 2s / 20 tactics = 0.1
+        # Should clamp to 1 via max(1, int(...))
+        lifespan_state = make_lifespan_state(pet_timeout=2.0)
+        lifespan_state["current_workspace"] = "/tmp"
 
         # Use 20 tactics (the maximum allowed)
         tactics_list = [f"tac{i}." for i in range(20)]
@@ -830,11 +806,8 @@ class TestStepMultiTimeoutBudget:
         mock_pet.run = fake_run
         mock_pet.complete_goals = MagicMock(return_value=_make_complete_goals(goals=[]))
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
 
         # Mix of eligible and non-eligible tactics
         # Bullet markers (-/+/*) are not timeout-eligible
@@ -928,11 +901,9 @@ class TestStepMultiDeadPetDetection:
         mock_pet.process.poll = MagicMock(return_value=1)
         mock_pet.run = MagicMock(side_effect=err)
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
@@ -976,7 +947,7 @@ class TestStepMultiTimeoutForwarding:
 
         sid = add_mock_state(parent_id=None, tactic=None)
 
-        lifespan_state = {"pet_timeout": 30.0}
+        lifespan_state = make_lifespan_state()
         await run_step_multi(
             tactics=["auto."],
             lifespan_state=lifespan_state,
@@ -1002,7 +973,7 @@ class TestStepMultiTimeoutForwarding:
 
         sid = add_mock_state(parent_id=None, tactic=None)
 
-        lifespan_state = {"pet_timeout": 45.0}
+        lifespan_state = make_lifespan_state(pet_timeout=45.0)
         await run_step_multi(
             tactics=["auto."],
             lifespan_state=lifespan_state,

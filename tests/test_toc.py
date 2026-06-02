@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from rocq_mcp.interactive import _format_toc_elements, run_toc
+from tests.conftest import make_lifespan_state
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock TocElement-like objects
@@ -165,7 +166,7 @@ class TestTocPathTraversal:
 
     def test_absolute_path_rejected(self, tmp_path):
         """An absolute file path outside workspace is rejected."""
-        lifespan_state = {"pet_timeout": 10}
+        lifespan_state = make_lifespan_state(pet_timeout=10)
         result = asyncio.run(
             run_toc(
                 file="/etc/passwd",
@@ -178,7 +179,7 @@ class TestTocPathTraversal:
 
     def test_dotdot_traversal_rejected(self, tmp_path):
         """A ../ traversal outside workspace is rejected."""
-        lifespan_state = {"pet_timeout": 10}
+        lifespan_state = make_lifespan_state(pet_timeout=10)
         result = asyncio.run(
             run_toc(
                 file="../../etc/passwd",

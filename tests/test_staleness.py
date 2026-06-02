@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from rocq_mcp.interactive import _check_staleness, _StateEntry
+from tests.conftest import make_lifespan_state
 
 
 class TestCheckStaleness:
@@ -201,11 +202,9 @@ class TestStalenessInRunCheck:
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(
@@ -239,11 +238,9 @@ class TestStalenessInRunCheck:
             goals=[], stack=[], shelf=[], given_up=[]
         )
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(
@@ -289,11 +286,9 @@ class TestStalenessInRunCheck:
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": str(tmp_path),
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = str(tmp_path)
 
         with patch.object(_srv, "_ensure_pet", return_value=mock_pet):
             result = await _int.run_check(

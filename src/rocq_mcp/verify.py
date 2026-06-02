@@ -130,6 +130,68 @@ _DEF_KEYWORDS_RE_STR = "|".join(
 )
 
 
+def _iter_rocq_chars(text: str):
+    """Shared per-character Rocq lexer driving :func:`_rocq_scan` and
+    :func:`_neutralize_for_regex`.
+
+    Yields ``(index, char, in_comment, in_string, consume)`` tuples
+    tracking ``(* ... *)`` comment nesting (arbitrary depth) and
+    ``"..."`` string literals (with ``""`` escape).  String literals
+    inside comments are tracked so ``*)`` within a quoted string within
+    a comment does NOT close the comment, matching Rocq's lexer.
+
+    ``consume`` is ``2`` when the event represents a two-character
+    token (``(*``, ``*)``, or a ``""`` string escape) and the second
+    character is at ``index + 1``; otherwise ``1``.  Callers that need
+    per-character output (e.g. position-preserving neutralization) use
+    ``consume`` to fan a single yield out to both positions; callers
+    that want one event per logical token (e.g. sentence-boundary
+    detection) can ignore it.
+    """
+    depth = 0
+    in_str = False
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if in_str:
+            if ch == '"':
+                if i + 1 < length and text[i + 1] == '"':
+                    yield i, ch, depth > 0, True, 2
+                    i += 2
+                    continue
+                in_str = False
+            yield i, ch, depth > 0, True, 1
+        elif depth > 0:
+            if ch == '"':
+                in_str = True
+                yield i, ch, True, True, 1
+            elif ch == "*" and i + 1 < length and text[i + 1] == ")":
+                depth -= 1
+                yield i, ch, True, False, 2
+                i += 2
+                continue
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                yield i, ch, True, False, 2
+                i += 2
+                continue
+            else:
+                yield i, ch, True, False, 1
+        else:
+            if ch == '"':
+                in_str = True
+                yield i, ch, False, True, 1
+            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
+                depth += 1
+                yield i, ch, True, False, 2
+                i += 2
+                continue
+            else:
+                yield i, ch, False, False, 1
+        i += 1
+
+
 def _neutralize_for_regex(text: str) -> str:
     """Replace comment and string interiors with spaces, preserving text length.
 
@@ -140,54 +202,19 @@ def _neutralize_for_regex(text: str) -> str:
     original.
     """
     result = list(text)
-    depth = 0
-    in_str = False
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if in_str:
-            if ch == '"':
-                if i + 1 < n and text[i + 1] == '"':
-                    # Escaped quote inside string — blank both
-                    result[i] = " "
-                    result[i + 1] = " "
-                    i += 2
-                    continue
-                # Closing quote
-                in_str = False
-                if depth > 0:
-                    result[i] = " "
-            else:
-                result[i] = " "
-        elif depth > 0:
-            if ch == '"':
-                in_str = True
-                result[i] = " "
-            elif ch == "(" and i + 1 < n and text[i + 1] == "*":
-                depth += 1
-                result[i] = " "
-                result[i + 1] = " "
-                i += 2
-                continue
-            elif ch == "*" and i + 1 < n and text[i + 1] == ")":
-                depth -= 1
-                result[i] = " "
-                result[i + 1] = " "
-                i += 2
-                continue
-            else:
-                result[i] = " "
-        else:
-            if ch == '"':
-                in_str = True
-            elif ch == "(" and i + 1 < n and text[i + 1] == "*":
-                depth += 1
-                result[i] = " "
-                result[i + 1] = " "
-                i += 2
-                continue
-        i += 1
+    for idx, ch, in_comment, in_str, consume in _iter_rocq_chars(text):
+        if in_comment:
+            result[idx] = " "
+            if consume == 2:
+                result[idx + 1] = " "
+        elif in_str:
+            if consume == 2:
+                # "" escape inside a string — blank both characters
+                result[idx] = " "
+                result[idx + 1] = " "
+            elif ch != '"':
+                # String interior — blank; the lone " delimiter is preserved
+                result[idx] = " "
     return "".join(result)
 
 
@@ -357,49 +384,12 @@ def _rocq_scan(text: str):
 
     Two-character tokens (``(*``, ``*)``, ``""``) are yielded as one event at
     the position of their first character; the second character is skipped.
+
+    Thin wrapper over :func:`_iter_rocq_chars` — the underlying lexer state
+    machine is shared with :func:`_neutralize_for_regex`.
     """
-    depth = 0
-    in_str = False
-    i = 0
-    length = len(text)
-    while i < length:
-        ch = text[i]
-        if in_str:
-            if ch == '"':
-                if i + 1 < length and text[i + 1] == '"':
-                    yield i, ch, depth > 0, True
-                    i += 2
-                    continue
-                in_str = False
-            yield i, ch, depth > 0, True
-        elif depth > 0:
-            if ch == '"':
-                in_str = True
-                yield i, ch, True, True
-            elif ch == "*" and i + 1 < length and text[i + 1] == ")":
-                depth -= 1
-                yield i, ch, True, False  # closing *) – still part of comment
-                i += 2
-                continue
-            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
-                depth += 1
-                yield i, ch, True, False
-                i += 2
-                continue
-            else:
-                yield i, ch, True, False
-        else:
-            if ch == '"':
-                in_str = True
-                yield i, ch, False, True
-            elif ch == "(" and i + 1 < length and text[i + 1] == "*":
-                depth += 1
-                yield i, ch, True, False
-                i += 2
-                continue
-            else:
-                yield i, ch, False, False
-        i += 1
+    for idx, ch, in_comment, in_str, _consume in _iter_rocq_chars(text):
+        yield idx, ch, in_comment, in_str
 
 
 def _check_forbidden_commands(source: str) -> str | None:

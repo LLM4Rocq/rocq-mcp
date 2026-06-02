@@ -1,7 +1,8 @@
 """Unit tests for the max_results parameter in run_query.
 
-These tests mock _run_with_pet to avoid needing pet — they test
-the feedback truncation and count logic only.
+These tests mock at the pet boundary — the real ``_run_with_pet`` executes
+around the mock, exercising its lock / semaphore / timeout / exception
+paths.  The tests are about feedback truncation and count logic only.
 """
 
 from __future__ import annotations
@@ -10,19 +11,24 @@ import pytest
 
 import rocq_mcp.server as _server
 import rocq_mcp.interactive as _int
+from tests.conftest import _MockPetBase, make_lifespan_state
 
 
 @pytest.fixture(autouse=True)
-def _patch_run_with_pet(monkeypatch):
-    """Patch _run_with_pet to run the callback with a mock pet."""
+def _patch_pet_boundary(monkeypatch):
+    """Patch ``_ensure_pet`` to return a mock pet — the real
+    ``_run_with_pet`` orchestrator runs around it."""
     from types import SimpleNamespace
 
     class MockState:
         def __init__(self, feedback):
             self.feedback = feedback
+            self.proof_finished = False
 
     class MockPet:
         def __init__(self):
+            # ``_pet_alive`` consults pet.process.poll() inside the
+            # PetanqueError handler, so the mock must expose it.
             self.process = SimpleNamespace(poll=lambda: None)
             self._feedback = [(0, f"result_{i}") for i in range(20)]
 
@@ -36,20 +42,21 @@ def _patch_run_with_pet(monkeypatch):
             pass
 
     mock_pet = MockPet()
-
-    async def mock_run_with_pet(fn, lifespan_state, label, **kw):
-        return fn(mock_pet)
-
-    monkeypatch.setattr(_server, "_run_with_pet", mock_run_with_pet)
+    monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
     # Bypass import caching — just return a mock state directly
     monkeypatch.setattr(
         _int,
         "_get_or_create_import_state",
         lambda pet, ws, cmds, ls: MockState([]),
     )
+    # Reset the global pet semaphore between tests so the orchestrator
+    # rebuilds its own lock fresh inside each test's event loop.
+    _server._pet_semaphore = None
+    yield
+    _server._pet_semaphore = None
 
 
-class TestMaxResultsEdgeCases:
+class TestMaxResultsEdgeCases(_MockPetBase):
     """Unit tests for max_results truncation logic."""
 
     @pytest.mark.asyncio
@@ -59,7 +66,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=5,
         )
         assert result["success"] is True
@@ -74,7 +81,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=None,
         )
         assert result["success"] is True
@@ -87,7 +94,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=0,
         )
         assert result["success"] is True
@@ -100,7 +107,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=-1,
         )
         assert result["success"] is True
@@ -113,7 +120,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=100,
         )
         assert result["success"] is True
@@ -126,7 +133,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=20,
         )
         assert result["success"] is True
@@ -139,7 +146,7 @@ class TestMaxResultsEdgeCases:
             command="Search nat.",
             preamble="",
             workspace="/tmp",
-            lifespan_state={"pet_timeout": 30.0},
+            lifespan_state=make_lifespan_state(),
             max_results=1,
         )
         assert result["success"] is True

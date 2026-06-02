@@ -826,11 +826,9 @@ class TestCheckMultiCommandTimeout:
         mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
         mock_pet.complete_goals.return_value = mock_goals
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = _make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
 
         with patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_check(

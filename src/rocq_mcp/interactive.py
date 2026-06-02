@@ -521,6 +521,7 @@ async def run_query(
     include_warnings: bool = True,
     timeout: float | None = None,
     from_state: int | None = None,
+    auto_record: bool = True,
 ) -> dict[str, Any]:
     """Core implementation of rocq_query (testable without FastMCP Context).
 
@@ -549,6 +550,12 @@ async def run_query(
     :func:`_run_with_pet`; otherwise the helper falls back to
     ``lifespan_state["pet_timeout"]``.  Caller (the MCP wrapper) is
     expected to apply ``ROCQ_QUERY_TIMEOUT_CAP``.
+
+    When ``auto_record=False``, pet-side failures (timeout, crashed,
+    lock_contended, ...) still propagate as the usual failure-envelope
+    dict but skip the ``recent_errors`` push.  Used by ``run_assumptions``
+    so it can record once at its own layer with the right tool/reason
+    attribution.
     """
     if file and from_state is not None:
         return _server._fail(
@@ -652,6 +659,7 @@ async def run_query(
         lifespan_state,
         "rocq_query",
         timeout=timeout,
+        auto_record=auto_record,
     )
 
 
@@ -712,6 +720,12 @@ async def run_assumptions(
             ),
         )
 
+    # auto_record=False lets us classify the failure once at the
+    # rocq_assumptions layer below: a typo against a valid file becomes
+    # ``not_found``; everything else inherits the underlying reason but
+    # under our tool name.  Without this, _run_with_pet would push the
+    # generic ``rocq_query/crashed`` first and we'd have to pop-and-
+    # re-push to fix the attribution.
     query_result = await run_query(
         command=f"Print Assumptions {clean_name}.",
         preamble="",
@@ -719,6 +733,7 @@ async def run_assumptions(
         lifespan_state=lifespan_state,
         file=file,
         timeout=timeout,
+        auto_record=False,
     )
     if not query_result.get("success"):
         # Best-effort enrichment: attach the file's symbol list so the
@@ -742,6 +757,7 @@ async def run_assumptions(
         is_transport_failure = (
             reason in _TRANSPORT_FAILURE_REASONS and reason != "crashed"
         ) or (reason == "crashed" and pet_restarted)
+        retagged_not_found = False
         if "available_in_file" not in query_result and not is_transport_failure:
             result = await _fetch_available_in_file(
                 file=file,
@@ -752,34 +768,26 @@ async def run_assumptions(
             _attach_available_in_file(query_result, result)
             if result.names:
                 # Non-empty names means the file IS valid; the failure
-                # was about the requested name (a typo).  Re-record as
+                # was about the requested name (a typo).  Re-tag as
                 # ``not_found`` so ``rocq_diag`` reports it correctly
                 # rather than as the generic ``crashed`` reason
-                # ``_run_with_pet`` set on a Coq error.
+                # ``_run_with_pet`` would have set on a Coq error.
                 if query_result.get("reason") != "not_found":
                     query_result["reason"] = "not_found"
-                    # Drop the just-recorded rocq_query/crashed entry
-                    # (set by _run_with_pet on the live PetanqueError)
-                    # before re-recording as rocq_assumptions/not_found.
-                    # Without this, rocq_diag reports the same failure
-                    # twice with conflicting tool / reason attribution.
-                    buf = (
-                        lifespan_state.get("recent_errors")
-                        if lifespan_state is not None
-                        else None
-                    )
-                    if (
-                        buf
-                        and buf[-1].get("tool") == "rocq_query"
-                        and buf[-1].get("reason") == "crashed"
-                    ):
-                        buf.pop()
-                    _server._record_error(
-                        lifespan_state,
-                        "rocq_assumptions",
-                        query_result.get("error", ""),
-                        reason="not_found",
-                    )
+                    retagged_not_found = True
+        final_reason = query_result.get("reason") or "crashed"
+        # Idempotency: when reason is already ``not_found`` from the
+        # inner layer (a future ``run_query`` classification) and we
+        # did not retag here, skip the record to mirror the legacy
+        # behavior tested by
+        # ``test_typo_failure_no_double_record_when_reason_already_not_found``.
+        if final_reason != "not_found" or retagged_not_found:
+            _server._record_error(
+                lifespan_state,
+                "rocq_assumptions",
+                query_result.get("error", ""),
+                reason=final_reason,
+            )
         return query_result
 
     raw_output = query_result["output"]
@@ -1003,16 +1011,19 @@ _DEFAULT_TOC_LIMIT: int = 500
 #
 # This set is a strict subset of :data:`server._RECENT_ERROR_REASONS`
 # (the larger set also includes validation-only and tool-specific
-# values like ``"not_found"`` / ``"tactic_failed"``).  Keep both in
-# sync when adding a new pet-side failure mode.
-_TRANSPORT_FAILURE_REASONS: frozenset[str] = frozenset(
-    {
-        "timeout",
-        "crashed",
-        "memory_exhausted",
-        "lock_contended",
-        "unavailable",
-    }
+# values like ``"not_found"`` / ``"tactic_failed"``).  Derived from the
+# shared :data:`server._PET_SIDE_FAILURE_REASONS` so the intersection
+# invariant across the three reason-sets in the codebase cannot drift
+# silently — the assertion below catches a new pet-side failure mode
+# added on one side without a matching update on the other at import,
+# not on the next operational incident.
+_TRANSPORT_FAILURE_REASONS: frozenset[str] = _server._PET_SIDE_FAILURE_REASONS
+
+assert _TRANSPORT_FAILURE_REASONS <= _server._RECENT_ERROR_REASONS, (
+    f"_TRANSPORT_FAILURE_REASONS must be a subset of "
+    f"_RECENT_ERROR_REASONS; new pet-side reasons added to one must be "
+    f"added to the other. Offenders: "
+    f"{_TRANSPORT_FAILURE_REASONS - _server._RECENT_ERROR_REASONS}"
 )
 
 
@@ -1550,6 +1561,87 @@ async def run_start(
 # ---------------------------------------------------------------------------
 
 
+def _run_one_check_command(
+    pet: Any,
+    state: Any,
+    cmd: str,
+    *,
+    entry: _StateEntry,
+    prev_state_id: int,
+    command_index: int,
+    total_commands: int,
+    is_single: bool,
+    timeout: float,
+    include_warnings: bool,
+    feedback_pairs: list[list[str]],
+    total_feedback_size: int,
+    stale_warning: str | None,
+    lifespan_state: dict[str, Any],
+) -> tuple[Any, int, list[str] | None, dict[str, Any] | None]:
+    """Run one ``run_check`` command and report its outcome.
+
+    Returns ``(new_state, new_state_id, feedback_entry, failure_dict)``.
+    On success ``failure_dict`` is ``None`` and ``feedback_entry`` is
+    either the ``[cmd, fb_text]`` pair to append (when feedback was
+    produced and the budget allows) or ``None``.  On a tactic-level
+    failure ``failure_dict`` is the fully assembled envelope ready for
+    the driver to return verbatim, ``new_state`` is the pre-call
+    ``state`` and ``new_state_id`` is ``prev_state_id``.  When the pet
+    process itself died the underlying :class:`PetanqueError` is
+    re-raised so ``_run_with_pet`` can surface ``pet_restarted=True``.
+    """
+    from pytanque import PetanqueError
+
+    try:
+        if _is_timeout_eligible(cmd) and timeout >= 1:
+            if is_single:
+                rocq_timeout: int | None = int(timeout)
+            else:
+                rocq_timeout = max(1, int(timeout / total_commands))
+        else:
+            rocq_timeout = None
+
+        new_state = pet.run(state, cmd, timeout=rocq_timeout)
+
+        feedback_entry: list[str] | None = None
+        if total_feedback_size < _MAX_TOTAL_FEEDBACK:
+            fb_text = _extract_feedback(new_state, include_warnings=include_warnings)
+            if fb_text is not None:
+                feedback_entry = [cmd, fb_text]
+
+        new_state_id = _state_add(
+            state=new_state,
+            file=entry.file,
+            theorem=entry.theorem,
+            workspace=entry.workspace,
+            parent_id=prev_state_id,
+            tactic=cmd,
+            step=entry.step + command_index + 1,
+            file_mtime=entry.file_mtime,
+            resolved_file=entry.resolved_file,
+        )
+        return new_state, new_state_id, feedback_entry, None
+    except PetanqueError as e:
+        if not _server._pet_alive(lifespan_state.get("pet_client")):
+            raise
+        _server._record_error(
+            lifespan_state,
+            "rocq_check",
+            e.message,
+            reason="tactic_failed",
+        )
+        failure = _build_check_failure_dict(
+            error_message=e.message,
+            failed_command=cmd,
+            command_index=command_index,
+            last_valid_state_id=prev_state_id,
+            goals_at_failure=_try_get_goals(pet, state),
+            feedback_pairs=feedback_pairs,
+            stale_warning=stale_warning,
+        )
+        return state, prev_state_id, None, failure
+
+
 def _build_check_failure_dict(
     *,
     error_message: str,
@@ -1703,7 +1795,7 @@ async def run_check(
 
     def _execute(pet: Any) -> dict[str, Any]:
         try:
-            from pytanque import PetanqueError
+            import pytanque  # noqa: F401
         except ImportError:
             return {
                 "success": False,
@@ -1733,72 +1825,34 @@ async def run_check(
         total_feedback_size = 0
 
         for i, cmd in enumerate(commands):
-            try:
-                if _is_timeout_eligible(cmd) and _timeout >= 1:
-                    if is_single:
-                        rocq_timeout = int(_timeout)
-                    else:
-                        # Budget: divide timeout among commands so total
-                        # stays within the hard_timeout window.
-                        rocq_timeout = max(1, int(_timeout / len(commands)))
-                else:
-                    rocq_timeout = None
-
-                new_state = pet.run(state, cmd, timeout=rocq_timeout)
-
-                # Collect per-step feedback (e.g. Print output,
-                # vm_compute traces) before it is lost.
-                if total_feedback_size < _MAX_TOTAL_FEEDBACK:
-                    fb_text = _extract_feedback(
-                        new_state, include_warnings=include_warnings
-                    )
-                    if fb_text is not None:
-                        feedback_pairs.append([cmd, fb_text])
-                        total_feedback_size += len(fb_text)
-
-                state_id = _state_add(
-                    state=new_state,
-                    file=entry_to_use.file,
-                    theorem=entry_to_use.theorem,
-                    workspace=entry_to_use.workspace,
-                    parent_id=prev_state_id,
-                    tactic=cmd,
-                    step=entry_to_use.step + i + 1,
-                    file_mtime=entry_to_use.file_mtime,
-                    resolved_file=entry_to_use.resolved_file,
-                )
-                prev_state_id = state_id
-                state = new_state
-                partial_state["commands_run"] = i + 1
-                partial_state["last_valid_state_id"] = state_id
-            except PetanqueError as e:
-                # If pet died, re-raise so _run_with_pet detects it
-                # and returns pet_restarted=True to the client.
-                if not _server._pet_alive(lifespan_state.get("pet_client")):
-                    raise
-                # Record into recent_errors so rocq_diag surfaces the
-                # tactic-level failure under the same reason the
-                # response carries.  Without this, mid-batch failures
-                # were invisible in the diag buffer.
-                _server._record_error(
-                    lifespan_state,
-                    "rocq_check",
-                    e.message,
-                    reason="tactic_failed",
-                )
-                return _build_check_failure_dict(
-                    error_message=e.message,
-                    failed_command=cmd,
-                    command_index=i,
-                    last_valid_state_id=prev_state_id,
-                    goals_at_failure=_try_get_goals(pet, state),
-                    feedback_pairs=feedback_pairs,
-                    stale_warning=stale_warning,
-                )
+            new_state, new_state_id, feedback_entry, failure = _run_one_check_command(
+                pet,
+                state,
+                cmd,
+                entry=entry_to_use,
+                prev_state_id=prev_state_id,
+                command_index=i,
+                total_commands=len(commands),
+                is_single=is_single,
+                timeout=_timeout,
+                include_warnings=include_warnings,
+                feedback_pairs=feedback_pairs,
+                total_feedback_size=total_feedback_size,
+                stale_warning=stale_warning,
+                lifespan_state=lifespan_state,
+            )
+            if failure is not None:
+                return failure
+            if feedback_entry is not None:
+                feedback_pairs.append(feedback_entry)
+                total_feedback_size += len(feedback_entry[1])
+            state = new_state
+            prev_state_id = new_state_id
+            partial_state["commands_run"] = i + 1
+            partial_state["last_valid_state_id"] = new_state_id
 
         elapsed = time.monotonic() - start_time
 
-        # Get goals at final state
         try:
             complete = pet.complete_goals(state)
             goals_list = complete.goals if complete else []

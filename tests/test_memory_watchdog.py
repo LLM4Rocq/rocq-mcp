@@ -344,7 +344,8 @@ class TestWatchdogCoroutine:
         _patch_psutil_rss(monkeypatch, 500)
 
         mock_pet = _mock_pet()
-        lifespan_state = {"pet_client": mock_pet}
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         event = asyncio.Event()
 
         async def long_running():
@@ -373,7 +374,8 @@ class TestWatchdogCoroutine:
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet()
-        lifespan_state = {"pet_client": mock_pet}
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         event = asyncio.Event()
 
         async def quick():
@@ -395,7 +397,8 @@ class TestWatchdogCoroutine:
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet()
-        lifespan_state = {"pet_client": mock_pet}
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
         event = asyncio.Event()
 
         async def long_running():

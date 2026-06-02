@@ -21,6 +21,7 @@ from tests.conftest import (
     _fake_coqc_result,
     _patch_capture_position_state,
     _patch_compile_error,
+    make_lifespan_state,
 )
 from rocq_mcp.server import rocq_compile
 
@@ -474,7 +475,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -555,7 +556,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -582,7 +583,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -626,7 +627,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -660,7 +661,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -685,7 +686,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -711,7 +712,7 @@ class TestStateCaptureStatus:
                 str(workspace),
                 60,
                 # pet_timeout 30 must be capped to 5.0 by the orchestration.
-                lifespan_state={"pet_client": None, "pet_timeout": 30.0},
+                lifespan_state=make_lifespan_state(),
             )
         )
 
@@ -737,7 +738,7 @@ class TestStateCaptureStatus:
                 "x",
                 str(workspace),
                 60,
-                lifespan_state={"pet_client": None, "pet_timeout": 2.0},
+                lifespan_state=make_lifespan_state(pet_timeout=2.0),
             )
         )
 

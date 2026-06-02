@@ -324,3 +324,92 @@ def patch_psutil_rss(monkeypatch, rss_mb: int) -> None:
         return FakePsutilProcess(rss_bytes)
 
     monkeypatch.setattr(psutil, "Process", _factory)
+
+
+# ---------------------------------------------------------------------------
+# _MockPetBase — shared mock-pet plumbing for MCP-path tests
+# ---------------------------------------------------------------------------
+
+
+class _MockPetBase:
+    """Base class for mock-pet MCP-path tests.
+
+    Mock at the ``pet`` boundary (the pytanque client) — the real
+    ``_run_with_pet`` executes around it, so lock / semaphore / timeout /
+    exception-handler paths are still exercised by tests that inherit from
+    this class.  Mocking ``_run_with_pet`` directly skips that entire
+    orchestration layer.
+
+    Provides:
+      * ``_reset_state_and_semaphore`` (autouse) — clears the state table
+        and the global pet semaphore before/after each test.
+      * ``_mock_pytanque`` (autouse) — installs a minimal ``pytanque``
+        module in ``sys.modules`` if the real package is not importable.
+      * ``_setup_state_and_pet(fake_run)`` — convenience helper that
+        seeds a root state, builds a MagicMock pet whose ``run``
+        delegates to *fake_run*, and returns
+        ``(state_id, mock_pet, lifespan_state)``.
+    """
+
+    pytestmark = []
+
+    @pytest.fixture(autouse=True)
+    def _reset_state_and_semaphore(self):
+        import rocq_mcp.server as srv
+        from rocq_mcp.interactive import _state_invalidate_all
+
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+        yield
+        _state_invalidate_all()
+        srv._pet_semaphore = None
+
+    @pytest.fixture(autouse=True)
+    def _mock_pytanque(self):
+        import sys
+        from types import SimpleNamespace
+
+        if "pytanque" in sys.modules:
+            yield
+            return
+
+        mock_module = SimpleNamespace(
+            PetanqueError=type("PetanqueError", (Exception,), {"message": ""}),
+            Pytanque=MagicMock,
+            PytanqueMode=SimpleNamespace(STDIO="stdio"),
+        )
+        sys.modules["pytanque"] = mock_module
+        yield
+        sys.modules.pop("pytanque", None)
+
+    def _setup_state_and_pet(self, fake_run):
+        from types import SimpleNamespace
+
+        import rocq_mcp.interactive as _interactive
+
+        _interactive._state_table.clear()
+        _interactive._state_next_id = 1
+
+        mock_state = SimpleNamespace(st=42, proof_finished=False, feedback=[])
+        sid = _interactive._state_add(
+            state=mock_state,
+            file="test.v",
+            theorem="test",
+            workspace="/tmp",
+            parent_id=None,
+            tactic=None,
+            step=0,
+        )
+
+        mock_pet = MagicMock()
+        mock_pet.process = MagicMock()
+        mock_pet.process.poll.return_value = None
+        mock_pet.run = fake_run
+
+        mock_goals = SimpleNamespace(goals=[], stack=[], shelf=[], given_up=[])
+        mock_pet.complete_goals.return_value = mock_goals
+
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = mock_pet
+        lifespan_state["current_workspace"] = "/tmp"
+        return sid, mock_pet, lifespan_state

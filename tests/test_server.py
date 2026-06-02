@@ -47,7 +47,7 @@ from rocq_mcp.compile import (
     _MAX_FORMAT_WARNINGS,
 )
 from rocq_mcp.interactive import _format_goals
-from tests.conftest import add_mock_state
+from tests.conftest import add_mock_state, make_lifespan_state
 
 # =========================================================================
 # _format_error
@@ -903,9 +903,11 @@ class TestFindProjectRootFromFile:
         )
 
     def test_rocqproject_beats_coqproject_in_same_dir(self, tmp_path):
-        """When both markers coexist, _RocqProject (priority 0) wins.
+        """When both markers coexist in the same dir, _RocqProject wins.
 
-        Locks in the priority order in ``_PROJECT_MARKERS`` so a future
+        Locks in the tuple-order tiebreaker on ``_PROJECT_MARKERS`` (depth
+        wins across directories; tuple order only resolves the case where
+        a single directory contains more than one marker) so a future
         reorder doesn't silently change behaviour.  The returned path is
         the same dir either way; this test would catch a divergence if
         the markers ever placed different load paths.
@@ -1782,11 +1784,7 @@ class TestRunCheckBodySizeLimit:
         # Create a state so that from_state lookup would succeed
         root = add_mock_state(None, None, step=0)
 
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
 
         # Create body larger than the limit
         big_body = "x" * 200
@@ -2053,11 +2051,8 @@ class TestPetInvalidationHooks:
         assert len(_import_cache) > 0
 
         # Call _invalidate_pet (no real pet, so pet_client is None)
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": "/tmp",
-        }
+        lifespan_state = make_lifespan_state()
+        lifespan_state["current_workspace"] = "/tmp"
         srv._invalidate_pet(lifespan_state)
 
         # Both should be cleared
@@ -2094,11 +2089,7 @@ class TestRunCheckBodyWithinLimit:
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 1000)
 
         root = add_mock_state(None, None, step=0)
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
 
         # Body within limit - should NOT be rejected by size check
         # (will fail for other reasons like no pet, but that's fine)
@@ -2122,11 +2113,7 @@ class TestRunCheckBodyWithinLimit:
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
 
         root = add_mock_state(None, None, step=0)
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
 
         # Body exactly at limit (not over)
         exact_body = "x" * 200
@@ -2149,11 +2136,7 @@ class TestRunCheckBodyWithinLimit:
         monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
 
         root = add_mock_state(None, None, step=0)
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 30.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state()
 
         # Body one byte over limit
         over_body = "x" * 201
@@ -2303,7 +2286,8 @@ class TestEnsurePetHooks:
         dead_pet.process.stderr = MagicMock()
         dead_pet._own_pgrp = False
 
-        lifespan_state = {"pet_client": dead_pet}
+        lifespan_state = make_lifespan_state()
+        lifespan_state["pet_client"] = dead_pet
 
         try:
             # Mock pytanque import to avoid real subprocess
@@ -2359,11 +2343,8 @@ class TestRunWithPetExceptionHandling:
         mock_pet.process.stderr = None
         mock_pet._own_pgrp = False
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 10.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state(pet_timeout=10.0)
+        lifespan_state["pet_client"] = mock_pet
 
         def fn_that_raises(pet):
             raise PetanqueError(1, "Connection lost")
@@ -2389,11 +2370,8 @@ class TestRunWithPetExceptionHandling:
         mock_pet.process = MagicMock()
         mock_pet.process.poll.return_value = None  # alive
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 10.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state(pet_timeout=10.0)
+        lifespan_state["pet_client"] = mock_pet
 
         def fn_that_raises(pet):
             raise PetanqueError(1, "Tactic failed")
@@ -2418,11 +2396,8 @@ class TestRunWithPetExceptionHandling:
         mock_pet.process.stderr = None
         mock_pet._own_pgrp = False
 
-        lifespan_state = {
-            "pet_client": mock_pet,
-            "pet_timeout": 10.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state(pet_timeout=10.0)
+        lifespan_state["pet_client"] = mock_pet
 
         callback_called = []
 
@@ -2444,11 +2419,7 @@ class TestRunWithPetExceptionHandling:
     @pytest.mark.asyncio
     async def test_file_not_found_returns_helpful_error(self):
         """FileNotFoundError returns helpful error message."""
-        lifespan_state = {
-            "pet_client": None,
-            "pet_timeout": 10.0,
-            "current_workspace": None,
-        }
+        lifespan_state = make_lifespan_state(pet_timeout=10.0)
 
         def fn(pet):
             pass  # won't be called

@@ -732,7 +732,7 @@ async def _extract_problem_structure(
 
     def _do_toc(pet: Any) -> Any:
         ws = str(Path(workspace).resolve())
-        pet.set_workspace(debug=False, dir=ws)
+        _server._set_workspace_if_needed(pet, workspace, lifespan_state)
         with tempfile.NamedTemporaryFile(
             suffix=".v", mode="w", delete=False, dir=ws
         ) as f:

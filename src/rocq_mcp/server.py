@@ -80,6 +80,16 @@ ROCQ_MAX_PET_RSS_MB: int = int(
 _MEMORY_WATCHDOG_INTERVAL: float = 0.5
 _RECENT_ERRORS_MAX: int = 20
 
+# Multi-error walker tunables for ``rocq_compile_file``.  When CAP is 0
+# the feature is disabled and no ``errors`` field is added to the
+# response.  TIMEOUT is the per-``pet.run`` budget inside the walker.
+_COMPILE_MULTI_ERROR_CAP: int = int(
+    os.environ.get("ROCQ_COMPILE_MULTI_ERROR_CAP", "20")
+)
+_COMPILE_MULTI_ERROR_TIMEOUT: float = float(
+    os.environ.get("ROCQ_COMPILE_MULTI_ERROR_TIMEOUT", "5.0")
+)
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -1747,6 +1757,22 @@ async def rocq_compile_file(
         ``"no_position"``: enrichment did not
         succeed; follow the original ``hint`` (typically
         ``rocq_start(file=..., line=..., character=...)``).
+
+    On a ``compile_error`` failure with coq-lsp available, the result
+    may also include ``errors``: a list of per-proof errors discovered
+    by walking the file through pet (one entry per failing chunk).
+    Each entry is ``{proof_name, kind, start_line, end_line, code,
+    message}``.  Complements ``error_positions`` — the latter is
+    coqc's raw parse of the first diagnostic, while ``errors`` is
+    pet's structured walk of the whole file.  The field may be
+    *present and empty* (``errors: []``) when the walker ran but pet
+    did not reproduce the coqc-reported failure — treat this as "no
+    additional errors found" rather than "no errors at all."  Absent
+    on success, when coq-lsp is unavailable, when the walker could
+    not run, and when ``ROCQ_COMPILE_MULTI_ERROR_CAP=0`` (feature
+    disabled).  Tune via ``ROCQ_COMPILE_MULTI_ERROR_CAP`` (default 20,
+    max entries) and ``ROCQ_COMPILE_MULTI_ERROR_TIMEOUT`` (default
+    5.0s, per-``pet.run`` budget inside the walker).
 
     Compilation artifacts (``.vo``/``.vok``/``.vos``/``.glob``/``.aux``)
     are cleaned up; the source file is preserved.

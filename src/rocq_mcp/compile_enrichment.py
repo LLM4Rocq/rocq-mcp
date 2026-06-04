@@ -22,12 +22,22 @@ from rocq_mcp.compile import (
     run_compile_file,
 )
 
+from rocq_mcp.proof_walk import ProofError, collect_file_errors
+
 # Cap on how long enrichment may spend per call.  Coqc has already returned
 # the basic error by the time we reach this code, so a stuck pet must not
 # silently steal more than this from the agent.
 _ENRICHMENT_TIMEOUT_CAP: float = float(
     os.environ.get("ROCQ_ENRICHMENT_TIMEOUT_CAP", "5.0")
 )
+
+# Outer wall-clock ceiling on the multi-error walker, expressed as a multiple
+# of ``_ENRICHMENT_TIMEOUT_CAP``.  Under default config (cap=20, per-call=5s)
+# the naive ``per_call_timeout * cap + per_call_timeout`` would be 105s; the
+# ``min`` against ``_ENRICHMENT_TIMEOUT_CAP * _WALKER_BUDGET_MULTIPLIER``
+# bounds the actual budget to 20s.  Set higher only if you have lifted
+# ``ROCQ_ENRICHMENT_TIMEOUT_CAP`` and want the walker to follow.
+_WALKER_BUDGET_MULTIPLIER: int = 4
 
 # Status enum for proof-state capture on compile errors.  Used as the
 # value type of the ``state_capture_status`` key returned by the
@@ -289,6 +299,60 @@ async def run_compile_with_state(
     )
 
 
+async def _multi_error_walk(
+    resolved_file: str,
+    lifespan_state: dict[str, Any],
+) -> list[Any] | None:
+    """Run the proof-walk error collector against *resolved_file*.
+
+    Returns the walker's ``list[ProofError]`` (possibly empty) when the
+    walker ran, or ``None`` when the walker bailed (e.g. ``pet.toc``
+    failed and the fallback yielded nothing) or when the call through
+    ``_run_with_pet`` produced a failure envelope.  Uses
+    ``auto_record=False`` because transient pet-level errors during the
+    walk are not the signal we want to surface — the walker's own
+    ``ProofError`` entries are.
+    """
+    try:
+        with open(resolved_file, "r", encoding="utf-8") as f:
+            source_text = f.read()
+    except OSError:
+        return None
+
+    cap = _server._COMPILE_MULTI_ERROR_CAP
+    per_call_timeout = _server._COMPILE_MULTI_ERROR_TIMEOUT
+
+    def _do_walk(pet: Any) -> list[Any] | None:
+        return collect_file_errors(
+            file=resolved_file,
+            source=source_text,
+            pet=pet,
+            per_call_timeout=per_call_timeout,
+            max_errors=cap,
+        )
+
+    # Walker budget: generous enough that pet.toc + ``cap`` chunked runs
+    # each at ``per_call_timeout`` can complete, plus headroom for the
+    # lock/setup overhead.  Capped by the outer ceiling
+    # ``_ENRICHMENT_TIMEOUT_CAP * _WALKER_BUDGET_MULTIPLIER`` so a
+    # misconfigured CAP cannot starve the agent.
+    walker_timeout = min(
+        per_call_timeout * max(cap, 1) + per_call_timeout,
+        _ENRICHMENT_TIMEOUT_CAP * _WALKER_BUDGET_MULTIPLIER,
+    )
+
+    result = await _server._run_with_pet(
+        _do_walk,
+        lifespan_state,
+        "rocq_compile_file",
+        timeout=walker_timeout,
+        auto_record=False,
+    )
+    if isinstance(result, dict) and result.get("success") is False:
+        return None
+    return result
+
+
 async def run_compile_file_with_state(
     file: str,
     workspace: str,
@@ -332,7 +396,7 @@ async def run_compile_file_with_state(
     if resolved_file is None:
         result["state_capture_status"] = "no_position"
         return result
-    return await _enrich_compile_failure(
+    result = await _enrich_compile_failure(
         result,
         source="",
         workspace=workspace,
@@ -341,3 +405,22 @@ async def run_compile_file_with_state(
         resolved_file=resolved_file,
         parent_tool="rocq_compile_file",
     )
+
+    # Multi-error walk: only on real compile errors and only when enabled
+    # (CAP=0 disables).  Runs after state capture so existing behavior is
+    # preserved.
+    if result.get("reason") == "compile_error" and _server._COMPILE_MULTI_ERROR_CAP > 0:
+        proof_errors = await _multi_error_walk(resolved_file, lifespan_state)
+        if proof_errors is not None:
+            result["errors"] = [
+                {
+                    "proof_name": e.proof_name,
+                    "kind": e.kind,
+                    "start_line": e.start_line,
+                    "end_line": e.end_line,
+                    "code": e.code,
+                    "message": e.message,
+                }
+                for e in proof_errors
+            ]
+    return result

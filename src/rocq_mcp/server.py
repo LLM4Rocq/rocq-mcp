@@ -133,6 +133,11 @@ mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# Full set of artifacts cleaned around coqc invocations on temp files
+# (see :func:`_cleanup_coqc_artifacts`).  The user-file path in
+# :func:`rocq_mcp.compile._run_coqc_file` consumes this set too but
+# additionally honours ``keep_vo=True`` via the ``_VO_FAMILY`` subset
+# defined alongside that helper in ``compile.py``.
 _CLEANUP_EXTENSIONS: tuple[str, ...] = (
     ".v",
     ".vo",
@@ -1723,6 +1728,7 @@ async def rocq_compile_file(
     workspace: str = "",
     timeout: int = 0,
     include_warnings: bool = True,
+    keep_vo: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Compile a finished .v file on disk via coqc.
@@ -1775,7 +1781,13 @@ async def rocq_compile_file(
     5.0s, per-``pet.run`` budget inside the walker).
 
     Compilation artifacts (``.vo``/``.vok``/``.vos``/``.glob``/``.aux``)
-    are cleaned up; the source file is preserved.
+    are cleaned up by default; the source file is preserved.  Set
+    ``keep_vo=True`` to retain the compiled-artifact family
+    (``.vo``/``.vok``/``.vos``) while still cleaning the diagnostic
+    artifacts (``.glob``/``.aux``/``.vio``/``.timing``/``.coqaux``).
+    Typical use: compiling a file whose ``.vo`` will be imported by a
+    sibling ``.v`` in the same workspace, or incremental compile loops
+    that want to avoid rebuilding unchanged dependencies.
 
     When the call rewrites ``.vo`` files in a workspace that has active
     interactive sessions, the result also includes ``vo_rebuild_warning``:
@@ -1783,7 +1795,11 @@ async def rocq_compile_file(
     affected sessions, with a hint to call ``rocq_start`` again to refresh
     held dependency state.  Quiet when no ``.vo`` changed, when no
     interactive session in this workspace exists, or when the workspace
-    exceeds ``_VO_SCAN_FILE_CAP`` (.vo paths).
+    exceeds ``_VO_SCAN_FILE_CAP`` (.vo paths).  Setting ``keep_vo=True``
+    makes this warning *more likely to fire* on subsequent
+    ``rocq_compile_file`` calls in the same workspace: the produced
+    ``.vo`` now persists between calls, so any later compile that
+    rewrites it is observable as a fresh mtime delta.
 
     Args:
         file: Path to the .v file (relative to workspace).
@@ -1795,6 +1811,11 @@ async def rocq_compile_file(
         include_warnings: If True (default), include deduplicated warnings
             before the error in the output.  Set to False to get only the
             error diagnostic, which keeps context compact.
+        keep_vo: If True, preserve the ``.vo``/``.vok``/``.vos`` outputs
+            after coqc returns (diagnostic artifacts are still cleaned).
+            Default False matches today's "clean everything but the
+            source" behavior.  Useful when a sibling file in the same
+            workspace will ``Require Import`` the result.
 
     On ``pet_restarted: True`` (state-capture path crashed pet), call
     ``rocq_diag`` for memory headroom and recent error history.
@@ -1818,6 +1839,7 @@ async def rocq_compile_file(
         timeout=effective_timeout,
         include_warnings=include_warnings,
         lifespan_state=lifespan_state,
+        keep_vo=keep_vo,
     )
     return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 

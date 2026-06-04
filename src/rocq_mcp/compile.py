@@ -148,21 +148,34 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
         _server._cleanup_coqc_artifacts(tmp_path)
 
 
-def _run_coqc_file(file_path: str, workspace: str, timeout: int) -> dict[str, Any]:
+_VO_FAMILY: tuple[str, ...] = (".vo", ".vok", ".vos")
+
+
+def _run_coqc_file(
+    file_path: str,
+    workspace: str,
+    timeout: int,
+    keep_vo: bool = False,
+) -> dict[str, Any]:
     """Run coqc on an existing .v file, return result dict.
 
     Unlike :func:`_run_coqc`, does NOT create a temp file — runs coqc
-    directly on the given file.  Cleans up all compilation artifacts
-    but preserves the source .v file.
+    directly on the given file.  Cleans up compilation artifacts but
+    preserves the source .v file.  When *keep_vo* is True, also
+    preserves the ``.vo``/``.vok``/``.vos`` compiled-artifact family
+    so the produced ``.vo`` is available to sibling files importing
+    it; the diagnostic artifacts (``.glob``/``.aux``/``.vio``/
+    ``.timing``/``.coqaux``) are still cleaned.
     """
     ws = Path(workspace).resolve()
     try:
         return _run_coqc_process(file_path, ws, timeout)
     finally:
-        # Clean compilation artifacts but preserve the source .v file
         base = Path(file_path).with_suffix("")
         for ext in _server._CLEANUP_EXTENSIONS:
             if ext == ".v":
+                continue
+            if keep_vo and ext in _VO_FAMILY:
                 continue
             base.with_suffix(ext).unlink(missing_ok=True)
 
@@ -483,11 +496,16 @@ def run_compile_file(
     workspace: str,
     timeout: int,
     include_warnings: bool = True,
+    keep_vo: bool = False,
 ) -> dict[str, Any]:
     """Core implementation of rocq_compile_file (testable without FastMCP Context).
 
     Compiles an existing .v file on disk.  Validates that the file is within
     the workspace, checks for forbidden commands, and returns structured errors.
+
+    When *keep_vo* is True, preserves the ``.vo``/``.vok``/``.vos`` outputs;
+    diagnostic artifacts are still cleaned.  Default False preserves today's
+    "clean everything but the source" behavior.
     """
     try:
         file_path = _server._resolve_file_in_workspace(file, workspace)
@@ -514,7 +532,7 @@ def run_compile_file(
     if forbidden:
         return {"success": False, "reason": "validation", "error": forbidden}
 
-    result = _run_coqc_file(file_path, workspace, timeout)
+    result = _run_coqc_file(file_path, workspace, timeout, keep_vo=keep_vo)
     return _build_compile_result(
         result,
         source,

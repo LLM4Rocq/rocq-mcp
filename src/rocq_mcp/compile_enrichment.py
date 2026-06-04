@@ -359,8 +359,13 @@ async def run_compile_file_with_state(
     timeout: int,
     include_warnings: bool = True,
     lifespan_state: dict[str, Any] | None = None,
+    keep_vo: bool = False,
 ) -> dict[str, Any]:
-    """Async wrapper for run_compile_file that enriches failures with PET state."""
+    """Async wrapper for run_compile_file that enriches failures with PET state.
+
+    *keep_vo* is forwarded to :func:`run_compile_file` to preserve the
+    ``.vo``/``.vok``/``.vos`` outputs after a successful (or failed) coqc run.
+    """
     try:
         resolved_file = _server._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError):
@@ -372,7 +377,9 @@ async def run_compile_file_with_state(
     # the same helper; the before/after diff is the only signal.
     ws_path = Path(workspace).resolve()
     vo_before = _server._snapshot_vo_mtimes(ws_path)
-    result = run_compile_file(file, workspace, timeout, include_warnings)
+    result = run_compile_file(
+        file, workspace, timeout, include_warnings, keep_vo=keep_vo
+    )
     vo_after = _server._snapshot_vo_mtimes(ws_path)
 
     vo_warning = _server._maybe_vo_rebuild_warning(

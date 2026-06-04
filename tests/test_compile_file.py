@@ -191,7 +191,7 @@ class TestCompileFileTimeout:
         monkeypatch.setattr(
             _compile,
             "_run_coqc_file",
-            lambda fp, ws, to: {
+            lambda fp, ws, to, keep_vo=False: {
                 "returncode": -1,
                 "stdout": "",
                 "stderr": "",
@@ -353,6 +353,7 @@ class TestRocqCompileFileWrapper:
             timeout,
             include_warnings,
             lifespan_state=None,
+            keep_vo=False,
         ):
             captured.update(
                 {
@@ -361,6 +362,7 @@ class TestRocqCompileFileWrapper:
                     "timeout": timeout,
                     "include_warnings": include_warnings,
                     "lifespan_state": lifespan_state,
+                    "keep_vo": keep_vo,
                 }
             )
             return {"success": True, "output": "mock"}
@@ -390,3 +392,244 @@ class TestRocqCompileFileWrapper:
         assert captured["timeout"] == 9
         assert captured["include_warnings"] is False
         assert captured["lifespan_state"] is mock_ctx.lifespan_context
+
+
+# ---------------------------------------------------------------------------
+# keep_vo behaviour
+# ---------------------------------------------------------------------------
+
+
+_TRIVIAL_PROOF = "Theorem t : True. Proof. exact I. Qed.\n"
+
+
+class TestKeepVo:
+    """The ``keep_vo`` option toggles whether the .vo family survives cleanup.
+
+    Contract (see SHARED DESIGN CONTRACT):
+
+    * ``keep_vo=False`` (default): every extension in
+      ``_CLEANUP_EXTENSIONS`` except ``.v`` is deleted — current behaviour.
+    * ``keep_vo=True``: ``.vo`` / ``.vok`` / ``.vos`` (the ``_VO_FAMILY``
+      set) are preserved; ``.glob`` / ``.aux`` / ``.vio`` / ``.timing`` /
+      ``.coqaux`` are still cleaned.
+
+    Plumbing chain exercised:
+        ``rocq_compile_file`` (wrapper)
+          -> ``run_compile_file_with_state`` (enrichment)
+            -> ``run_compile_file``           (orchestrator)
+              -> ``_run_coqc_file``           (subprocess + cleanup loop)
+    """
+
+    def test_default_cleans_vo(self, workspace):
+        """Default ``keep_vo=False`` deletes the produced .vo (current behaviour)."""
+        path = workspace / "kv_default.v"
+        path.write_text(_TRIVIAL_PROOF)
+        result = run_compile_file(
+            file="kv_default.v", workspace=str(workspace), timeout=30
+        )
+        assert result["success"] is True
+        assert not (
+            workspace / "kv_default.vo"
+        ).exists(), "Default keep_vo=False should still clean the .vo artifact."
+
+    def test_keep_vo_true_preserves_vo(self, workspace):
+        """``keep_vo=True`` preserves the .vo file next to the source."""
+        path = workspace / "kv_keep.v"
+        path.write_text(_TRIVIAL_PROOF)
+        try:
+            result = run_compile_file(
+                file="kv_keep.v",
+                workspace=str(workspace),
+                timeout=30,
+                keep_vo=True,
+            )
+            assert result["success"] is True
+            assert (
+                workspace / "kv_keep.vo"
+            ).exists(), "keep_vo=True must preserve the .vo file."
+        finally:
+            # Test hygiene: don't leave a .vo behind for the next test.
+            (workspace / "kv_keep.vo").unlink(missing_ok=True)
+            (workspace / "kv_keep.vok").unlink(missing_ok=True)
+            (workspace / "kv_keep.vos").unlink(missing_ok=True)
+
+    def test_keep_vo_true_still_cleans_aux_artifacts(self, workspace):
+        """``keep_vo`` is scoped to the .vo family only — .glob / .aux still go."""
+        path = workspace / "kv_aux.v"
+        path.write_text(_TRIVIAL_PROOF)
+        try:
+            result = run_compile_file(
+                file="kv_aux.v",
+                workspace=str(workspace),
+                timeout=30,
+                keep_vo=True,
+            )
+            assert result["success"] is True
+            # The .vo survives.
+            assert (workspace / "kv_aux.vo").exists()
+            # But auxiliary artifacts are still cleaned.  coqc does not
+            # always produce every one of these (e.g. .aux is rare on
+            # modern Rocq), so we assert absence rather than presence-
+            # then-absence — the cleanup loop should have unlinked any
+            # that did appear.
+            for ext in (".glob", ".aux", ".vio", ".timing", ".coqaux"):
+                assert not (
+                    workspace / f"kv_aux{ext}"
+                ).exists(), f"keep_vo=True should still clean the {ext} artifact."
+        finally:
+            (workspace / "kv_aux.vo").unlink(missing_ok=True)
+            (workspace / "kv_aux.vok").unlink(missing_ok=True)
+            (workspace / "kv_aux.vos").unlink(missing_ok=True)
+
+    def test_keep_vo_with_compile_error(self, workspace):
+        """Cleanup loop tolerates missing .vo on a compile failure.
+
+        coqc does not produce a .vo when compilation fails, so the
+        cleanup loop runs against missing files regardless of
+        ``keep_vo``.  Both branches must complete without raising.
+        """
+        path = workspace / "kv_err.v"
+        path.write_text("Theorem bad : nat = bool.\nProof. reflexivity. Qed.\n")
+
+        # Default — no exception, no .vo.
+        result_default = run_compile_file(
+            file="kv_err.v", workspace=str(workspace), timeout=30
+        )
+        assert result_default["success"] is False
+        assert not (workspace / "kv_err.vo").exists()
+
+        # keep_vo=True — still no exception, still no .vo (coqc never
+        # made one).
+        result_keep = run_compile_file(
+            file="kv_err.v",
+            workspace=str(workspace),
+            timeout=30,
+            keep_vo=True,
+        )
+        assert result_keep["success"] is False
+        assert not (workspace / "kv_err.vo").exists()
+
+    def test_keep_vo_plumbed_through_wrapper(self, tmp_path, monkeypatch):
+        """The ``keep_vo`` kwarg must reach ``run_compile_file_with_state``."""
+        import rocq_mcp.server as _server
+        from rocq_mcp.server import rocq_compile_file
+
+        captured: dict = {}
+
+        async def mock_run_compile_file_with_state(
+            file,
+            workspace,
+            timeout,
+            include_warnings,
+            lifespan_state=None,
+            keep_vo=False,
+        ):
+            captured.update(
+                {
+                    "file": file,
+                    "workspace": workspace,
+                    "timeout": timeout,
+                    "include_warnings": include_warnings,
+                    "lifespan_state": lifespan_state,
+                    "keep_vo": keep_vo,
+                }
+            )
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(
+            _server,
+            "run_compile_file_with_state",
+            mock_run_compile_file_with_state,
+        )
+
+        mock_ctx = _MockContext({"pet_client": None})
+
+        result = asyncio.run(
+            rocq_compile_file(
+                file="proof.v",
+                workspace=str(tmp_path),
+                timeout=9,
+                include_warnings=True,
+                keep_vo=True,
+                ctx=mock_ctx,
+            )
+        )
+
+        assert result["success"] is True
+        assert captured["keep_vo"] is True
+
+    def test_vok_and_vos_also_preserved(self):
+        """``.vok`` and ``.vos`` belong to the preserved family.
+
+        Coqc may not emit ``.vok``/``.vos`` by default (they are produced
+        by ``-vos`` / ``-vok`` modes), so the most robust check is
+        structural: the implementation must reference a ``_VO_FAMILY``
+        set (or equivalent) that contains all three extensions.  This
+        keeps the test stable across coqc versions and avoids mocking
+        the subprocess just to seed artifacts.
+        """
+        import rocq_mcp.compile as _compile
+
+        vo_family = getattr(_compile, "_VO_FAMILY", None)
+        assert vo_family is not None, (
+            "Expected ``_VO_FAMILY`` to be defined on rocq_mcp.compile "
+            "as the set of extensions preserved by ``keep_vo=True``."
+        )
+        vo_family_set = set(vo_family)
+        assert {".vo", ".vok", ".vos"}.issubset(
+            vo_family_set
+        ), f"_VO_FAMILY must contain .vo, .vok, .vos; got {vo_family_set!r}."
+        # And the auxiliary extensions must NOT be in the preserved family.
+        assert not vo_family_set & {
+            ".glob",
+            ".aux",
+            ".vio",
+            ".timing",
+            ".coqaux",
+        }, "_VO_FAMILY must not include the auxiliary artifacts."
+
+
+# ---------------------------------------------------------------------------
+# keep_vo — smoke / integration via the @mcp.tool wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestKeepVoIntegration:
+    """End-to-end behaviour through the @mcp.tool wrapper with a real coqc.
+
+    Skipped automatically when ``coqc`` is not on PATH via the module-level
+    ``pytestmark``.  Confirms the ``keep_vo=True`` behaviour is observable
+    from the outermost entrypoint and does not perturb the envelope shape
+    of a successful compile.
+    """
+
+    def test_wrapper_keep_vo_preserves_vo_and_shape(self, workspace):
+        from rocq_mcp.server import rocq_compile_file
+
+        path = workspace / "kv_e2e.v"
+        path.write_text(_TRIVIAL_PROOF)
+        mock_ctx = _MockContext(make_lifespan_state())
+
+        try:
+            result = asyncio.run(
+                rocq_compile_file(
+                    file="kv_e2e.v",
+                    workspace=str(workspace),
+                    timeout=60,
+                    include_warnings=True,
+                    keep_vo=True,
+                    ctx=mock_ctx,
+                )
+            )
+            assert result["success"] is True, result
+            assert (
+                workspace / "kv_e2e.vo"
+            ).exists(), "Wrapper-level keep_vo=True must preserve the .vo file."
+            # Envelope shape: no surprise new keys introduced by this flag.
+            # ``keep_vo`` is a behaviour switch, not a payload field.
+            assert "keep_vo" not in result
+        finally:
+            (workspace / "kv_e2e.vo").unlink(missing_ok=True)
+            (workspace / "kv_e2e.vok").unlink(missing_ok=True)
+            (workspace / "kv_e2e.vos").unlink(missing_ok=True)

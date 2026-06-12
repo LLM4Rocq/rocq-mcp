@@ -162,6 +162,36 @@ class TestRunAssumptions:
         assert "Closed" in result["raw_output"]
 
     @pytest.mark.asyncio
+    async def test_fetching_opaque_proofs_notices_stripped(self):
+        """``Fetching opaque proofs from disk for X`` Notice lines are filtered
+        from ``raw_output`` before parse; the real assumptions answer is
+        preserved and the response stays small on mathcomp-heavy proofs.
+        """
+        self._query_result = {
+            "success": True,
+            "output": (
+                "Fetching opaque proofs from disk for mathcomp.ssreflect.ssrnat\n"
+                "Fetching opaque proofs from disk for mathcomp.ssreflect.eqtype\n"
+                "Fetching opaque proofs from disk for mathcomp.ssreflect.seq\n"
+                "Axioms:\n"
+                "classic : forall P : Prop, P \\/ ~ P\n"
+            ),
+        }
+        result = await run_assumptions(
+            name="thm",
+            file="test.v",
+            workspace="/tmp",
+            lifespan_state={},
+        )
+        assert result["success"] is True
+        assert "Fetching opaque proofs" not in result["raw_output"]
+        assert "Axioms:" in result["raw_output"]
+        assert "classic" in result["raw_output"]
+        # The structured field is unaffected — it was already populated
+        # from the Axioms: block, not the loader notices.
+        assert result["assumptions"] == ["classic : forall P : Prop, P \\/ ~ P"]
+
+    @pytest.mark.asyncio
     async def test_result_includes_theorem_name(self):
         self._query_result = {
             "success": True,

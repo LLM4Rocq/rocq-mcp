@@ -667,6 +667,14 @@ async def run_query(
 # Tool: rocq_assumptions
 # ---------------------------------------------------------------------------
 
+# Matches Coq's per-file opaque-proof loader notices, one per line.  Stripped
+# from ``raw_output`` before parse so the response is dominated by the actual
+# ``Print Assumptions`` answer rather than the loader preamble.
+_OPAQUE_FETCH_NOTICE_RE = re.compile(
+    r"^Fetching opaque proofs from disk for [^\n]*\n",
+    re.MULTILINE,
+)
+
 
 async def run_assumptions(
     name: str,
@@ -680,8 +688,9 @@ async def run_assumptions(
 
     Runs ``Print Assumptions <name>.`` via :func:`run_query` in file mode
     and returns the parsed assumption list verbatim.  No classification —
-    the agent decides what's safe to trust.  (``rocq_verify`` keeps its
-    sandboxed classifier; this tool is pure introspection.)
+    the agent decides what's safe to trust.  For an axiom-policy *verdict*
+    (accept standard mathematical axioms, reject custom ones) prefer
+    ``rocq_verify``; this tool is pure introspection.
 
     The *file* parameter is required — it provides the ``.v`` file where the
     theorem is defined, so the query runs in a context where all definitions
@@ -694,7 +703,10 @@ async def run_assumptions(
         * ``theorem``           — the cleaned theorem name.
         * ``assumptions``       — list[str] of ``"name : type"`` pairs from
           ``Print Assumptions``.  Empty when the theorem is closed.
-        * ``raw_output``        — full raw ``Print Assumptions`` output.
+        * ``raw_output``        — raw ``Print Assumptions`` output with
+          ``Fetching opaque proofs from disk for ...`` loader notices
+          stripped (those are Coq's per-file load notices, not part of
+          the assumptions answer).
     """
     from rocq_mcp.verify import _parse_assumptions_raw, is_rocq_qualified_name
 
@@ -790,7 +802,13 @@ async def run_assumptions(
             )
         return query_result
 
-    raw_output = query_result["output"]
+    # Strip the opaque-proof loader notices that Coq emits before the
+    # actual ``Print Assumptions`` output.  On mathcomp-flavored proofs
+    # they can outweigh the answer 20:1 ("Fetching opaque proofs from disk
+    # for mathcomp.X..." × dozens of files), pushing the Axioms: block
+    # past response-truncation thresholds.  Pure cosmetic strip; the lines
+    # are Notice-level feedback, never part of the assumptions list.
+    raw_output = _OPAQUE_FETCH_NOTICE_RE.sub("", query_result["output"])
     try:
         pairs = _parse_assumptions_raw(raw_output)
     except Exception as e:

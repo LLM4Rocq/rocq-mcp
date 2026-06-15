@@ -192,6 +192,40 @@ class TestRunAssumptions:
         assert result["assumptions"] == ["classic : forall P : Prop, P \\/ ~ P"]
 
     @pytest.mark.asyncio
+    async def test_fetching_opaque_proofs_colon_form_stripped(self):
+        """Coq's newer emission shape ``Fetching opaque proofs from disk: X``
+        is filtered too.
+
+        This shape was reported in field feedback: the colon form has a
+        ``" : "`` substring that the parser was happily absorbing as an
+        axiom, surfacing a fake ``"Fetching opaque proofs from disk"``
+        entry and burying the real axioms.  The regex now matches the
+        prefix only (no required delimiter); the parser has a complementary
+        whitespace-in-name guard.
+        """
+        self._query_result = {
+            "success": True,
+            "output": (
+                "Fetching opaque proofs from disk : mathcomp/ssreflect/ssrnat.vo\n"
+                "Fetching opaque proofs from disk : mathcomp/ssreflect/eqtype.vo\n"
+                "Axioms:\n"
+                "classic : forall P : Prop, P \\/ ~ P\n"
+            ),
+        }
+        result = await run_assumptions(
+            name="thm",
+            file="test.v",
+            workspace="/tmp",
+            lifespan_state={},
+        )
+        assert result["success"] is True
+        assert "Fetching opaque proofs" not in result["raw_output"]
+        # Most importantly: the structured field must not contain the leaked
+        # pseudo-axiom even if a future Coq emission shape sneaks past the
+        # regex — the parser guard is the second line of defense.
+        assert result["assumptions"] == ["classic : forall P : Prop, P \\/ ~ P"]
+
+    @pytest.mark.asyncio
     async def test_result_includes_theorem_name(self):
         self._query_result = {
             "success": True,

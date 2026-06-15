@@ -943,6 +943,12 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
     current_name: str | None = None
     current_type_parts: list[str] = []
 
+    # Invariant: every entry pushed onto ``assumptions`` has a ``name`` that
+    # starts with a dotted-alphanumeric Coq identifier — no whitespace, no
+    # bare-line continuation absorbed as a fresh name.  Every branch below
+    # that constructs a new ``current_name`` honours this; future branches
+    # added here must preserve it.
+
     for line in lines:
         stripped = line.strip()
         if stripped == "Closed under the global context":
@@ -953,18 +959,30 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
         # New assumption: starts with an identifier (non-whitespace at col 0, or
         # stripped line containing ' : ')
         if " : " in stripped and not line.startswith((" ", "\t")):
+            name_part, _, type_part = stripped.partition(" : ")
+            name_part = name_part.strip()
+            # Defense-in-depth: real Coq identifiers are dotted-path
+            # alphanumerics with no whitespace.  Lines like
+            # ``Fetching opaque proofs from disk : foo.vo`` otherwise match
+            # this branch and pollute the assumptions list (the cosmetic
+            # regex strip in ``interactive.run_assumptions`` is the first
+            # line of defense; this guard catches anything that slips past).
+            if not name_part or any(c.isspace() for c in name_part):
+                continue
             # Flush previous
             if current_name is not None:
                 assumptions.append((current_name, " ".join(current_type_parts)))
-            name_part, _, type_part = stripped.partition(" : ")
-            current_name = name_part.strip()
+            current_name = name_part
             current_type_parts = [type_part.strip()] if type_part.strip() else []
         elif stripped.endswith(" :") and not line.startswith((" ", "\t")):
             # Name with colon at end of line, type on next line(s)
             # e.g., "ClassicalDedekindReals.sig_forall_dec :"
+            name_part = stripped[:-2].strip()
+            if not name_part or any(c.isspace() for c in name_part):
+                continue
             if current_name is not None:
                 assumptions.append((current_name, " ".join(current_type_parts)))
-            current_name = stripped[:-2].strip()
+            current_name = name_part
             current_type_parts = []
         elif stripped.startswith(": ") and current_name is not None:
             # Continuation: type starts on next line after name
@@ -972,17 +990,29 @@ def _parse_assumptions_raw(stdout: str) -> list[tuple[str, str]]:
         elif line.startswith((" ", "\t")) and current_name is not None:
             # Indented continuation of type
             current_type_parts.append(stripped)
-        elif " : " not in stripped and current_name is None:
-            # Name on its own line (no ' : ' yet)
+        elif (
+            " : " not in stripped
+            and current_name is None
+            and not line.startswith((" ", "\t"))
+        ):
+            # Name on its own line (no ' : ' yet).  Indented lines are NOT
+            # valid here — they are hanging continuations from a name we
+            # rejected above (e.g. a ``Fetching opaque proofs from disk :``
+            # loader notice followed by an indented module path).
             current_name = stripped
             current_type_parts = []
         else:
-            # Unknown format -- try to parse as name : type
+            # Unknown format -- try to parse as name : type.  Same
+            # whitespace-in-name guard as the primary branch — keep the
+            # parser invariant symmetric across all entry points.
             if " : " in stripped:
+                name_part, _, type_part = stripped.partition(" : ")
+                name_part = name_part.strip()
+                if not name_part or any(c.isspace() for c in name_part):
+                    continue
                 if current_name is not None:
                     assumptions.append((current_name, " ".join(current_type_parts)))
-                name_part, _, type_part = stripped.partition(" : ")
-                current_name = name_part.strip()
+                current_name = name_part
                 current_type_parts = [type_part.strip()]
 
     # Flush last

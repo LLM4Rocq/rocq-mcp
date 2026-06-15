@@ -682,6 +682,37 @@ class TestParseAssumptions:
         assert result[0][0] == "Coq.Logic.Classical_Prop.classic"
         assert "forall" in result[0][1]
 
+    def test_whitespace_bearing_pseudo_name_rejected(self):
+        """Defense-in-depth: lines whose ``name`` portion contains whitespace
+        are not absorbed as axioms.
+
+        The interactive layer also strips ``Fetching opaque proofs from disk``
+        loader notices via regex; if a future Coq emission shape sneaks past
+        the regex, the parser still refuses to invent a fake axiom out of it.
+        Real Coq identifiers are dotted-path alphanumerics with no whitespace.
+        """
+        stdout = (
+            "Axioms:\n"
+            "Fetching opaque proofs from disk : mathcomp/ssreflect/ssrnat.vo\n"
+            "classic : forall P : Prop, P \\/ ~ P\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        # Pseudo-name dropped; real axiom kept.
+        names = {r[0] for r in result}
+        assert names == {"classic"}
+
+    def test_whitespace_bearing_name_with_trailing_colon_rejected(self):
+        """Same guard on the ``name :`` (type on next line) branch."""
+        stdout = (
+            "Axioms:\n"
+            "Fetching opaque proofs from disk :\n"
+            "  mathcomp/ssreflect/ssrnat.vo\n"
+            "classic : forall P : Prop, P \\/ ~ P\n"
+        )
+        result = _parse_assumptions_raw(stdout)
+        names = {r[0] for r in result}
+        assert names == {"classic"}
+
     def test_multiple_axioms(self):
         stdout = (
             "Axioms:\n"

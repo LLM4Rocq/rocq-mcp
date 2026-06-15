@@ -669,9 +669,13 @@ async def run_query(
 
 # Matches Coq's per-file opaque-proof loader notices, one per line.  Stripped
 # from ``raw_output`` before parse so the response is dominated by the actual
-# ``Print Assumptions`` answer rather than the loader preamble.
+# ``Print Assumptions`` answer rather than the loader preamble.  Coq emits at
+# least two suffix shapes after the literal prefix: ``for <module>`` (older
+# builds) and ``: <module>`` (current).  Matching the prefix only — without
+# requiring a specific delimiter — covers both; safe because no real Coq
+# identifier can start with these words (identifiers disallow whitespace).
 _OPAQUE_FETCH_NOTICE_RE = re.compile(
-    r"^Fetching opaque proofs from disk for [^\n]*\n",
+    r"^Fetching opaque proofs from disk[^\n]*\n",
     re.MULTILINE,
 )
 
@@ -704,9 +708,10 @@ async def run_assumptions(
         * ``assumptions``       — list[str] of ``"name : type"`` pairs from
           ``Print Assumptions``.  Empty when the theorem is closed.
         * ``raw_output``        — raw ``Print Assumptions`` output with
-          ``Fetching opaque proofs from disk for ...`` loader notices
-          stripped (those are Coq's per-file load notices, not part of
-          the assumptions answer).
+          ``Fetching opaque proofs from disk ...`` loader notices stripped
+          (Coq emits either a ``for <module>`` or ``: <module>`` suffix;
+          both are filtered).  Those are Coq's per-file load notices,
+          not part of the assumptions answer.
     """
     from rocq_mcp.verify import _parse_assumptions_raw, is_rocq_qualified_name
 

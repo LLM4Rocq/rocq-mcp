@@ -1822,10 +1822,7 @@ async def run_check(
         except ImportError:
             return {
                 "success": False,
-                "error": (
-                    "pytanque is not installed. "
-                    "Install with: pip install 'rocq-mcp[interactive]'"
-                ),
+                "error": _server._PYTANQUE_NOT_INSTALLED_HINT,
             }
 
         # Re-validate under the lock — pet may have restarted between the
@@ -1974,10 +1971,7 @@ async def run_step_multi(
         except ImportError:
             return {
                 "success": False,
-                "error": (
-                    "pytanque is not installed. "
-                    "Install with: pip install 'rocq-mcp[interactive]'"
-                ),
+                "error": _server._PYTANQUE_NOT_INSTALLED_HINT,
             }
 
         # Re-validate under lock — pet may have restarted since the outer check.

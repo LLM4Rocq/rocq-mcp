@@ -23,7 +23,7 @@ from tests.conftest import (
     _patch_compile_error,
     make_lifespan_state,
 )
-from rocq_mcp.server import rocq_compile
+from rocq_mcp.server import _PYTANQUE_NOT_INSTALLED_HINT, rocq_compile
 
 pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 
@@ -521,12 +521,13 @@ class TestStateCaptureStatus:
             ),
             (
                 "unavailable",
+                # Reference the single source of truth for the install hint
+                # so this test cannot pin a stale recipe (round-3 doc-
+                # specialist finding: a phantom ``[interactive]`` extra used
+                # to live here verbatim and quietly survived two fixes).
                 {
                     "success": False,
-                    "error": (
-                        "pytanque is not installed. "
-                        "Install with: pip install 'rocq-mcp[interactive]'"
-                    ),
+                    "error": _PYTANQUE_NOT_INSTALLED_HINT,
                     "reason": "unavailable",
                 },
                 "unavailable",

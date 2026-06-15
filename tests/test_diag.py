@@ -68,6 +68,7 @@ class TestDiagSchema:
             "server_version",
             "pet",
             "memory",
+            "load_average",
             "live_states",
             "live_states_total",
             "recent_errors",
@@ -184,6 +185,51 @@ class TestDiagPetSampling:
         snap = _build_diag_snapshot(ls)
         assert snap["memory"]["pet_rss_mb"] is None
         assert snap["memory"]["sample_status"] == "psutil_error"
+
+
+# ---------------------------------------------------------------------------
+# load_average sampling
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAverage:
+    @pytest.mark.asyncio
+    async def test_load_average_present_when_supported(self):
+        """On Unix-likes os.getloadavg works; load_average is a 3-float dict."""
+        import os as _os
+
+        if not hasattr(_os, "getloadavg"):
+            pytest.skip("os.getloadavg unavailable on this platform")
+        ls = _fresh_lifespan_state()
+        snap = _build_diag_snapshot(ls)
+        la = snap["load_average"]
+        assert isinstance(la, dict)
+        assert set(la.keys()) == {"1m", "5m", "15m"}
+        for key in ("1m", "5m", "15m"):
+            assert isinstance(la[key], float)
+            assert la[key] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_load_average_none_when_getloadavg_raises(self, monkeypatch):
+        import os as _os
+
+        def _boom():
+            raise OSError("no /proc/loadavg here")
+
+        monkeypatch.setattr(_os, "getloadavg", _boom)
+        ls = _fresh_lifespan_state()
+        snap = _build_diag_snapshot(ls)
+        assert snap["load_average"] is None
+
+    @pytest.mark.asyncio
+    async def test_load_average_none_when_getloadavg_missing(self, monkeypatch):
+        """Platforms without os.getloadavg (Windows) surface as None."""
+        import os as _os
+
+        monkeypatch.delattr(_os, "getloadavg", raising=False)
+        ls = _fresh_lifespan_state()
+        snap = _build_diag_snapshot(ls)
+        assert snap["load_average"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -2833,3 +2833,114 @@ class TestReadmeUsagePatterns:
         assert "Imports and scopes in `rocq_query`" in readme
         # Names the parameter agents should reach for.
         assert "preamble=" in readme
+
+
+# ---------------------------------------------------------------------------
+# Pet-availability startup check (_check_pet_availability)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPetAvailability:
+    """Pure-function tests of the boot-time pet-detection helper.
+
+    The helper is invoked once at server module load and emits a
+    ``RuntimeWarning`` when pet is partially or entirely missing.  Testing
+    the pure function is cheaper than reloading the module and lets us
+    cover the three message branches (both halves missing, only pytanque
+    missing, only binary missing) without globally changing import state.
+    """
+
+    def test_both_present_returns_none(self, monkeypatch):
+        import sys
+        import types
+        import rocq_mcp.server as _server
+
+        # Pretend pytanque imports cleanly.
+        if "pytanque" not in sys.modules:
+            monkeypatch.setitem(sys.modules, "pytanque", types.ModuleType("pytanque"))
+        monkeypatch.setattr(_server.shutil, "which", lambda name: "/usr/bin/pet")
+        assert _server._check_pet_availability() is None
+
+    def test_pytanque_missing_warns(self, monkeypatch):
+        import sys
+        import rocq_mcp.server as _server
+
+        # Block pytanque from importing.
+        monkeypatch.setitem(sys.modules, "pytanque", None)
+        monkeypatch.setattr(_server.shutil, "which", lambda name: "/usr/bin/pet")
+        msg = _server._check_pet_availability()
+        assert msg is not None
+        # Diagnostic clause names the pytanque half specifically.
+        assert "the pytanque Python binding is not importable" in msg
+        # And does NOT claim the binary is missing.
+        assert "the `pet` binary is not on PATH" not in msg
+
+    def test_binary_missing_warns(self, monkeypatch):
+        import sys
+        import types
+        import rocq_mcp.server as _server
+
+        if "pytanque" not in sys.modules:
+            monkeypatch.setitem(sys.modules, "pytanque", types.ModuleType("pytanque"))
+        monkeypatch.setattr(_server.shutil, "which", lambda name: None)
+        msg = _server._check_pet_availability()
+        assert msg is not None
+        # Diagnostic clause names the binary half specifically.
+        assert "the `pet` binary is not on PATH" in msg
+        # And does NOT claim the Python binding is unimportable (it imports
+        # fine in this branch — the install prose may still mention the
+        # binding by name when describing the whole petanque install).
+        assert "the pytanque Python binding is not importable" not in msg
+
+    def test_both_missing_combined(self, monkeypatch):
+        import sys
+        import rocq_mcp.server as _server
+
+        monkeypatch.setitem(sys.modules, "pytanque", None)
+        monkeypatch.setattr(_server.shutil, "which", lambda name: None)
+        msg = _server._check_pet_availability()
+        assert msg is not None
+        # Both halves named.
+        assert "pytanque Python binding" in msg
+        assert "`pet` binary" in msg
+        # Conjunction phrasing: lowercase " and " between the two halves.
+        assert " and " in msg
+
+    def test_message_names_install_command(self, monkeypatch):
+        import sys
+        import rocq_mcp.server as _server
+
+        monkeypatch.setitem(sys.modules, "pytanque", None)
+        monkeypatch.setattr(_server.shutil, "which", lambda name: None)
+        msg = _server._check_pet_availability()
+        # Agent-actionable: petanque (pet binary + pytanque Python binding)
+        # ships with coq-lsp and both halves install together — but the
+        # exact install lane is environment-specific (opam, Nix, system
+        # packages, source build), so the message must NOT prescribe one
+        # lane or advertise a phantom `pip install rocq-mcp[interactive]`
+        # recipe (pip / uv cannot install petanque on their own).
+        assert "coq-lsp" in msg
+        assert "[interactive]" not in msg
+        assert "pip install rocq-mcp" not in msg
+        # Point users at the upstream install docs.
+        assert "github.com/ejgallego/coq-lsp" in msg
+
+    def test_message_names_affected_tools(self, monkeypatch):
+        import sys
+        import rocq_mcp.server as _server
+
+        monkeypatch.setitem(sys.modules, "pytanque", None)
+        monkeypatch.setattr(_server.shutil, "which", lambda name: None)
+        msg = _server._check_pet_availability()
+        # Should enumerate at least the headline interactive tools so an
+        # operator scanning logs can correlate with the missing surface.
+        for tool in (
+            "rocq_start",
+            "rocq_check",
+            "rocq_step_multi",
+            "rocq_query",
+            "rocq_assumptions",
+            "rocq_toc",
+            "rocq_notations",
+        ):
+            assert tool in msg

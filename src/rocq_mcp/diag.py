@@ -8,6 +8,7 @@ the snapshot builder it delegates to.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Literal
 
@@ -48,6 +49,21 @@ def _sample_pet_rss_mb(
     except (psutil.Error, AttributeError, OSError):
         return None, "psutil_error"
     return rss_bytes / (1024 * 1024), "ok"
+
+
+def _sample_load_average() -> dict[str, float] | None:
+    """System load average over the last 1 / 5 / 15 minutes.
+
+    Returns ``None`` when ``os.getloadavg()`` is unsupported or raises
+    (e.g. Windows, or a Unix kernel without ``/proc/loadavg``).  Surfaced
+    by ``rocq_diag`` so orchestrators can distinguish CPU contention
+    from tactic divergence when timeouts fire.
+    """
+    try:
+        one, five, fifteen = os.getloadavg()
+    except (OSError, AttributeError):
+        return None
+    return {"1m": float(one), "5m": float(five), "15m": float(fifteen)}
 
 
 def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +141,7 @@ def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
             "max_rss_mb_threshold": float(_server.ROCQ_MAX_PET_RSS_MB),
             "sample_status": sample_status,
         },
+        "load_average": _sample_load_average(),
         "live_states": live_states,
         "live_states_total": live_states_total,
         "recent_errors": recent_errors,

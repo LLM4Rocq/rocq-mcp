@@ -191,7 +191,7 @@ class TestCompileFileTimeout:
         monkeypatch.setattr(
             _compile,
             "_run_coqc_file",
-            lambda fp, ws, to, keep_vo=False: {
+            lambda fp, ws, to, keep_vo=False, mode="full", timing=False: {
                 "returncode": -1,
                 "stdout": "",
                 "stderr": "",
@@ -354,6 +354,8 @@ class TestRocqCompileFileWrapper:
             include_warnings,
             lifespan_state=None,
             keep_vo=False,
+            mode="full",
+            timing=False,
         ):
             captured.update(
                 {
@@ -363,6 +365,7 @@ class TestRocqCompileFileWrapper:
                     "include_warnings": include_warnings,
                     "lifespan_state": lifespan_state,
                     "keep_vo": keep_vo,
+                    "timing": timing,
                 }
             )
             return {"success": True, "output": "mock"}
@@ -392,6 +395,7 @@ class TestRocqCompileFileWrapper:
         assert captured["timeout"] == 9
         assert captured["include_warnings"] is False
         assert captured["lifespan_state"] is mock_ctx.lifespan_context
+        assert captured["timing"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +527,8 @@ class TestKeepVo:
             include_warnings,
             lifespan_state=None,
             keep_vo=False,
+            mode="full",
+            timing=False,
         ):
             captured.update(
                 {
@@ -532,6 +538,7 @@ class TestKeepVo:
                     "include_warnings": include_warnings,
                     "lifespan_state": lifespan_state,
                     "keep_vo": keep_vo,
+                    "timing": timing,
                 }
             )
             return {"success": True, "output": "mock"}
@@ -633,3 +640,604 @@ class TestKeepVoIntegration:
             (workspace / "kv_e2e.vo").unlink(missing_ok=True)
             (workspace / "kv_e2e.vok").unlink(missing_ok=True)
             (workspace / "kv_e2e.vos").unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Per-sentence timing diagnostics (``timing=True``)
+# ---------------------------------------------------------------------------
+
+
+_SAMPLE_TIMING_OUTPUT = (
+    "Chars 0 - 18 [Theorem~t1~:~True.] 0. secs (0.u,0.s)\n"
+    "Chars 19 - 25 [Proof.] 0.001 secs (0.u,0.s)\n"
+    "Chars 26 - 34 [exact~I.] 0.5 secs (0.u,0.s)\n"
+    "Chars 35 - 39 [Qed.] 0.002 secs (0.u,0.s)\n"
+)
+
+
+class TestTiming:
+    """The ``timing=True`` option surfaces coqc ``-time`` diagnostics.
+
+    Contract:
+
+    * ``timing=False`` (default) — no ``-time`` flag, no ``timing`` field.
+    * ``timing=True`` — coqc is invoked with ``-time``; response gains a
+      ``timing`` field carrying ``total_sentences``, ``top_slowest``
+      (default top 5 by descending duration), and ``last_completed``.
+    * On timeout, ``last_completed`` is the final emitted entry from the
+      partial stderr buffer and is named in the ``error`` string.
+    * Parser is tolerant: garbage in stderr is ignored; parse failures
+      fall back to an empty timing list rather than crashing the response.
+    """
+
+    pytestmark = []
+
+    # ------------------------------------------------------------------ #
+    # Default path: no flag, no field                                    #
+    # ------------------------------------------------------------------ #
+
+    def test_default_timing_false_no_field(self, workspace, monkeypatch):
+        """Without ``timing=True``, no ``-time`` flag is passed and no
+        ``timing`` field appears in the response."""
+        import rocq_mcp.compile as _compile
+
+        path = workspace / "timing_default.v"
+        path.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        seen_timing: dict = {"value": None}
+
+        def fake_run(fp, ws, to, keep_vo=False, mode="full", *, timing=False):
+            seen_timing["value"] = timing
+            return _fake_coqc_result("", returncode=0)
+
+        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+        result = run_compile_file(
+            file="timing_default.v", workspace=str(workspace), timeout=10
+        )
+        assert seen_timing["value"] is False
+        assert "timing" not in result
+
+    def test_timing_true_passes_flag(self, workspace, monkeypatch):
+        """``timing=True`` propagates as a kwarg into ``_run_coqc_file``."""
+        import rocq_mcp.compile as _compile
+
+        path = workspace / "timing_flag.v"
+        path.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        seen_timing: dict = {"value": None}
+
+        def fake_run(fp, ws, to, keep_vo=False, mode="full", *, timing=False):
+            seen_timing["value"] = timing
+            return {
+                "returncode": 0,
+                # coqc 9.x emits ``-time`` to stdout
+                "stdout": _SAMPLE_TIMING_OUTPUT,
+                "stderr": "",
+                "timed_out": False,
+            }
+
+        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+        result = run_compile_file(
+            file="timing_flag.v",
+            workspace=str(workspace),
+            timeout=10,
+            timing=True,
+        )
+        assert seen_timing["value"] is True
+        assert "timing" in result
+        assert result["timing"]["total_sentences"] == 4
+        # The success-path ``output`` field must not be flooded with the
+        # timing-line firehose — they are stripped before truncation.
+        assert "Chars 0 - 18" not in result["output"]
+
+    def test_timing_true_passes_time_to_coqc(self, workspace, monkeypatch):
+        """``timing=True`` adds ``-time`` to the subprocess args.
+
+        Asserts at the lowest layer (``_run_coqc_process``) that the
+        flag actually reaches coqc.
+        """
+        import rocq_mcp.compile as _compile
+
+        path = workspace / "timing_argv.v"
+        path.write_text("Theorem t : True. Proof. exact I. Qed.\n")
+
+        captured: dict = {}
+
+        class _FakeProc:
+            returncode = 0
+            pid = 0
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+        def fake_popen(args, **_kwargs):
+            captured["args"] = list(args)
+            return _FakeProc()
+
+        monkeypatch.setattr(_compile.subprocess, "Popen", fake_popen)
+        # Patch the cleanup target so we don't try to unlink real files.
+        _compile._run_coqc_process(str(path), workspace, 10, timing=True)
+        assert "-time" in captured["args"]
+
+        # And without timing, no flag.
+        captured.clear()
+        _compile._run_coqc_process(str(path), workspace, 10, timing=False)
+        assert "-time" not in captured["args"]
+
+    # ------------------------------------------------------------------ #
+    # Parser                                                             #
+    # ------------------------------------------------------------------ #
+
+    def test_timing_parser_basic(self):
+        """Parser extracts canonical fields from coqc -time stderr."""
+        from rocq_mcp.compile import _parse_timing_lines
+
+        # Source matches char ranges so line conversion is deterministic.
+        source = (
+            "Theorem t1 : True.\n"  # 19 chars including \n  (0..18 + \n)
+            "Proof.\n"  # 7 chars (19..25 + \n)
+            "exact I.\n"  # 9 chars
+            "Qed.\n"
+        )
+        entries = _parse_timing_lines(_SAMPLE_TIMING_OUTPUT, source)
+        assert len(entries) == 4
+
+        e0 = entries[0]
+        assert e0["line"] == 1
+        assert e0["characters"] == [0, 18]
+        assert e0["name"] == "Theorem~t1~:~True."
+        assert e0["duration_seconds"] == 0.0
+
+        e2 = entries[2]
+        assert e2["name"] == "exact~I."
+        assert e2["duration_seconds"] == 0.5
+
+    def test_timing_parser_tolerates_garbage(self):
+        """Non-timing lines (warnings, blanks, errors) are silently skipped."""
+        from rocq_mcp.compile import _parse_timing_lines
+
+        stderr = (
+            'File "/tmp/x.v", line 1, characters 15-20:\n'
+            "Warning: Loading Stdlib without prefix is deprecated.\n"
+            "[deprecated-missing-stdlib,deprecated-since-9.0,deprecated,default]\n"
+            "\n"
+            "Chars 0 - 18 [Theorem~t1~:~True.] 0.013 secs (0.u,0.s)\n"
+            "Error: Whatever.\n"
+            "Chars 19 - 25 [Proof.] 0.001 secs (0.u,0.s)\n"
+        )
+        entries = _parse_timing_lines(stderr, "Theorem t1 : True.\nProof.\n")
+        assert len(entries) == 2
+        assert entries[0]["duration_seconds"] == 0.013
+        assert entries[1]["name"] == "Proof."
+
+    def test_timing_parser_empty_stderr(self):
+        """Empty stderr yields an empty entry list."""
+        from rocq_mcp.compile import _parse_timing_lines
+
+        assert _parse_timing_lines("", "Theorem t : True.\n") == []
+
+    def test_timing_top_slowest_sorted(self):
+        """``top_slowest`` is sorted by descending duration; default N=5."""
+        from rocq_mcp.compile import _build_timing_field
+
+        entries = [
+            {
+                "line": i,
+                "characters": [0, 0],
+                "name": f"s{i}",
+                "duration_seconds": float(i),
+            }
+            for i in range(10)
+        ]
+        timing = _build_timing_field(entries)
+        assert timing["total_sentences"] == 10
+        assert len(timing["top_slowest"]) == 5
+        durations = [e["duration_seconds"] for e in timing["top_slowest"]]
+        assert durations == sorted(durations, reverse=True)
+        assert durations[0] == 9.0  # slowest first
+
+    def test_timing_top_slowest_custom_n(self):
+        """``_build_timing_field`` honours a custom top-N."""
+        from rocq_mcp.compile import _build_timing_field
+
+        entries = [
+            {
+                "line": i,
+                "characters": [0, 0],
+                "name": f"s{i}",
+                "duration_seconds": float(i),
+            }
+            for i in range(4)
+        ]
+        timing = _build_timing_field(entries, top_n=2)
+        assert len(timing["top_slowest"]) == 2
+
+    def test_timing_last_completed_field(self):
+        """``last_completed`` is the final emitted entry (preserving order)."""
+        from rocq_mcp.compile import _build_timing_field
+
+        entries = [
+            {"line": 1, "characters": [0, 5], "name": "A", "duration_seconds": 9.0},
+            {"line": 2, "characters": [6, 9], "name": "B", "duration_seconds": 1.0},
+        ]
+        timing = _build_timing_field(entries)
+        assert timing["last_completed"]["name"] == "B"
+        # Empty list → None
+        assert _build_timing_field([])["last_completed"] is None
+
+    def test_timing_line_number_conversion(self):
+        """Char-offset → 1-based line number uses the actual source layout."""
+        from rocq_mcp.compile import _char_offset_to_line
+
+        # 3 lines of 10 chars each (incl. newline).
+        source = "abcdefghi\njklmnopqr\nstuvwxyz0\n"
+        assert _char_offset_to_line(source, 0) == 1
+        assert _char_offset_to_line(source, 9) == 1  # at last char of line 1
+        assert _char_offset_to_line(source, 10) == 2
+        assert _char_offset_to_line(source, 25) == 3
+        # Out-of-range offsets clamp to the last line rather than crash.
+        assert _char_offset_to_line(source, 10_000) >= 3
+
+    # ------------------------------------------------------------------ #
+    # Timeout path                                                       #
+    # ------------------------------------------------------------------ #
+
+    def test_timing_last_completed_on_timeout(self, workspace, monkeypatch):
+        """On timeout, partial stderr is still parsed and ``last_completed``
+        is woven into the error string so the agent sees the offending
+        sentence."""
+        import rocq_mcp.compile as _compile
+
+        path = workspace / "timing_to.v"
+        # Make the source long enough that char 26 is on line 3 (matches
+        # the third timing entry).
+        path.write_text("Theorem t1 : True.\n" "Proof.\n" "exact I.\n" "Qed.\n")
+
+        partial_output = (
+            "Chars 0 - 18 [Theorem~t1~:~True.] 0.1 secs (0.u,0.s)\n"
+            "Chars 19 - 25 [Proof.] 0.1 secs (0.u,0.s)\n"
+            "Chars 26 - 34 [exact~I.] 15.3 secs (0.u,0.s)\n"
+        )
+
+        def fake_run(fp, ws, to, keep_vo=False, mode="full", *, timing=False):
+            return {
+                "returncode": -1,
+                # coqc 9.x flushes per-sentence timing to stdout before
+                # the SIGTERM kill on a timeout.
+                "stdout": partial_output,
+                "stderr": "",
+                "timed_out": True,
+            }
+
+        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+
+        result = run_compile_file(
+            file="timing_to.v",
+            workspace=str(workspace),
+            timeout=10,
+            timing=True,
+        )
+        assert result["success"] is False
+        assert result["reason"] == "timeout"
+        assert "timing" in result
+        last = result["timing"]["last_completed"]
+        assert last is not None
+        assert last["name"] == "exact~I."
+        # The error string is enriched with the last-completed phrase
+        # so "timed out" becomes actionable.
+        err = result["error"]
+        assert "Last completed sentence" in err
+        assert "exact~I." in err
+        assert f"line {last['line']}" in err
+
+    def test_timing_parser_returns_empty_on_malformed_durations(self):
+        """A duration that can't be cast to float drops just that entry."""
+        from rocq_mcp.compile import _parse_timing_lines
+
+        stderr = (
+            "Chars 0 - 18 [A] 0.013 secs (0.u,0.s)\n"
+            "Chars 19 - 25 [B] NOTANUMBER secs (0.u,0.s)\n"
+            "Chars 26 - 34 [C] 0.5 secs (0.u,0.s)\n"
+        )
+        entries = _parse_timing_lines(stderr, "X" * 40)
+        # The malformed middle line fails the regex (NOTANUMBER doesn't
+        # match ``[0-9.]+``) and is dropped, but the two valid entries
+        # come through.
+        assert len(entries) == 2
+        assert entries[0]["name"] == "A"
+        assert entries[1]["name"] == "C"
+
+    # ------------------------------------------------------------------ #
+    # Integration with real coqc                                         #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+    def test_timing_integration_returns_entries(self, workspace):
+        """End-to-end: real coqc with ``timing=True`` yields non-empty
+        timing data on a successful compile."""
+        path = workspace / "timing_int.v"
+        path.write_text(
+            "Theorem t : True. Proof. exact I. Qed.\n"
+            "Theorem t2 : 1 + 1 = 2. Proof. reflexivity. Qed.\n"
+        )
+        result = run_compile_file(
+            file="timing_int.v",
+            workspace=str(workspace),
+            timeout=60,
+            timing=True,
+        )
+        assert result["success"] is True, result
+        assert "timing" in result
+        timing = result["timing"]
+        assert timing["total_sentences"] > 0
+        assert isinstance(timing["top_slowest"], list)
+        # ``last_completed`` is the final sentence's entry.
+        assert timing["last_completed"] is not None
+        assert "name" in timing["last_completed"]
+
+    def test_timing_plumbed_through_wrapper(self, tmp_path, monkeypatch):
+        """The ``timing`` kwarg reaches ``run_compile_file_with_state``."""
+        import rocq_mcp.server as _server
+        from rocq_mcp.server import rocq_compile_file
+
+        captured: dict = {}
+
+        async def mock_rcfws(
+            file,
+            workspace,
+            timeout,
+            include_warnings,
+            lifespan_state=None,
+            keep_vo=False,
+            mode="full",
+            timing=False,
+        ):
+            captured["timing"] = timing
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_server, "run_compile_file_with_state", mock_rcfws)
+
+        mock_ctx = _MockContext({"pet_client": None})
+        result = asyncio.run(
+            rocq_compile_file(
+                file="proof.v",
+                workspace=str(tmp_path),
+                timeout=9,
+                include_warnings=True,
+                timing=True,
+                ctx=mock_ctx,
+            )
+        )
+        assert result["success"] is True
+        assert captured["timing"] is True
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestVosMode:
+    """The ``mode`` option selects the coqc pass.
+
+    Contract:
+
+    * ``mode="full"`` (default): today's behaviour — full coqc, ``.vo``
+      artifact.
+    * ``mode="vos"``: passes ``-vos`` to coqc; statements / imports /
+      notations are checked but proof bodies are skipped.  Produces a
+      ``.vos`` artifact rather than ``.vo``.
+    * Any other value is rejected as a validation error before coqc is
+      invoked.
+    """
+
+    # Override the module-level coqc-skip for the mock-based tests; the
+    # integration tests in this class re-impose the skip individually.
+    pytestmark = []
+
+    def test_default_mode_is_full(self, workspace, monkeypatch):
+        """No ``mode`` arg => coqc command line does NOT include ``-vos``."""
+        import rocq_mcp.compile as _compile
+
+        captured: dict = {}
+
+        def fake_process(file_path, ws, timeout, mode="full", *, timing=False):
+            captured["mode"] = mode
+            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+
+        monkeypatch.setattr(_compile, "_run_coqc_process", fake_process)
+
+        path = workspace / "vos_default.v"
+        path.write_text(_TRIVIAL_PROOF)
+        result = run_compile_file(
+            file="vos_default.v", workspace=str(workspace), timeout=30
+        )
+        assert result["success"] is True
+        assert captured["mode"] == "full"
+
+    def test_mode_vos_passes_flag(self, workspace, monkeypatch):
+        """``mode="vos"`` => underlying ``Popen`` call list contains ``-vos``."""
+        import rocq_mcp.compile as _compile
+
+        captured: dict = {}
+
+        class _FakeProc:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("", "")
+
+        def fake_popen(args, *a, **kw):
+            captured["args"] = list(args)
+            return _FakeProc()
+
+        monkeypatch.setattr(_compile.subprocess, "Popen", fake_popen)
+
+        path = workspace / "vos_flag.v"
+        path.write_text(_TRIVIAL_PROOF)
+        result = run_compile_file(
+            file="vos_flag.v",
+            workspace=str(workspace),
+            timeout=30,
+            mode="vos",
+        )
+        assert result["success"] is True
+        assert (
+            "-vos" in captured["args"]
+        ), f"Expected '-vos' in coqc args; got {captured['args']!r}"
+
+    def test_invalid_mode_rejected(self, workspace):
+        """``mode="bogus"`` returns a validation failure without invoking coqc."""
+        path = workspace / "vos_invalid.v"
+        path.write_text(_TRIVIAL_PROOF)
+        result = run_compile_file(
+            file="vos_invalid.v",
+            workspace=str(workspace),
+            timeout=30,
+            mode="bogus",
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "validation"
+        assert "mode" in result["error"].lower()
+        # No .vo / .vos artifacts produced.
+        assert not (workspace / "vos_invalid.vo").exists()
+        assert not (workspace / "vos_invalid.vos").exists()
+
+    def test_invalid_mode_rejected_at_wrapper(self, tmp_path):
+        """Wrapper layer rejects an invalid ``mode`` before coqc."""
+        from rocq_mcp.server import rocq_compile_file
+
+        mock_ctx = _MockContext(make_lifespan_state())
+        result = asyncio.run(
+            rocq_compile_file(
+                file="anything.v",
+                workspace=str(tmp_path),
+                timeout=5,
+                include_warnings=True,
+                keep_vo=False,
+                mode="bogus",
+                ctx=mock_ctx,
+            )
+        )
+        assert result["success"] is False
+        assert result.get("reason") == "validation"
+        assert "mode" in result["error"].lower()
+
+    def test_mode_plumbed_through_wrapper(self, tmp_path, monkeypatch):
+        """The ``mode`` kwarg must reach ``run_compile_file_with_state``."""
+        import rocq_mcp.server as _server
+        from rocq_mcp.server import rocq_compile_file
+
+        captured: dict = {}
+
+        async def mock_run_compile_file_with_state(
+            file,
+            workspace,
+            timeout,
+            include_warnings,
+            lifespan_state=None,
+            keep_vo=False,
+            mode="full",
+            timing=False,
+        ):
+            captured.update(
+                {
+                    "file": file,
+                    "workspace": workspace,
+                    "timeout": timeout,
+                    "include_warnings": include_warnings,
+                    "lifespan_state": lifespan_state,
+                    "keep_vo": keep_vo,
+                    "mode": mode,
+                }
+            )
+            return {"success": True, "output": "mock"}
+
+        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(
+            _server,
+            "run_compile_file_with_state",
+            mock_run_compile_file_with_state,
+        )
+
+        mock_ctx = _MockContext({"pet_client": None})
+
+        result = asyncio.run(
+            rocq_compile_file(
+                file="proof.v",
+                workspace=str(tmp_path),
+                timeout=9,
+                include_warnings=True,
+                mode="vos",
+                ctx=mock_ctx,
+            )
+        )
+
+        assert result["success"] is True
+        assert captured["mode"] == "vos"
+
+
+class TestVosModeIntegration:
+    """End-to-end ``mode="vos"`` against a real coqc.
+
+    Skipped automatically when ``coqc`` is not on PATH.  Verifies the
+    actual semantics of ``coqc -vos``: catches statement-level problems,
+    skips proof bodies, produces a ``.vos`` artifact.
+    """
+
+    def test_mode_vos_catches_statement_type_error(self, workspace):
+        """vos mode fails on a statement that cannot type-check."""
+        path = workspace / "vos_stmt_err.v"
+        path.write_text("Theorem foo : bad_type.\nProof. exact I. Qed.\n")
+        try:
+            result = run_compile_file(
+                file="vos_stmt_err.v",
+                workspace=str(workspace),
+                timeout=60,
+                mode="vos",
+            )
+            assert result["success"] is False
+            assert "error" in result
+        finally:
+            for ext in (".vo", ".vok", ".vos", ".glob"):
+                (workspace / f"vos_stmt_err{ext}").unlink(missing_ok=True)
+
+    def test_mode_vos_does_not_catch_tactic_error(self, workspace):
+        """vos mode skips proof bodies, so a broken tactic still succeeds."""
+        path = workspace / "vos_tactic_err.v"
+        # Statement is valid; proof body is nonsense — vos must accept this.
+        path.write_text(
+            "Theorem foo : True.\n" "Proof. apply nonsense_lemma_does_not_exist. Qed.\n"
+        )
+        try:
+            result = run_compile_file(
+                file="vos_tactic_err.v",
+                workspace=str(workspace),
+                timeout=60,
+                mode="vos",
+            )
+            assert result["success"] is True, result
+        finally:
+            for ext in (".vo", ".vok", ".vos", ".glob"):
+                (workspace / f"vos_tactic_err{ext}").unlink(missing_ok=True)
+
+    def test_mode_vos_with_keep_vo_true_preserves_vos(self, workspace):
+        """vos + keep_vo=True preserves the .vos artifact (and no .vo is produced)."""
+        path = workspace / "vos_keep.v"
+        path.write_text(_TRIVIAL_PROOF)
+        try:
+            result = run_compile_file(
+                file="vos_keep.v",
+                workspace=str(workspace),
+                timeout=60,
+                keep_vo=True,
+                mode="vos",
+            )
+            assert result["success"] is True, result
+            assert (
+                workspace / "vos_keep.vos"
+            ).exists(), "keep_vo=True with mode='vos' must preserve the .vos file."
+            # vos mode does not produce a .vo artifact.
+            assert not (workspace / "vos_keep.vo").exists()
+        finally:
+            for ext in (".vo", ".vok", ".vos", ".glob"):
+                (workspace / f"vos_keep{ext}").unlink(missing_ok=True)

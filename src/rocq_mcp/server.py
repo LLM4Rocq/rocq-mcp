@@ -13,6 +13,7 @@ import asyncio
 import collections
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -60,6 +61,64 @@ def _check_timeout_config(pet_timeout: float, cap: int) -> str | None:
 _timeout_config_msg = _check_timeout_config(ROCQ_PET_TIMEOUT, ROCQ_QUERY_TIMEOUT_CAP)
 if _timeout_config_msg:
     warnings.warn(_timeout_config_msg, RuntimeWarning, stacklevel=2)
+
+
+# Single source of truth for the per-call "pytanque ImportError" envelope hint.
+# Used by _ensure_pet, _run_with_pet, run_check, and run_step_multi — all of
+# which surface this string in the ``error`` field of their {success:false,
+# reason:"unavailable"} envelope.  Centralized so future copy churn cannot
+# resurrect a phantom ``pip install 'rocq-mcp[interactive]'`` recipe (no
+# ``[interactive]`` extra exists; petanque ships with coq-lsp).
+_PYTANQUE_NOT_INSTALLED_HINT = (
+    "pytanque is not installed. Petanque (the `pet` binary and the matching "
+    "pytanque Python binding) ships with coq-lsp — see "
+    "https://github.com/ejgallego/coq-lsp for install instructions "
+    "appropriate to your environment."
+)
+
+
+def _check_pet_availability() -> str | None:
+    """Return a warning message when pet (pytanque + ``pet`` binary) is missing.
+
+    The interactive tools and the multi-error / state-capture enrichment on
+    ``rocq_compile_file`` all route through pet.  Falling back to coqc-only
+    operation is a substantial reduction in capability, so the operator
+    deserves an up-front signal at server boot rather than discovering it
+    only when an agent dispatches the first interactive tool call and gets
+    ``reason="unavailable"`` back.
+
+    Returns ``None`` when both halves of the install are present.
+    """
+    pytanque_missing = False
+    try:
+        import pytanque  # noqa: F401
+    except ImportError:
+        pytanque_missing = True
+    pet_binary_missing = shutil.which("pet") is None
+    if not (pytanque_missing or pet_binary_missing):
+        return None
+    parts = []
+    if pytanque_missing:
+        parts.append("the pytanque Python binding is not importable")
+    if pet_binary_missing:
+        parts.append("the `pet` binary is not on PATH")
+    return (
+        "pet not detected: " + " and ".join(parts) + ". "
+        "Interactive tools (rocq_start / rocq_check / rocq_step_multi / "
+        "rocq_query / rocq_assumptions / rocq_toc / rocq_notations) and "
+        "proof-state enrichment on rocq_compile_file will return "
+        'reason="unavailable". '
+        "Petanque (the `pet` binary and the matching pytanque Python "
+        "binding) ships with coq-lsp; both halves must be installed "
+        "together.  `pip` / `uv` cannot install petanque on their own — "
+        "see https://github.com/ejgallego/coq-lsp for install "
+        "instructions appropriate to your environment."
+    )
+
+
+_pet_availability_msg = _check_pet_availability()
+if _pet_availability_msg:
+    warnings.warn(_pet_availability_msg, RuntimeWarning, stacklevel=2)
 
 
 def _default_max_pet_rss_mb() -> int:
@@ -875,9 +934,7 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
     try:
         from pytanque import Pytanque, PytanqueMode
     except ImportError:
-        raise ImportError(
-            "pytanque is not installed. Install with: pip install 'rocq-mcp[interactive]'"
-        )
+        raise ImportError(_PYTANQUE_NOT_INSTALLED_HINT)
 
     pet = lifespan_state.get("pet_client")
     if pet is None or not _pet_alive(pet):
@@ -1459,14 +1516,10 @@ async def _run_with_pet(
     try:
         from pytanque import PetanqueError
     except ImportError:
-        msg = (
-            "pytanque is not installed. "
-            "Install with: pip install 'rocq-mcp[interactive]'"
-        )
         return _fail(
             lifespan_state if auto_record else None,
             tool,
-            msg,
+            _PYTANQUE_NOT_INSTALLED_HINT,
             "unavailable",
         )
 
@@ -1729,6 +1782,8 @@ async def rocq_compile_file(
     timeout: int = 0,
     include_warnings: bool = True,
     keep_vo: bool = False,
+    mode: str = "full",
+    timing: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Compile a finished .v file on disk via coqc.
@@ -1815,7 +1870,45 @@ async def rocq_compile_file(
             after coqc returns (diagnostic artifacts are still cleaned).
             Default False matches today's "clean everything but the
             source" behavior.  Useful when a sibling file in the same
-            workspace will ``Require Import`` the result.
+            workspace will ``Require Import`` the result.  **Note**:
+            combining ``keep_vo=True`` with ``mode="vos"`` produces
+            only a ``.vos`` artifact; downstream files compiled in
+            ``mode="full"`` will fail with ``"Unable to locate
+            library ... (while searching for a .vos file)"`` — use
+            ``mode="full" keep_vo=True`` when the sibling consumer
+            expects a ``.vo``.
+        mode: Which coqc pass to run.  ``"full"`` (default) is today's
+            behavior — coqc fully elaborates every proof body.  ``"vos"``
+            adds ``-vos`` so coqc *skips proof bodies entirely* — it
+            does NOT execute them.  ``"vos"`` is fast and catches
+            missing imports, statement type errors, holes left in
+            statements, and notation conflicts.  It does NOT validate
+            proofs: a ``Theorem t : False. Proof. exact I. Qed.``
+            passes under ``"vos"``.  Use it as a cheap pre-pass during
+            iteration, then run ``"full"`` for the real check.
+            ``"vos"`` produces a ``.vos`` artifact rather than a ``.vo``.
+        timing: If True, invoke coqc with ``-time`` and attach a
+            ``timing`` field to the response with per-sentence
+            diagnostics — ``{"total_sentences": int, "top_slowest":
+            list[{line, characters, name, duration_seconds}],
+            "last_completed": {...} | None}``.  ``top_slowest`` holds
+            up to 5 entries sorted by descending duration.  On
+            timeout, ``last_completed`` is the final sentence coqc
+            finished and the ``error`` string names it so "timed out
+            after 590s" becomes "Last completed sentence: line 221
+            [Theorem.foo] (15.3s)."  On a successful compile,
+            ``last_completed`` is the file's literal final sentence
+            (not a failure marker).  Default False is zero-overhead.
+
+    The response envelope additionally carries several optional fields
+    depending on flags / failure mode: ``error_positions`` and
+    ``state_capture_status`` on ``reason="compile_error"`` (see the
+    ``state_capture_status`` paragraph above); ``errors`` per-declaration
+    list when ``pet`` is available (see the Multi-error callout in the
+    README); ``vo_rebuild_warning`` when the call rewrites ``.vo``
+    artifacts in a workspace with active sessions; ``clamped_timeout``
+    when the per-call timeout was clamped by ``ROCQ_QUERY_TIMEOUT_CAP``;
+    ``timing`` when ``timing=True``.
 
     On ``pet_restarted: True`` (state-capture path crashed pet), call
     ``rocq_diag`` for memory headroom and recent error history.
@@ -1840,6 +1933,8 @@ async def rocq_compile_file(
         include_warnings=include_warnings,
         lifespan_state=lifespan_state,
         keep_vo=keep_vo,
+        mode=mode,
+        timing=timing,
     )
     return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
@@ -2554,6 +2649,11 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
       sample_status}`` where ``sample_status`` is one of ``"ok"`` /
       ``"no_pet"`` / ``"psutil_error"`` and disambiguates a ``None``
       ``pet_rss_mb``.
+    - ``load_average``: ``{"1m": float, "5m": float, "15m": float}`` —
+      kernel-tracked system load averages over the last 1, 5, and 15
+      minutes (from ``os.getloadavg()``).  ``None`` on platforms without
+      an equivalent (e.g. Windows).  Use this to disambiguate CPU
+      contention from tactic divergence when a timeout fires.
     - ``live_states``: capped at 50 most-recent entries (by
       ``created_at``) to keep the payload bounded.  Each entry has
       ``{state_id, parent, file, theorem, age_seconds}``.

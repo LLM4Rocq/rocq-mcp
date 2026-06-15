@@ -55,12 +55,27 @@ _PROOF_FILE_LABEL: str = "<proof>"
 # ---------------------------------------------------------------------------
 
 
-def _run_coqc_process(file_path: str, workspace: Path, timeout: int) -> dict[str, Any]:
+def _run_coqc_process(
+    file_path: str,
+    workspace: Path,
+    timeout: int,
+    mode: str = "full",
+    timing: bool = False,
+) -> dict[str, Any]:
     """Run coqc on a .v file and return the result.
 
     Shared subprocess management for both :func:`_run_coqc` (temp files) and
     :func:`_run_coqc_file` (user files).  Handles timeout with graceful
     SIGTERM → SIGKILL escalation.
+
+    When ``mode == "vos"`` passes ``-vos`` to coqc, which skips proof
+    bodies (produces a ``.vos`` artifact instead of ``.vo``).
+
+    When *timing* is True, coqc is invoked with ``-time`` so per-sentence
+    timing diagnostics are emitted on stdout (coqc 9.x; older builds may
+    have used stderr — :func:`_parse_timing_lines` tries stdout first and
+    falls back to stderr).  On timeout the partial buffers are still
+    returned so the last completed sentence remains recoverable.
 
     Returns dict with keys:
         returncode: int
@@ -68,13 +83,18 @@ def _run_coqc_process(file_path: str, workspace: Path, timeout: int) -> dict[str
         stderr: str
         timed_out: bool
     """
+    coqc_args: list[str] = [
+        _server.ROCQ_COQC_BINARY,
+        *_server._parse_project_flags(workspace),
+    ]
+    if mode == "vos":
+        coqc_args.append("-vos")
+    if timing:
+        coqc_args.append("-time")
+    coqc_args.append(file_path)
     try:
         proc = subprocess.Popen(
-            [
-                _server.ROCQ_COQC_BINARY,
-                *_server._parse_project_flags(workspace),
-                file_path,
-            ],
+            coqc_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -156,6 +176,8 @@ def _run_coqc_file(
     workspace: str,
     timeout: int,
     keep_vo: bool = False,
+    mode: str = "full",
+    timing: bool = False,
 ) -> dict[str, Any]:
     """Run coqc on an existing .v file, return result dict.
 
@@ -166,10 +188,18 @@ def _run_coqc_file(
     so the produced ``.vo`` is available to sibling files importing
     it; the diagnostic artifacts (``.glob``/``.aux``/``.vio``/
     ``.timing``/``.coqaux``) are still cleaned.
+
+    When ``mode == "vos"`` passes ``-vos`` to coqc, which checks
+    statements / imports / notations but skips proof bodies.  Produces
+    a ``.vos`` artifact rather than a ``.vo``.
+
+    When *timing* is True, coqc is invoked with ``-time`` and its
+    per-sentence timing lines land in the returned ``stderr`` for the
+    caller to parse via :func:`_parse_timing_lines`.
     """
     ws = Path(workspace).resolve()
     try:
-        return _run_coqc_process(file_path, ws, timeout)
+        return _run_coqc_process(file_path, ws, timeout, mode=mode, timing=timing)
     finally:
         base = Path(file_path).with_suffix("")
         for ext in _server._CLEANUP_EXTENSIONS:
@@ -370,6 +400,129 @@ def _format_error(
 
 
 # ---------------------------------------------------------------------------
+# Per-sentence timing diagnostics (coqc -time)
+# ---------------------------------------------------------------------------
+
+# Default number of slowest sentences to surface in the response.
+_TIMING_TOP_N: int = 5
+
+# coqc -time emits lines of the shape
+#     Chars <start> - <end> [<vernac-name>] <duration> secs (<u>u,<s>s)
+# where <duration> may be ``0.``, ``0.013``, etc.  The tail in
+# parentheses is optional and varies across coqc versions, so the
+# regex only anchors the prefix that all versions emit.
+_TIMING_LINE_RE = re.compile(
+    r"^Chars\s+(\d+)\s+-\s+(\d+)\s+\[([^\]]*)\]\s+([0-9.]+)\s+secs"
+)
+
+
+def _char_offset_to_line(source: str, offset: int) -> int:
+    """Convert a 0-based character offset to a 1-based line number.
+
+    O(N) per call in the size of *source* up to *offset*; acceptable
+    because timing-line counts are bounded by source size.  Falls
+    back to line 1 when *offset* is negative or out of range.
+    """
+    if offset <= 0 or not source:
+        return 1
+    capped = min(offset, len(source))
+    return source.count("\n", 0, capped) + 1
+
+
+def _parse_timing_lines(text: str, source: str) -> list[dict[str, Any]]:
+    """Parse coqc ``-time`` lines from *text* into structured entries.
+
+    coqc 9.x emits ``-time`` output on **stdout** (not stderr); earlier
+    versions varied.  The parser is input-agnostic — it scans whatever
+    text the caller hands it for ``Chars ... secs`` lines.
+
+    Tolerant by design: any line that does not match
+    :data:`_TIMING_LINE_RE` is ignored (warnings, errors, blanks all
+    pass through silently).  When duration parsing fails the entry is
+    dropped rather than poisoning the rest of the list — coqc emits
+    ``0.`` and other unusual decimal shapes, so a permissive float
+    cast with fallback keeps us robust to format drift.
+
+    Each returned entry is a dict with keys ``line`` (1-based),
+    ``characters`` (``[start, end]`` 0-based), ``name`` (vernac name
+    as printed by coqc, with ``~`` left as-is — that is coqc's
+    standard whitespace-substitute), and ``duration_seconds``.
+    """
+    entries: list[dict[str, Any]] = []
+    if not text:
+        return entries
+    for raw_line in text.splitlines():
+        m = _TIMING_LINE_RE.match(raw_line)
+        if m is None:
+            continue
+        try:
+            start = int(m.group(1))
+            end = int(m.group(2))
+            name = m.group(3)
+            duration = float(m.group(4))
+        except (TypeError, ValueError):
+            continue
+        entries.append(
+            {
+                "line": _char_offset_to_line(source, start),
+                "characters": [start, end],
+                "name": name,
+                "duration_seconds": duration,
+            }
+        )
+    return entries
+
+
+def _strip_timing_lines(text: str) -> str:
+    """Remove coqc ``-time`` lines from *text*.
+
+    Used by :func:`_build_compile_result` when timing is enabled to
+    keep the ``Chars ... secs`` noise out of the success-path
+    ``output`` field (where they'd drown the rest of coqc's stdout).
+    Non-timing lines are passed through unchanged.
+    """
+    if not text:
+        return text
+    return "\n".join(
+        line for line in text.splitlines() if not _TIMING_LINE_RE.match(line)
+    )
+
+
+def _build_timing_field(
+    timing_entries: list[dict[str, Any]],
+    top_n: int = _TIMING_TOP_N,
+) -> dict[str, Any]:
+    """Assemble the ``timing`` response field from parsed entries.
+
+    ``top_slowest`` is a stable-by-input-order sort by descending
+    duration (Python sort is stable, so equal-duration entries keep
+    source-position order).  ``last_completed`` is the final emitted
+    entry — useful when coqc was killed mid-compile because it points
+    at the sentence whose work was lost.
+    """
+    total = len(timing_entries)
+    sorted_by_dur = sorted(
+        timing_entries,
+        key=lambda e: e["duration_seconds"],
+        reverse=True,
+    )
+    top_slowest = sorted_by_dur[: max(0, top_n)]
+    last_completed = timing_entries[-1] if timing_entries else None
+    return {
+        "total_sentences": total,
+        "top_slowest": top_slowest,
+        "last_completed": last_completed,
+    }
+
+
+def _format_last_completed_phrase(entry: dict[str, Any]) -> str:
+    """Render a ``last_completed`` entry as a human-readable phrase."""
+    return (
+        f"line {entry['line']} [{entry['name']}] " f"({entry['duration_seconds']:.3g}s)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shared post-compilation result builder
 # ---------------------------------------------------------------------------
 
@@ -382,6 +535,7 @@ def _build_compile_result(
     *,
     file_label: str = _PROOF_FILE_LABEL,
     clean_tmp_paths: bool = True,
+    timing_field: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a structured result dict from a coqc subprocess result.
 
@@ -395,28 +549,67 @@ def _build_compile_result(
     include_warnings : passed to ``_format_error``
     file_label : label used in ``_format_error`` and fallback path cleaning
     clean_tmp_paths : if True, replace tmp file paths in fallback errors
+    timing_field : when not None, the pre-built ``timing`` response field
+        from :func:`_build_timing_field`.  Attached to every return path
+        so callers see partial timings even on timeout or build failure.
+        On timeout, the ``last_completed`` entry is also woven into the
+        ``error`` string so the agent sees where coqc was stuck.
     """
     if result["timed_out"]:
-        return {
+        error_str = (
+            f"Compilation timed out after {timeout}s. "
+            "The proof may contain a diverging tactic. "
+            "Retry with timing=True to identify the slowest sentence."
+        )
+        if timing_field is not None and timing_field.get("last_completed"):
+            error_str = (
+                f"Compilation timed out after {timeout}s. "
+                "Last completed sentence: "
+                f"{_format_last_completed_phrase(timing_field['last_completed'])}."
+            )
+        timeout_result: dict[str, Any] = {
             "success": False,
             "reason": "timeout",
-            "error": (
-                f"Compilation timed out after {timeout}s. "
-                "The proof may contain a diverging tactic."
-            ),
+            "error": error_str,
         }
+        if timing_field is not None:
+            timeout_result["timing"] = timing_field
+        return timeout_result
 
     if result["returncode"] == 0:
-        return {"success": True, "output": result["stdout"][:2000]}
+        # With ``-time`` active, stdout is flooded with ``Chars ... secs``
+        # entries; strip them from the displayable ``output`` so the user
+        # sees the actual coqc messages without the timing-line firehose.
+        stdout_for_output = (
+            _strip_timing_lines(result["stdout"])
+            if timing_field is not None
+            else result["stdout"]
+        )
+        success_result: dict[str, Any] = {
+            "success": True,
+            "output": stdout_for_output[:2000],
+        }
+        if timing_field is not None:
+            success_result["timing"] = timing_field
+        return success_result
+
+    # Older coqc versions may interleave timing on stderr; strip there too
+    # so ``_format_error``'s diagnostic-block regex isn't fed phantom
+    # body text.  Cheap when stderr has no timing lines.
+    stderr_for_format = (
+        _strip_timing_lines(result["stderr"])
+        if timing_field is not None
+        else result["stderr"]
+    )
 
     error_text = _format_error(
-        result["stderr"],
+        stderr_for_format,
         source,
         include_warnings=include_warnings,
         file_label=file_label,
     )
     if not error_text:
-        raw = result["stderr"].strip()
+        raw = stderr_for_format.strip()
         fallback = raw[-_MAX_ERROR_LENGTH:] if len(raw) > _MAX_ERROR_LENGTH else raw
         if clean_tmp_paths:
             fallback = _TMP_PATH_RE.sub(f'"{file_label}"', fallback).strip()
@@ -426,10 +619,17 @@ def _build_compile_result(
             fallback = _drop_warning_lines(fallback)
         if not fallback:
             fallback = f"coqc exited with code {result['returncode']} (no stderr)."
-        return {"success": False, "reason": "compile_error", "error": fallback}
+        fallback_result: dict[str, Any] = {
+            "success": False,
+            "reason": "compile_error",
+            "error": fallback,
+        }
+        if timing_field is not None:
+            fallback_result["timing"] = timing_field
+        return fallback_result
 
     positions = _parse_coqc_error_positions(
-        result["stderr"], include_warnings=include_warnings
+        stderr_for_format, include_warnings=include_warnings
     )
     result_dict: dict[str, Any] = {
         "success": False,
@@ -448,6 +648,8 @@ def _build_compile_result(
             "Use rocq_check for faster iteration, "
             "or rocq_step_multi to explore alternative tactics."
         )
+    if timing_field is not None:
+        result_dict["timing"] = timing_field
     return result_dict
 
 
@@ -497,6 +699,8 @@ def run_compile_file(
     timeout: int,
     include_warnings: bool = True,
     keep_vo: bool = False,
+    mode: str = "full",
+    timing: bool = False,
 ) -> dict[str, Any]:
     """Core implementation of rocq_compile_file (testable without FastMCP Context).
 
@@ -506,7 +710,23 @@ def run_compile_file(
     When *keep_vo* is True, preserves the ``.vo``/``.vok``/``.vos`` outputs;
     diagnostic artifacts are still cleaned.  Default False preserves today's
     "clean everything but the source" behavior.
+
+    *mode* selects the coqc pass.  ``"full"`` (default) runs the normal
+    compile.  ``"vos"`` adds ``-vos`` so coqc skips proof bodies, which
+    is fast and still catches missing imports, statement type errors,
+    holes, and notation conflicts — but does NOT catch tactic failures
+    inside proof bodies.  Any other value is a validation error.
+
+    When *timing* is True, coqc is invoked with ``-time`` and the result
+    includes a ``timing`` field — see :func:`_build_timing_field`.
+    Default False keeps the path zero-overhead.
     """
+    if mode not in ("full", "vos"):
+        return {
+            "success": False,
+            "reason": "validation",
+            "error": f"Invalid mode {mode!r}: expected 'full' or 'vos'.",
+        }
     try:
         file_path = _server._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError) as e:
@@ -532,7 +752,25 @@ def run_compile_file(
     if forbidden:
         return {"success": False, "reason": "validation", "error": forbidden}
 
-    result = _run_coqc_file(file_path, workspace, timeout, keep_vo=keep_vo)
+    result = _run_coqc_file(
+        file_path, workspace, timeout, keep_vo=keep_vo, mode=mode, timing=timing
+    )
+
+    timing_field: dict[str, Any] | None = None
+    if timing:
+        # Coqc 9.x emits ``-time`` output on stdout; parse there.  Walk
+        # stderr too so we are robust to older or future coqc versions
+        # that may route the lines differently.
+        try:
+            entries = _parse_timing_lines(result.get("stdout", ""), source)
+            if not entries:
+                entries = _parse_timing_lines(result.get("stderr", ""), source)
+            timing_field = _build_timing_field(entries)
+        except Exception:
+            # Parser must never crash the response — coqc output shape may
+            # drift across versions.  Fall back to an empty timing field.
+            timing_field = _build_timing_field([])
+
     return _build_compile_result(
         result,
         source,
@@ -540,6 +778,7 @@ def run_compile_file(
         include_warnings,
         file_label=file,
         clean_tmp_paths=False,
+        timing_field=timing_field,
     )
 
 

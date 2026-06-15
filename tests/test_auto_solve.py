@@ -17,6 +17,8 @@ import pytest
 from tests.conftest import PET_AVAILABLE
 from rocq_mcp.compile import (
     _find_sentence_end,
+    _leading_focus_token,
+    _split_rocq_sentences,
 )
 
 # Standard automation tactics for step_multi
@@ -91,6 +93,109 @@ class TestFindSentenceEnd:
     def test_dot_inside_string_inside_comment(self):
         # Dot inside a string inside a comment is not a sentence end
         assert _find_sentence_end('(* "." *) x.') == 11
+
+
+# ---------------------------------------------------------------------------
+# _split_rocq_sentences — focus / bullet tokens (no trailing dot)
+# ---------------------------------------------------------------------------
+
+
+class TestSplitFocusTokens:
+    """Focus and bullet tokens are standalone sentences with no dot.
+
+    Regression: a body of just ``{`` (or ``}``, or a bullet) used to be
+    dropped by the splitter because it carries no terminating dot,
+    leaving ``run_check`` with zero commands to run.
+    """
+
+    def test_lone_open_brace(self):
+        assert _split_rocq_sentences("{") == ["{"]
+
+    def test_lone_close_brace(self):
+        assert _split_rocq_sentences("}") == ["}"]
+
+    def test_bullets(self):
+        assert _split_rocq_sentences("-") == ["-"]
+        assert _split_rocq_sentences("--") == ["--"]
+        assert _split_rocq_sentences("+++") == ["+++"]
+        assert _split_rocq_sentences("**") == ["**"]
+
+    def test_tokens_emitted_bare_without_dot(self):
+        # Rocq rejects a trailing '.' after a brace/bullet (``-.`` is a
+        # syntax error), so these must be emitted bare.
+        for tok in _split_rocq_sentences("{ } - + *"):
+            assert not tok.endswith(".")
+
+    def test_distinct_adjacent_bullets_split(self):
+        # ``-+`` is two nested bullets of different levels, not one token.
+        assert _split_rocq_sentences("-+") == ["-", "+"]
+
+    def test_brace_with_inner_tactic(self):
+        assert _split_rocq_sentences("{ reflexivity. }") == [
+            "{",
+            "reflexivity.",
+            "}",
+        ]
+
+    def test_trailing_close_brace_recovered(self):
+        # Previously the dangling ``}`` (no following dot) was dropped.
+        assert _split_rocq_sentences("split. { reflexivity. }") == [
+            "split.",
+            "{",
+            "reflexivity.",
+            "}",
+        ]
+
+    def test_bullet_then_tactic(self):
+        assert _split_rocq_sentences("- reflexivity.") == ["-", "reflexivity."]
+
+    def test_record_literal_not_a_focus_brace(self):
+        # ``{|`` opens a record literal, not a focus brace.
+        assert _split_rocq_sentences("{|a := 1|}.") == ["{|a := 1|}."]
+
+    def test_plain_sentence_unchanged(self):
+        assert _split_rocq_sentences("intros.") == ["intros."]
+
+    def test_leading_focus_token_helper(self):
+        assert _leading_focus_token("  { foo") == ("{", 3)
+        assert _leading_focus_token("-- bar") == ("--", 2)
+        assert _leading_focus_token("intros.") is None
+        assert _leading_focus_token("{| r |}") is None
+
+    def test_bullet_interleaved_with_tactics(self):
+        # A realistic multi-bullet proof body splits cleanly.
+        assert _split_rocq_sentences("intros. - simpl. - reflexivity.") == [
+            "intros.",
+            "-",
+            "simpl.",
+            "-",
+            "reflexivity.",
+        ]
+
+    def test_token_after_comment_known_limitation(self):
+        # Documented limitation: _leading_focus_token strips only
+        # whitespace, not comments, so a brace following a comment is
+        # glued into the dot-terminated sentence rather than split out.
+        # Harmless in practice (Rocq accepts a comment + ``{`` + tactic
+        # run); the trailing ``}`` is still recovered.  Pinned so a
+        # future change to comment-aware skipping is deliberate.
+        assert _split_rocq_sentences("(* note *) { reflexivity. }") == [
+            "(* note *) { reflexivity.",
+            "}",
+        ]
+
+    def test_focus_pass_runs_before_dot_scan(self):
+        # Idempotence-ish: re-splitting already-split tokens is stable.
+        for tok in ("{", "}", "-", "++"):
+            assert _split_rocq_sentences(tok) == [tok]
+
+    def test_leading_operator_term_is_known_limitation(self):
+        # Documented limitation (see _leading_focus_token): the detector
+        # is position-naive and treats a leading ``*``/``-``/``+`` as a
+        # bullet even when it begins a term.  This case does not arise
+        # for the tactic/bullet bodies the splitter is used on; the test
+        # pins the current behavior so a future change is deliberate.
+        assert _split_rocq_sentences("* 2 = 4.") == ["*", "2 = 4."]
 
 
 # =========================================================================

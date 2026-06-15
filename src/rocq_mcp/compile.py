@@ -1473,15 +1473,66 @@ def _find_sentence_end(text: str) -> int | None:
     return None
 
 
+# Focus / bullet tokens are sentences in their own right but carry no
+# terminating dot: a lone ``{`` / ``}`` brace, or a maximal run of one
+# bullet character (``-``, ``+``, ``*``).  ``_find_sentence_end`` only
+# recognizes dot-terminated sentences, so without special handling these
+# tokens are silently dropped by the splitter (e.g. a body of just ``{``
+# produces zero commands).
+_LEADING_FOCUS_RE = re.compile(r"\{|\}|-+|\++|\*+")
+
+
+def _leading_focus_token(text: str) -> tuple[str, int] | None:
+    """Detect a leading focus/bullet token in *text*.
+
+    Skips leading whitespace, then matches a lone ``{`` / ``}`` brace or
+    a maximal run of a single bullet character (``-``/``+``/``*``).
+    Returns ``(token, end_index)`` where *end_index* is the offset in the
+    original *text* just past the token, or ``None`` when *text* does not
+    begin with such a token.
+
+    A ``{`` immediately followed by ``|`` is treated as record syntax
+    (``{| ... |}``), not a focus brace, and yields ``None``.
+
+    This detector is position-naive: it assumes *text* is the start of a
+    proof-script sentence, where a leading ``-``/``+``/``*`` is a bullet.
+    It does *not* distinguish a bullet from a term that happens to begin
+    with one of those characters as a binary operator (e.g. a sentence
+    starting ``* 2`` or ``- 3``).  That case does not arise for the
+    tactic/bullet bodies this splitter is used on; callers feeding
+    arbitrary term fragments should not rely on it.
+    """
+    offset = len(text) - len(text.lstrip())
+    rest = text[offset:]
+    m = _LEADING_FOCUS_RE.match(rest)
+    if not m:
+        return None
+    tok = m.group(0)
+    if tok == "{" and rest[1:2] == "|":
+        return None
+    return tok, offset + m.end()
+
+
 def _split_rocq_sentences(source: str) -> list[str]:
     """Split Rocq source into individual sentences.
 
     Uses :func:`_find_sentence_end` repeatedly to split on
     sentence-terminating dots (handling comments and strings correctly).
+    Focus and bullet tokens (``{``, ``}``, and runs of ``-``/``+``/``*``)
+    are emitted as standalone sentences even though they carry no
+    trailing dot — see :func:`_leading_focus_token`.  These tokens are
+    emitted bare (without a dot): Rocq rejects a trailing ``.`` after a
+    brace or bullet (e.g. ``-.`` is a syntax error).
     """
     sentences: list[str] = []
     remaining = source
     while remaining.strip():
+        focus = _leading_focus_token(remaining)
+        if focus is not None:
+            token, end = focus
+            sentences.append(token)
+            remaining = remaining[end:]
+            continue
         dot = _find_sentence_end(remaining)
         if dot is None:
             break

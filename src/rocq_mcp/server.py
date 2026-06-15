@@ -2381,6 +2381,24 @@ async def rocq_start(
        if you change the lemma body (see
        ``interactive.py:_get_or_create_import_state``).
 
+    **Position semantics (mode 2):** ``line`` and ``character`` are
+    0-indexed.  Petanque resolves the cursor to a sentence boundary by
+    *rounding forward* through the sentence that contains the cursor:
+
+    - Cursor on any character of a sentence — its first letter, any
+      character inside, or its terminating period — yields the state
+      **after** that whole sentence has executed.
+    - Cursor in the whitespace **before** a sentence's first
+      non-whitespace character yields the state **before** that
+      sentence (= after the previous sentence).
+    - Cursor in the whitespace **after** a sentence's terminating
+      period yields the state **after** that sentence.
+
+    So to inspect goals **before** a tactic, point at the whitespace
+    just before its first character.  To inspect goals **after** a
+    tactic, point at any character of the tactic (including its
+    period) or at the whitespace immediately following the period.
+
     **Important:** The interactive session reads the file at start time and
     does not track subsequent edits. If another process or agent modifies the
     file while a session is active, the proof state becomes stale and tactics
@@ -2394,8 +2412,11 @@ async def rocq_start(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
-        line: 0-based line number for position-based start.
+        line: 0-based line number for position-based start.  See
+            "Position semantics" above for how the cursor is resolved
+            to a sentence boundary.
         character: 0-based character offset for position-based start.
+            See "Position semantics" above.
         preamble: Import commands for preamble mode (e.g., "Require Import Lia.").
         force_restart: If True, kill pet, clear the state table, and
             respawn before starting.  Recovery primitive for the rare

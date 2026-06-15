@@ -1295,7 +1295,15 @@ def _build_position_start_result(
     character: int,
     track_staleness: bool = True,
 ) -> dict[str, Any]:
-    """Return the rocq_start-style payload for a position-based state."""
+    """Return the rocq_start-style payload for a position-based state.
+
+    ``line`` / ``character`` are 0-indexed.  Petanque rounds the cursor
+    forward through the sentence it lies in: a cursor on any character
+    of a sentence (first letter through terminating period) yields the
+    state AFTER that sentence; a cursor in the whitespace before a
+    sentence yields the state BEFORE it.  See ``rocq_start`` for the
+    full rule.
+    """
     _server._set_workspace_if_needed(pet, workspace, lifespan_state)
     state = pet.get_state_at_pos(resolved_file, line, character)
 

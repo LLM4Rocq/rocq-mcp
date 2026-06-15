@@ -139,6 +139,48 @@ def _try_get_goals(pet: Any, state: Any) -> str | None:
 _PET_TIMEOUT_GRACE: float = float(os.environ.get("ROCQ_PET_TIMEOUT_GRACE", "10"))
 
 
+# Bullet / focus-management tokens: `{`, `}`, or a run of one of `-+*`.
+# These commands change the focused subgoal but produce no visible
+# diagnostic in the standard ``goals`` response, so ``rocq_check``
+# enriches its response with focus-stack accounting.
+_BULLET_FOCUS_RE = re.compile(r"^(?:\{|\}|-+|\++|\*+)$")
+
+
+def _detect_bullet_focus_token(body: str) -> str | None:
+    """Return the bullet/focus token if *body* is exactly one such command.
+
+    Accepts an optional trailing ``.`` and surrounding whitespace.  Returns
+    the raw token (without the dot) or ``None`` when *body* is anything
+    else (including multi-command bodies or compound tactics).
+    """
+    if not body:
+        return None
+    stripped = body.strip()
+    if stripped.endswith("."):
+        stripped = stripped[:-1].strip()
+    if _BULLET_FOCUS_RE.fullmatch(stripped):
+        return stripped
+    return None
+
+
+def _focus_snapshot(pet: Any, state: Any) -> tuple[int, int] | None:
+    """Best-effort ``(open_goals, focus_depth)`` snapshot.
+
+    Returns ``None`` if the snapshot can't be obtained.  ``focus_depth``
+    is ``len(stack)`` — the number of suspended ``{ ... }`` focus
+    frames currently above the focused goal.
+    """
+    try:
+        complete = pet.complete_goals(state)
+        if complete is None:
+            return None
+        goals_n = len(complete.goals) if complete.goals is not None else 0
+        stack_n = len(complete.stack) if complete.stack is not None else 0
+        return goals_n, stack_n
+    except Exception:
+        return None
+
+
 def _is_timeout_eligible(tac: str) -> bool:
     """Check if a tactic can be wrapped with Rocq's Timeout command.
 
@@ -1784,6 +1826,17 @@ async def run_check(
 
     commands = _split_rocq_sentences(body) if body.strip() else []
 
+    # A single bullet / focus token (``{``, ``}``, ``-``/``+``/``*``
+    # runs) may arrive without a trailing ``.``, in which case the
+    # sentence splitter drops it.  Normalize so the command is actually
+    # executed and the focus payload can be reported.  Braces are sent
+    # bare — pet/Coq rejects a trailing ``.`` after ``{``/``}`` — while
+    # bullets take the period, matching ``run_step_multi``.
+    if not commands:
+        _bf_tok = _detect_bullet_focus_token(body)
+        if _bf_tok is not None:
+            commands = [_bf_tok if _bf_tok in ("{", "}") else _bf_tok + "."]
+
     entry, base_state_id, err = _resolve_check_base_state(from_state)
     if err:
         return _server._fail(lifespan_state, "rocq_check", err)
@@ -1842,6 +1895,17 @@ async def run_check(
         feedback_pairs: list[list[str]] = []
         total_feedback_size = 0
 
+        # When the entire body is a single bullet/focus token
+        # (``{``, ``}``, or a run of ``-``/``+``/``*``), capture a goal /
+        # focus-depth snapshot before executing so the response can tell
+        # the agent which subgoal is now in focus and how the stack
+        # changed.  Cheap (one ``complete_goals`` call) and only fires
+        # for the narrow bullet/focus case.
+        bullet_focus_token = _detect_bullet_focus_token(body) if is_single else None
+        focus_before: tuple[int, int] | None = (
+            _focus_snapshot(pet, state) if bullet_focus_token is not None else None
+        )
+
         for i, cmd in enumerate(commands):
             new_state, new_state_id, feedback_entry, failure = _run_one_check_command(
                 pet,
@@ -1879,7 +1943,7 @@ async def run_check(
             goals_text = "(goals unavailable)"
             complete = None
 
-        return _build_check_success_dict(
+        result = _build_check_success_dict(
             goals_text=goals_text,
             proof_finished=state.proof_finished,
             commands_run=len(commands),
@@ -1890,6 +1954,23 @@ async def run_check(
             stale_warning=stale_warning,
             complete=complete,
         )
+
+        # Enrich the response for bullet/focus commands so the agent
+        # can see the focus transition rather than just an empty
+        # ``goals`` string.  Additive — non-bullet bodies are
+        # untouched.
+        if bullet_focus_token is not None:
+            result["focus_command"] = bullet_focus_token
+            if focus_before is not None:
+                result["goals_before"] = focus_before[0]
+                result["focus_depth_before"] = focus_before[1]
+            if complete is not None:
+                goals_after = len(complete.goals) if complete.goals is not None else 0
+                stack_after = len(complete.stack) if complete.stack is not None else 0
+                result["goals_after"] = goals_after
+                result["focus_depth_after"] = stack_after
+
+        return result
 
     # Timeout strategy: both single and multi-command use two-tier when eligible
     if _timeout >= 1:

@@ -65,6 +65,50 @@ _MAX_LINE_CHAR_RANGE: int = 100_000
 # See coq-lsp 0.2.5+9.1: lang/diagnostic.ml.
 _LSP_SEVERITY_WARNING: int = 2
 
+# Max chars surfaced in ``file_diagnostics`` (file-level errors detected
+# by an out-of-band coqc check).  Bounded so the response payload
+# stays small in degenerate cases.
+_MAX_FILE_DIAGNOSTICS_LENGTH: int = 8_000
+
+
+def _coqc_file_diagnostics(
+    resolved_file: str, workspace: str, timeout: int = 30
+) -> str | None:
+    """Run coqc on *resolved_file* and return error text, or None.
+
+    Used to surface file-level errors that pet's RPC interface does not
+    expose (silent ``Require Import`` failures, type errors in
+    declarations before the user-targeted theorem).  Pet's
+    ``get_root_state`` returns zero feedback even when coqc reports
+    multiple errors against the same file, so the only reliable
+    diagnostic channel is coqc itself.
+
+    Best-effort: any exception (coqc absent, compile.py import failing,
+    timeout) returns None so the caller's primary work continues
+    unaffected.
+    """
+    try:
+        from rocq_mcp.compile import _run_coqc_file as _coqc_file
+    except Exception:
+        return None
+    try:
+        result = _coqc_file(resolved_file, workspace, timeout)
+    except Exception:
+        return None
+    if result.get("returncode", 0) == 0:
+        return None
+    stderr = result.get("stderr") or ""
+    # Strip lines that aren't part of an Error/Warning diagnostic.
+    # coqc's output typically interleaves "File ..., line N, characters
+    # ...:" preambles with the actual error body.  We keep enough
+    # context to recognise the failure.
+    error_text = stderr.strip()
+    if not error_text:
+        error_text = (result.get("stdout") or "").strip()
+    if not error_text:
+        return None
+    return _truncate_result(error_text, _MAX_FILE_DIAGNOSTICS_LENGTH)
+
 
 def _truncate_result(text: str, max_length: int) -> str:
     """Truncate *text* to *max_length* chars, appending an indicator if cut."""
@@ -1177,7 +1221,20 @@ async def run_toc(
                 output[:_MAX_QUERY_OUTPUT]
                 + f"\n... (truncated, {len(output)} total chars)"
             )
-        return {"success": True, "output": output or f"File: {file}\n  (empty)"}
+        resp: dict[str, Any] = {
+            "success": True,
+            "output": output or f"File: {file}\n  (empty)",
+        }
+        # When pet's outline is empty/trivial, run a coqc check to
+        # surface file-level errors.  Empty TOC could mean "file truly
+        # has no definitions" but in practice almost always means
+        # "imports failed and pet abandoned elaboration."  Confusing
+        # the two costs the user real time.
+        if not toc_result:
+            file_diagnostics = _coqc_file_diagnostics(file_path, workspace)
+            if file_diagnostics:
+                resp["file_diagnostics"] = file_diagnostics
+        return resp
 
     return await _server._run_with_pet(
         _do_toc,
@@ -1365,6 +1422,14 @@ def _build_theorem_start_result(
                 "reason": "not_found",
             }
             _attach_available_in_file(resp, avail)
+            # Surface upstream parse errors when the theorem appears to
+            # be absent.  If the file's earlier declarations failed,
+            # pet's symbol table never registered the target — the user
+            # benefits from seeing the actual cause, not just
+            # ``Theorem_not_found``.
+            file_diagnostics = _coqc_file_diagnostics(resolved_file, workspace)
+            if file_diagnostics:
+                resp["file_diagnostics"] = file_diagnostics
             _server._record_error(
                 lifespan_state, "rocq_start", e.message, reason="not_found"
             )
@@ -1387,7 +1452,7 @@ def _build_theorem_start_result(
         resolved_file=resolved_file,
     )
     goals = _try_get_goals(pet, state) or ""
-    return {
+    resp: dict[str, Any] = {
         "success": True,
         "state_id": state_id,
         "goals": goals,
@@ -1395,6 +1460,15 @@ def _build_theorem_start_result(
         "theorem": theorem,
         "proof_finished": getattr(state, "proof_finished", False),
     }
+    # Surface file-level errors detected by an out-of-band coqc check.
+    # Catches the silent-failure pattern where ``pet.start`` succeeds
+    # with a valid theorem statement but the file's imports / earlier
+    # declarations errored out — leaving the agent unaware that
+    # elaboration is degraded.  See test_import_failure_diagnostics.
+    file_diagnostics = _coqc_file_diagnostics(resolved_file, workspace)
+    if file_diagnostics:
+        resp["file_diagnostics"] = file_diagnostics
+    return resp
 
 
 def _build_preamble_start_result(

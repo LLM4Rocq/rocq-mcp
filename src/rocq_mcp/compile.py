@@ -1513,6 +1513,20 @@ def _leading_focus_token(text: str) -> tuple[str, int] | None:
     return tok, offset + m.end()
 
 
+def _is_focus_token(text: str) -> bool:
+    """True if *text* is exactly one focus/bullet token.
+
+    That is, ignoring surrounding whitespace, *text* is a lone ``{`` /
+    ``}`` brace or a single maximal run of one bullet character.  Used to
+    decide that a command must NOT have a terminating ``.`` appended:
+    Rocq rejects ``-.`` and friends.  ``- reflexivity`` is *not* a focus
+    token (it carries a trailing tactic) and does take a dot.
+    """
+    stripped = text.strip()
+    focus = _leading_focus_token(stripped)
+    return focus is not None and focus[1] == len(stripped)
+
+
 def _split_rocq_sentences(source: str) -> list[str]:
     """Split Rocq source into individual sentences.
 

@@ -46,7 +46,7 @@ from rocq_mcp.verify import _check_forbidden_commands
 import rocq_mcp.server as _server
 
 # _split_rocq_sentences is in compile — import directly (no cycle).
-from rocq_mcp.compile import _split_rocq_sentences
+from rocq_mcp.compile import _split_rocq_sentences, _is_focus_token
 
 # ---------------------------------------------------------------------------
 # Goal formatting helper (shared by run_check, run_step_multi)
@@ -2001,7 +2001,9 @@ async def run_step_multi(
 
         for tactic in tactics:
             tac = tactic.strip()
-            if tac not in ("{", "}") and not tac.endswith("."):
+            # Focus/bullet tokens ({, }, -, +, * runs) must stay bare:
+            # Rocq rejects a trailing dot (e.g. "-." is a syntax error).
+            if not _is_focus_token(tac) and not tac.endswith("."):
                 tac += "."
 
             per_tactic_budget = max(1, int(_timeout / len(tactics)))

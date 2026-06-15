@@ -17,6 +17,7 @@ import pytest
 from tests.conftest import PET_AVAILABLE
 from rocq_mcp.compile import (
     _find_sentence_end,
+    _is_focus_token,
     _leading_focus_token,
     _split_rocq_sentences,
 )
@@ -196,6 +197,30 @@ class TestSplitFocusTokens:
         # for the tactic/bullet bodies the splitter is used on; the test
         # pins the current behavior so a future change is deliberate.
         assert _split_rocq_sentences("* 2 = 4.") == ["*", "2 = 4."]
+
+
+class TestIsFocusToken:
+    """`_is_focus_token` — whole-string focus/bullet predicate.
+
+    Used by `run_step_multi` to decide a tactic must stay bare (Rocq
+    rejects ``-.``).  A bullet carrying a trailing tactic is NOT a focus
+    token and does take a terminating dot.
+    """
+
+    @pytest.mark.parametrize("tok", ["{", "}", "-", "--", "+", "+++", "*", "**"])
+    def test_lone_tokens_are_focus(self, tok):
+        assert _is_focus_token(tok) is True
+
+    def test_surrounding_whitespace_ignored(self):
+        assert _is_focus_token("  -  ") is True
+        assert _is_focus_token(" { ") is True
+
+    @pytest.mark.parametrize(
+        "tac",
+        ["- reflexivity", "intros", "intros.", "{ auto", "-+", "{| r |}", ""],
+    )
+    def test_non_focus(self, tac):
+        assert _is_focus_token(tac) is False
 
 
 # =========================================================================

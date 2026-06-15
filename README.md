@@ -6,10 +6,17 @@
 
 An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
 
+- **Eleven MCP tools** backed by [pet](https://github.com/ejgallego/coq-lsp) (Rocq's coq-lsp interactive backend).
+- **Interactive tools.** Inspect proof goals, search the environment, step through tactics.
+- **Staged verification.** Sandboxed audit of admits, axioms, and statement mismatches.
+- **State is cached across calls** for fast iteration.
+
+> **A note on this README.** The sections that follow are detailed reference documentation aimed primarily at **AI agents** consuming these tools (and the human operators briefing them).
+
 ## Prerequisites
 
-- **Rocq / Coq** -- `coqc` must be on your `PATH` (needed by all tools). If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). For **dune projects** (no `_CoqProject` but a `dune-project` file present), the server auto-detects load paths via `dune coq top` (once per `(coq.theory ...)` stanza, so multi-theory workspaces resolve cross-theory imports correctly) and writes a `_RocqProject` file in the workspace so that coq-lsp also picks them up. This generated file stays in the workspace and should be added to `.gitignore`. Otherwise it defaults to `-Q <workspace> Test`.
-- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- optional, needed only for the interactive tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`). If `pet` is not installed, the compile and verify tools still work.
+- **Rocq / Coq** -- `coqc` must be on your `PATH`. If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). For **dune projects** (no `_CoqProject` but a `dune-project` file present), the server auto-detects load paths via `dune coq top` (once per `(coq.theory ...)` stanza, so multi-theory workspaces resolve cross-theory imports correctly) and writes a `_RocqProject` file in the workspace so that coq-lsp also picks them up. This generated file stays in the workspace and should be added to `.gitignore`. Otherwise it defaults to `-Q <workspace> Test`.
+- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- **recommended**. Powers the interactive tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`) and the proof-state enrichment / multi-error walker on `rocq_compile_file`. Without `pet` you fall back to `coqc`-only operation: `rocq_compile`, `rocq_compile_file` (first error only, no goals), `rocq_verify`, `rocq_diag` — a substantial reduction in what an agent can do.
 - **Python 3.11+**
 
 ## Installation
@@ -36,7 +43,7 @@ The server exposes eleven MCP tools:
 | Tool | Description |
 |------|-------------|
 | **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). |
-| **`rocq_compile_file`** | Whole-file `coqc` compile of a `.v` file on disk. Best for finished proofs, axiom audits, and final verification. Preferred over `rocq_compile` for large files (source stays on disk, no full-text transmission over MCP). On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. Cleans up compilation artifacts but preserves the source file. Pass `keep_vo=True` to preserve the compiled `.vo`/`.vok`/`.vos` artifacts (useful when a sibling file `Require`s the result); otherwise the compiled-artifact family is cleaned. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). On failure with `pet` available, the response also carries an `errors` list with per-declaration entries — see the Multi-error reporting callout below. |
+| **`rocq_compile_file`** | Whole-file `coqc` compile of a `.v` file on disk. Best for finished proofs, axiom audits, and final verification. Preferred over `rocq_compile` for large files (source stays on disk, no full-text transmission over MCP). On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. Cleans up compilation artifacts but preserves the source file. Three opt-in tuning kwargs (`keep_vo`, `mode`, `timing`) — see the **Compile-file options** callout below. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). On failure with `pet` available, the response also carries an `errors` list with per-declaration entries — see the Multi-error reporting callout below. |
 | **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` or `rocq_compile_file` succeeds. |
 
 ### Interactive tools (pytanque-based, require `pet`)
@@ -55,7 +62,7 @@ The server exposes eleven MCP tools:
 
 | Tool | Description |
 |------|-------------|
-| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, recent errors, currently-live proof states. Use after `pet_restarted: True` to diagnose what happened, before a long `vm_compute` to check memory headroom, or **as an orchestrator's monitoring primitive** — call it between sub-agent dispatches to spot shared-pet contention (`live_states[*].file` shows entries from peer callers), accumulating RAM bloat, or a pile-up in `recent_errors`. Does not spawn pet if it is not running; safe to call without `pet` installed. |
+| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, system load average, recent errors, currently-live proof states. Use after `pet_restarted: True` to diagnose what happened, before a long `vm_compute` to check memory headroom, or **as an orchestrator's monitoring primitive** — call it between sub-agent dispatches to spot shared-pet contention (`live_states[*].file` shows entries from peer callers), accumulating RAM bloat, or a pile-up in `recent_errors`. Does not spawn pet if it is not running; safe to call without `pet` installed. |
 
 > **Stale file warning:** Interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`) read the `.v` file at session start and do not track subsequent edits. If another process or agent modifies the file while a session is active, the proof state becomes stale and tactics may fail or produce wrong results. In multi-agent setups, **work on a copy of the file** for interactive proving, or restart the session with `rocq_start` after edits. A `stale_warning` field is returned when a file modification is detected. See also the [Concurrency model](#concurrency-model) section below.
 
@@ -66,6 +73,12 @@ The server exposes eleven MCP tools:
 > **.vo rebuild warning:** When `rocq_compile_file` rewrites `.vo` artifacts in a workspace that has one or more active interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`), the response carries `vo_rebuild_warning: str` advising the other agents to call `rocq_start` again to refresh held dependency state. Quiet when no `.vo` changed, when no interactive session lives in this workspace, or when the workspace exceeds the internal scan cap. *Calling `rocq_compile_file` with `keep_vo=True` makes the `.vo` persist between calls, so subsequent compiles of the same file are more likely to trip this warning.*
 
 > **Multi-error reporting:** When `rocq_compile_file` fails (`reason: "compile_error"`) and `pet` is available, the response carries `errors: list[dict]` with per-declaration entries (`proof_name`, `kind`, `start_line`, `end_line`, `code`, `message`) covering errors in named declarations and top-level vernaculars (broken `Require`, broken `Notation`, etc.) reached via inter-chunk regions. This surfaces additional errors beyond the first one coqc reports; cascade failures within a single proof body are deduplicated. Collection stops at `ROCQ_COMPILE_MULTI_ERROR_CAP` (default 20; set to `0` to disable). The field can be present and **empty** (`errors: []`) when the walker ran but pet did not reproduce the coqc-reported failure — treat it as "no additional errors found" rather than "no errors at all." Quiet on successful compiles, when `pet` is unavailable, and on source-string `rocq_compile` (this feature is `rocq_compile_file` only).
+
+> **Compile-file options:** `rocq_compile_file` accepts three opt-in tuning kwargs. All default off — pure additions, no behavior change to the baseline call.
+>
+> - **`keep_vo=True`** preserves the produced `.vo`/`.vok`/`.vos` artifacts. Useful when a sibling file `Require`s the result; the default behavior is to clean every artifact except the source `.v`. *Combining `keep_vo=True` with `mode="vos"` produces only a `.vos`* — downstream full-mode `Require Import` will then fail with `"Unable to locate library ... (.vos file)"`. Use `keep_vo=True` with `mode="full"` when the sibling consumer expects a `.vo`.
+> - **`mode="vos"`** selects a fast statements-only pre-pass (`coqc -vos`). Skips proof bodies *entirely* — does NOT execute them — so it catches missing imports, statement type errors, holes, and notation conflicts in seconds, but accepts any proof body (`Theorem t : False. Proof. exact I. Qed.` passes under `"vos"`). Use as a cheap pre-pass during iteration, then run `mode="full"` for the real check.
+> - **`timing=True`** runs coqc with `-time` and adds a `timing: {total_sentences, top_slowest, last_completed}` response field carrying per-sentence diagnostics; `top_slowest` is capped at 5 by descending duration. On timeout, `last_completed` is woven into the error string: `"timed out after 590s. Last completed sentence: line 221 [Theorem.foo] (15.3s)"`. On a successful compile, `last_completed` is the file's literal final sentence (not a failure marker).
 
 > **Proof-tactics chain status:** When a `rocq_check` call finishes a proof (`proof_finished: True`), the server walks the LRU state table backward from the leaf to reconstruct `proof_tactics`. If an ancestor state was LRU-evicted, or (defensively) a cycle is detected, the walk cannot complete; the response then **omits** `proof_tactics` and `proof_hint` and carries `proof_tactics_status` (`"ancestor_evicted"` or `"cycle"`), `proof_tactics_broken_at: int` (the state id where the walk gave up), and a short `proof_tactics_hint` instead. Clients that ignore these keys see no half-chain — they never render a partial walk as a finished proof.
 
@@ -156,7 +169,7 @@ The remaining cross-agent costs are pure latency: workspace-swap thrash when pee
 
 **Agent-side recovery: `rocq_start(..., force_restart=True)`.**  When a `state_id` you actively depend on goes missing despite the LRU floor — typically because a peer just force-restarted pet — `rocq_start` with `force_restart=True` is the recovery.  This kills pet, clears the state table, respawns a fresh pet, and returns a new `state_id`.  Note that "fresh" is point-in-time: a different concurrent caller can `force_restart` again right after, so this is recovery, not enforced isolation.  For non-contention triggers (RAM bloat, indexing corruption) the same call applies.
 
-**Orchestrator-side monitoring: `rocq_diag`.**  When you cannot deploy a separate `rocq-mcp` per sub-agent (see the Claude Code escape hatch below for one workaround), `rocq_diag` is the natural primitive for spotting cross-agent interference.  Useful checks between sub-agent dispatches: `live_states[*].file` shows entries created by peer callers (sharing signal when agents are on disjoint files); `memory.pet_rss_mb` against `max_rss_mb_threshold` catches accumulated Fleche bloat before it forces a restart; `recent_errors` shows whether a peer just hit `lock_contended` / `memory_exhausted` / a `force_restart`.  Field reports suggest this tool is consistently underused — worth a checklist line in your orchestrator prompt.
+**Orchestrator-side monitoring: `rocq_diag`.**  When you cannot deploy a separate `rocq-mcp` per sub-agent (see the Claude Code escape hatch below for one workaround), `rocq_diag` is the natural primitive for spotting cross-agent interference.  Useful checks between sub-agent dispatches: `live_states[*].file` shows entries created by peer callers (sharing signal when agents are on disjoint files); `memory.pet_rss_mb` against `max_rss_mb_threshold` catches accumulated Fleche bloat before it forces a restart; `recent_errors` shows whether a peer just hit `lock_contended` / `memory_exhausted` / a `force_restart`; `load_average["1m"]` against the host CPU count distinguishes CPU saturation from a diverging tactic when a timeout fires (`None` on platforms without `os.getloadavg`).  Field reports suggest this tool is consistently underused — worth a checklist line in your orchestrator prompt.
 
 **Operator-side hardening:** the cleanest deployment is one `rocq-mcp` subprocess per concurrent agent.  Over stdio this happens naturally when each MCP client launches its own server; the case that needs care is parallel sub-agents within one client, which inherit the parent's MCP connections and share one `rocq-mcp`.  If you're orchestrating parallel Rocq work, prefer separate top-level invocations over one parent with concurrent sub-agents.
 
@@ -168,6 +181,19 @@ mcpServers:
       type: stdio
       command: rocq-mcp
 ```
+
+*Worktree per sub-agent.*  The escape hatch above isolates the `pet` subprocess; for filesystem isolation — so concurrent sub-agents can edit `.v` files without staling each other's interactive sessions (see *Stale file warning* above) — pair the per-sub-agent `mcpServers` entry with a separate `git worktree` per sub-agent, and point `ROCQ_WORKSPACE` at it:
+
+```yaml
+mcpServers:
+  - rocq-mcp:
+      type: stdio
+      command: rocq-mcp
+      env:
+        ROCQ_WORKSPACE: /path/to/worktree-A
+```
+
+Each worktree carries its own checkout, its own auto-generated `_RocqProject` (see *Prerequisites*), and its own scratch files — neither sub-agent can clobber the other's interactive sessions through a file edit, and `_RocqProject` regeneration in one worktree does not invalidate the other's load paths.
 
 **Per-call timeout override.**  Pytanque-based tools (those routed through `_run_with_pet`: `rocq_query`, `rocq_start`, `rocq_step_multi`, `rocq_check`, `rocq_assumptions`, `rocq_toc`, `rocq_notations`) accept a `timeout=<seconds>` kwarg that overrides `ROCQ_PET_TIMEOUT` for that one call (clamped to `ROCQ_QUERY_TIMEOUT_CAP`).  On a timeout, prefer bumping `timeout=` per-call rather than raising the global default.
 

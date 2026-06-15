@@ -1,6 +1,6 @@
 [project]
 name = "rocq-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server for Rocq/Coq proof development"
 license = "Apache-2.0"
 requires-python = ">=3.11"

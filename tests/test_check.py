@@ -740,6 +740,71 @@ class TestCheckProofTactics:
 
 
 # ---------------------------------------------------------------------------
+# TestCheckFocusDepth: focus_depth tracks bullet/brace nesting (real pet)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckFocusDepth:
+    """focus_depth on rocq_check reflects the live focus-stack nesting."""
+
+    @pytest.mark.asyncio
+    async def test_focus_depth_rises_in_brace_and_falls_after(
+        self, workspace, lifespan_state
+    ):
+        """Entering `{` deepens focus; `}` returns to the prior depth."""
+        from rocq_mcp.interactive import run_start, run_check
+
+        vfile = workspace / "focus_depth.v"
+        vfile.write_text(
+            "Theorem t : True /\\ True.\n"
+            "Proof. split.\n"
+            "{ exact I. }\n"
+            "exact I.\n"
+            "Qed.\n"
+        )
+
+        sr = await run_start(
+            file=str(vfile.relative_to(workspace)),
+            theorem="t",
+            workspace=str(workspace),
+            lifespan_state=lifespan_state,
+        )
+        assert sr["success"] is True
+        # Fresh proof, no open bullets/braces yet.
+        assert sr["focus_depth"] == 0
+
+        # Two subgoals after split, still unfocused.
+        after_split = await run_check(
+            body="split.",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=sr["state_id"],
+        )
+        assert after_split["success"] is True
+        base_depth = after_split["focus_depth"]
+
+        # Focusing the first subgoal pushes the rest onto the stack.
+        focused = await run_check(
+            body="{",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=after_split["state_id"],
+        )
+        assert focused["success"] is True
+        assert focused["focus_depth"] > base_depth
+
+        # Closing the brace unfocuses, returning to the prior depth.
+        closed = await run_check(
+            body="exact I. }",
+            timeout=30.0,
+            lifespan_state=lifespan_state,
+            from_state=focused["state_id"],
+        )
+        assert closed["success"] is True
+        assert closed["focus_depth"] == base_depth
+
+
+# ---------------------------------------------------------------------------
 # TestCheckMultiCommandTimeout: per-command Rocq timeout (TL-2)
 # ---------------------------------------------------------------------------
 

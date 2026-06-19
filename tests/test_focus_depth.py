@@ -50,11 +50,6 @@ class TestFocusDepthHelper:
 
         assert _focus_depth(_fake_goals(3)) == 3
 
-    def test_missing_stack_attr_is_zero(self):
-        from rocq_mcp.interactive import _focus_depth
-
-        assert _focus_depth(SimpleNamespace(stack=None)) == 0
-
 
 class TestGoalsWithDepth:
     """``_try_get_goals_with_depth`` backs the rocq_start builders."""

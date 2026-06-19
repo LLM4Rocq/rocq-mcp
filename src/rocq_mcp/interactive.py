@@ -133,8 +133,7 @@ def _focus_depth(complete: Any) -> int | None:
     """
     if complete is None:
         return None
-    stack = getattr(complete, "stack", None) or []
-    return len(stack)
+    return len(complete.stack)
 
 
 def _try_get_goals_with_depth(pet: Any, state: Any) -> tuple[str | None, int | None]:
@@ -144,15 +143,16 @@ def _try_get_goals_with_depth(pet: Any, state: Any) -> tuple[str | None, int | N
     """
     try:
         complete = pet.complete_goals(state)
+        goals_list = complete.goals if complete else []
+        return _format_goals(goals_list) or None, _focus_depth(complete)
     except Exception:
         return None, None
-    goals_list = complete.goals if complete else []
-    return _format_goals(goals_list) or None, _focus_depth(complete)
 
 
 def _try_get_goals(pet: Any, state: Any) -> str | None:
     """Best-effort goal retrieval.  Returns formatted text or None."""
-    return _try_get_goals_with_depth(pet, state)[0]
+    text, _ = _try_get_goals_with_depth(pet, state)
+    return text
 
 
 # ---------------------------------------------------------------------------

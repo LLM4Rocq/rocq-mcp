@@ -2507,9 +2507,10 @@ async def rocq_step_multi(
       tactics=["destruct n.", "induction n.", "case_eq n."]
 
     Each result entry includes a ``feedback`` field (truncated string)
-    when the tactic produces visible output (e.g., ``Print``, ``Search``),
-    and a ``focus_depth`` field — how many ``{...}`` / bullet focus frames
-    that tactic leaves open above the goal (0 at the top level).
+    when the tactic produces visible output (e.g., ``Print``, ``Search``).
+    Each *successful* entry also carries a ``focus_depth`` field — how
+    many ``{...}`` / bullet focus frames that tactic leaves open above
+    the goal (0 at the top level).
 
     **Canonical exploration pattern:** if the first few steps of a proof
     are a confident prefix, advance with ``rocq_check`` first and pass
@@ -2598,10 +2599,12 @@ async def rocq_check(
     as a list of ``[command, output]`` pairs (truncated per step at 50K
     chars).  Omitted when no command produces output.
 
-    Every success response carries ``focus_depth`` — how many ``{...}`` /
-    bullet focus frames are currently open above the goal (0 at the top
-    level) — so an agent stepping through nested subgoals can tell how
-    deep it is and whether a ``}`` is still owed.
+    When proof goals are available, the success response carries
+    ``focus_depth`` — how many ``{...}`` / bullet focus frames are
+    currently open above the goal (0 at the top level) — so an agent
+    stepping through nested subgoals can tell how deep its focus nesting
+    is.  (Omitted on empty-body checks and when goal state cannot be
+    retrieved, like the other goal-derived fields.)
 
     **Note:** If the underlying .v file is modified after rocq_start, the
     session state becomes stale. A ``stale_warning`` field is returned when

@@ -121,15 +121,38 @@ def _format_goals(goals_list: list[Any]) -> str:
     return result
 
 
-def _try_get_goals(pet: Any, state: Any) -> str | None:
-    """Best-effort goal retrieval.  Returns formatted text or None."""
+def _focus_depth(complete: Any) -> int | None:
+    """How many ``{...}`` / bullet focus frames are open above the goal.
+
+    Each suspended focus level is one entry in a ``complete_goals``
+    result's proof ``stack``, so ``len(stack)`` is the current nesting
+    depth: ``0`` in a flat, unfocused context, ``1`` just inside a ``{``
+    or a bullet, and so on.  Returns ``None`` only when *complete* itself
+    is ``None`` (no goal information — e.g. a non-proof state or an
+    upstream pet error).
+    """
+    if complete is None:
+        return None
+    return len(complete.stack)
+
+
+def _try_get_goals_with_depth(pet: Any, state: Any) -> tuple[str | None, int | None]:
+    """Best-effort ``(goals_text, focus_depth)`` from one ``complete_goals`` call.
+
+    Both elements are ``None`` if the call fails.
+    """
     try:
         complete = pet.complete_goals(state)
         goals_list = complete.goals if complete else []
-        text = _format_goals(goals_list)
-        return text or None
+        return _format_goals(goals_list) or None, _focus_depth(complete)
     except Exception:
-        return None
+        return None, None
+
+
+def _try_get_goals(pet: Any, state: Any) -> str | None:
+    """Best-effort goal retrieval.  Returns formatted text or None."""
+    text, _ = _try_get_goals_with_depth(pet, state)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -1333,15 +1356,18 @@ def _build_position_start_result(
         file_mtime=file_mtime,
         resolved_file=tracked_file,
     )
-    goals = _try_get_goals(pet, state) or ""
-    return {
+    goals, focus_depth = _try_get_goals_with_depth(pet, state)
+    result: dict[str, Any] = {
         "success": True,
         "state_id": state_id,
-        "goals": goals,
+        "goals": goals or "",
         "file": file,
         "theorem": theorem,
         "proof_finished": getattr(state, "proof_finished", False),
     }
+    if focus_depth is not None:
+        result["focus_depth"] = focus_depth
+    return result
 
 
 def _build_theorem_start_result(
@@ -1399,15 +1425,18 @@ def _build_theorem_start_result(
         file_mtime=file_mtime,
         resolved_file=resolved_file,
     )
-    goals = _try_get_goals(pet, state) or ""
-    return {
+    goals, focus_depth = _try_get_goals_with_depth(pet, state)
+    result: dict[str, Any] = {
         "success": True,
         "state_id": state_id,
-        "goals": goals,
+        "goals": goals or "",
         "file": file,
         "theorem": theorem,
         "proof_finished": getattr(state, "proof_finished", False),
     }
+    if focus_depth is not None:
+        result["focus_depth"] = focus_depth
+    return result
 
 
 def _build_preamble_start_result(
@@ -1741,6 +1770,9 @@ def _build_check_success_dict(
         result["shelved_goals"] = len(complete.shelf)
     if complete and complete.given_up:
         result["given_up_goals"] = len(complete.given_up)
+    depth = _focus_depth(complete)
+    if depth is not None:
+        result["focus_depth"] = depth
     if proof_finished and state_id is not None:
         path = _reconstruct_tactic_path(state_id)
         if path.status == "complete":
@@ -2037,6 +2069,9 @@ async def run_step_multi(
                     entry_dict["shelved_goals"] = len(complete.shelf)
                 if complete and complete.given_up:
                     entry_dict["given_up_goals"] = len(complete.given_up)
+                depth = _focus_depth(complete)
+                if depth is not None:
+                    entry_dict["focus_depth"] = depth
             except PetanqueError as e:
                 # If pet died, re-raise so outer handler detects it.
                 if not _server._pet_alive(lifespan_state.get("pet_client")):

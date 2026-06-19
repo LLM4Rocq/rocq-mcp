@@ -2801,7 +2801,9 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
       dependencies after switching.
     - **Process-global.** The change affects the whole server process, so
       *every* agent sharing this rocq-mcp instance is moved to the new
-      switch. Do not use in a shared multi-agent setup without coordination.
+      switch. Do not use in a shared multi-agent setup without coordination:
+      call ``rocq_diag`` first and check its ``live_states`` to confirm no
+      peer has an in-flight session before switching.
     - For a stable per-deployment switch, prefer pinning it at launch in the
       MCP client config (e.g. ``opam exec --switch=<name> -- ...`` as the
       server ``command``) rather than switching at runtime.
@@ -2870,9 +2872,18 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
         if not lock.acquire(timeout=lock_timeout):
             return False
         try:
-            # Single update() to narrow the window in which a lock-free
-            # reader (rocq_health) could observe a half-applied env.
-            os.environ.update({k: env[k] for k in _SWITCH_ENV_KEYS if k in env})
+            # Apply the new switch's env, then drop any switch-scoped keys the
+            # new switch does NOT set.  update() alone only overwrites keys
+            # present in the new env; a key the old switch set but the new one
+            # omits (e.g. a stale CAML_LD_LIBRARY_PATH / OPAM_LAST_ENV) would
+            # otherwise linger and mis-resolve a later lookup.  Compute both
+            # sets first so the mutation window a lock-free reader (rocq_health)
+            # can observe stays as narrow as possible.
+            new_env = {k: env[k] for k in _SWITCH_ENV_KEYS if k in env}
+            stale = [k for k in _SWITCH_ENV_KEYS if k not in env and k in os.environ]
+            os.environ.update(new_env)
+            for key in stale:
+                del os.environ[key]
             # Kill pet + clear the state table + invalidate the import cache
             # (via _pet_invalidation_hooks).  The next pet-routed call lazily
             # respawns pet under the new environment.

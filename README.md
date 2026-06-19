@@ -6,7 +6,7 @@
 
 An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
 
-- **Eleven MCP tools** backed by [pet](https://github.com/ejgallego/coq-lsp) (Rocq's coq-lsp interactive backend).
+- **Thirteen MCP tools** backed by [pet](https://github.com/ejgallego/coq-lsp) (Rocq's coq-lsp interactive backend).
 - **Interactive tools.** Inspect proof goals, search the environment, step through tactics.
 - **Staged verification.** Sandboxed audit of admits, axioms, and statement mismatches.
 - **State is cached across calls** for fast iteration.
@@ -36,7 +36,7 @@ uv pip install -e ".[dev]"
 
 ## Tools
 
-The server exposes eleven MCP tools:
+The server exposes thirteen MCP tools:
 
 ### Compilation tools (coqc-based, no pytanque needed)
 
@@ -63,6 +63,10 @@ The server exposes eleven MCP tools:
 | Tool | Description |
 |------|-------------|
 | **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, system load average, recent errors, currently-live proof states. Use after `pet_restarted: True` to diagnose what happened, before a long `vm_compute` to check memory headroom, or **as an orchestrator's monitoring primitive** — call it between sub-agent dispatches to spot shared-pet contention (`live_states[*].file` shows entries from peer callers), accumulating RAM bloat, or a pile-up in `recent_errors`. Does not spawn pet if it is not running; safe to call without `pet` installed. |
+| **`rocq_health`** | Toolchain health check: returns `ok` plus **which opam switch** the server is running on and the resolved `coqc` / `pet` binary paths + versions. An MCP server inherits its `PATH` / opam environment from whatever launched it (e.g. an `opam exec --switch=<name> -- …` wrapper), which can differ from your interactive shell — so call this first when `coqc` behaves like a different version than you expect, or when a proof that built before now fails. Read-only; does not spawn pet. (`rocq_diag` is for *runtime* health; `rocq_health` is for *toolchain* health.) |
+| **`rocq_switch`** | Change the running server's opam switch in-session: resolves the switch via `opam env`, applies it to the live process, and kills pet so the next call respawns under the new switch. **Sharp tool** — clears the state table (all live `state_id`s are discarded; restart sessions with `rocq_start`), and `.vo` artifacts built under the old switch may be ABI-incompatible. The change is process-global (affects every agent sharing this server). For a stable per-deployment switch, prefer pinning it at launch (see the **Switch selection** callout). |
+
+> **Switch selection:** The server resolves `coqc` and `pet` from the `PATH` / opam environment of **the process Claude Code (or your MCP client) launched** — *not* from your interactive shell. So the switch is fixed at server-launch time and can silently differ from `opam switch show` in your terminal. Pin it explicitly in the MCP client config, e.g. register the server command as `opam exec --switch=<name> -- uv run --directory <repo> rocq-mcp`, or set `env: { … }` (PATH / OPAM_SWITCH_PREFIX). Call `rocq_health` to see the switch the server is actually on. To change it: either edit the launch command and reconnect the MCP server (`/mcp` → reconnect, or restart the client), or call `rocq_switch(name=…)` to swap in-session — the latter clears all live `state_id`s and may leave `.vo` artifacts ABI-incompatible, so prefer the launch-time pin for a stable setup.
 
 > **Stale file warning:** Interactive sessions (`rocq_start` / `rocq_check` / `rocq_step_multi`) read the `.v` file at session start and do not track subsequent edits. If another process or agent modifies the file while a session is active, the proof state becomes stale and tactics may fail or produce wrong results. In multi-agent setups, **work on a copy of the file** for interactive proving, or restart the session with `rocq_start` after edits. A `stale_warning` field is returned when a file modification is detected. See also the [Concurrency model](#concurrency-model) section below.
 
@@ -101,6 +105,8 @@ The tools table above is reference-style.  This subsection is intent → tool: f
 | List definitions / lemmas in a file | `rocq_toc` |
 | List notations available at a position | `rocq_notations` |
 | Check pet health, memory, recent errors | `rocq_diag` |
+| Check the server is OK & which opam switch it runs on | `rocq_health` |
+| Change the server's opam switch in-session | `rocq_switch` |
 
 ## Recommended usage patterns
 
@@ -348,10 +354,11 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, 
 ```
 src/rocq_mcp/
   __init__.py            Package init
-  server.py              MCP server, 11 @mcp.tool wrappers, pet subprocess management
+  server.py              MCP server, 13 @mcp.tool wrappers, pet subprocess management
   compile.py             coqc-based tools: compile, compile_file, verify
   compile_enrichment.py  Compile-error-state orchestration (PET state capture)
   diag.py                rocq_diag snapshot builder (pet uptime, memory, recent errors)
+  health.py              rocq_health / rocq_switch backing: opam-switch detection, toolchain probe
   interactive.py         pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
   verify.py              Rocq lexer scanner, Module M. verification, Print Assumptions parsing
 tests/
@@ -369,6 +376,7 @@ tests/
   test_step_multi.py    Tests for rocq_step_multi
   test_toc.py           Tests for rocq_toc
   test_notations.py     Tests for rocq_notations
+  test_health.py        Tests for rocq_health / rocq_switch + switch detection
   test_timeout.py       Tests for timeout handling
   test_integration.py   Integration tests
 ```

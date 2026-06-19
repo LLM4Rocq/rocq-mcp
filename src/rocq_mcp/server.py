@@ -1688,6 +1688,14 @@ from rocq_mcp.diag import (  # noqa: E402
     _build_diag_snapshot,
     _sample_pet_rss_mb,
 )
+from rocq_mcp.health import (  # noqa: E402
+    build_health_snapshot,
+    compute_switch_env,
+    list_switches,
+    _detect_switch,
+    _resolve_binary,
+    _SWITCH_ENV_KEYS,
+)
 from rocq_mcp.compile_enrichment import (  # noqa: E402
     run_compile_file_with_state,
     run_compile_with_state,
@@ -2712,6 +2720,188 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
     if ctx is None:
         return _no_ctx_fail("rocq_diag")
     return _build_diag_snapshot(ctx.lifespan_context)
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_health
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def rocq_health(ctx: Context = None) -> dict[str, Any]:
+    """Health check: is the server OK, and which Rocq/opam switch is it on?
+
+    Call this first when something looks wrong (e.g. a proof that built
+    yesterday now fails, or ``coqc`` behaves like a different version than
+    your shell) — an MCP server inherits its ``PATH`` / opam environment
+    from whatever launched it, which can differ from your interactive
+    shell.  This tool reports the toolchain the server *actually* resolves.
+
+    Read-only: does NOT spawn pet (mirrors ``rocq_diag``).  Use
+    ``rocq_diag`` for runtime health (memory, live states, recent errors);
+    use this for *toolchain* health (which binaries / which switch).
+
+    Response shape:
+
+    - ``ok``: ``True`` when ``coqc`` resolves on ``PATH`` (the server can
+      do its core job).  Interactive capability is reported separately under
+      ``toolchain.pet`` so a coqc-only deployment still reads as healthy.
+    - ``server_version``: the rocq-mcp package version.
+    - ``switch``: the active switch name (e.g. ``"rocq9"``), or the project
+      path for a local ``_opam`` switch, or ``None`` for a non-opam install.
+    - ``switch_prefix``: the resolved ``OPAM_SWITCH_PREFIX``-style path
+      (``None`` when no switch was identified).
+    - ``switch_is_local``: ``True`` for a project-local (``_opam``) switch.
+    - ``switch_source``: how the switch was determined — ``"opam_env"``
+      (from ``$OPAM_SWITCH_PREFIX``, authoritative), ``"binary_path"``
+      (inferred from the resolved ``coqc`` path), or ``"unknown"``
+      (non-opam / unrecognised layout).
+    - ``toolchain``: ``{coqc: {path, version}, pet: {path, version,
+      pytanque_importable}}`` — the binaries the server resolves and their
+      versions (``None`` when a binary is missing).
+    - ``pet``: ``{running, pid}`` — whether the pet subprocess is currently
+      live (not spawned by this call).
+    - ``warnings``: human-readable notes (missing ``coqc`` / ``pet`` /
+      pytanque, or a switch that could not be identified).
+
+    To change switch, see ``rocq_switch`` — and note the caveats there:
+    live ``state_id``s and previously-built ``.vo`` artifacts do not carry
+    across a switch change.
+    """
+    if ctx is None:
+        return _no_ctx_fail("rocq_health")
+    # build_health_snapshot probes `coqc --print-version` / `pet --version`
+    # via subprocess; run off the event-loop thread.
+    return await asyncio.to_thread(build_health_snapshot, ctx.lifespan_context)
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_switch
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
+    """Switch the running server to a different opam switch, in-session.
+
+    Resolves *name* via ``opam env --switch <name> --set-switch``, applies
+    the resulting environment to the live server process, and kills the pet
+    subprocess so the next pet-routed call respawns under the new switch.
+    Subsequent ``coqc`` invocations resolve the new switch's binary too.
+
+    **This is a sharp tool — read before use:**
+
+    - **All live ``state_id``s are discarded.** The pet state table is
+      cleared (a state from the old switch is meaningless under the new
+      one). Any in-flight ``rocq_start`` / ``rocq_check`` session must be
+      restarted with ``rocq_start`` after switching.
+    - **``.vo`` artifacts may be ABI-incompatible.** Files compiled under
+      the old switch may fail to ``Require`` under the new one
+      (``Compiled library ... makes inconsistent assumptions``). Recompile
+      dependencies after switching.
+    - **Process-global.** The change affects the whole server process, so
+      *every* agent sharing this rocq-mcp instance is moved to the new
+      switch. Do not use in a shared multi-agent setup without coordination.
+    - For a stable per-deployment switch, prefer pinning it at launch in the
+      MCP client config (e.g. ``opam exec --switch=<name> -- ...`` as the
+      server ``command``) rather than switching at runtime.
+
+    Args:
+        name: The opam switch to activate (e.g. ``"rocq9"``). Must be an
+            installed switch; see ``rocq_health`` / ``opam switch list``.
+
+    On success returns the post-switch ``rocq_health`` snapshot, augmented
+    with ``switched: True``, ``previous_switch``, and a ``note`` describing
+    the invalidation. Failure envelopes (``{success: False, reason, error}``):
+
+    - ``reason="not_found"`` — ``name`` is not an installed switch; the
+      response carries ``available_switches: list[str]`` for typo recovery.
+    - ``reason="validation"`` — empty ``name``, or opam is unavailable /
+      its ``opam env`` output could not be parsed (the installed-switch
+      list was unavailable, so the name could not be classified).
+    - ``reason="lock_contended"`` — pet was busy and the switch was not
+      applied; retry once in-flight calls settle.
+    """
+    if ctx is None:
+        return _no_ctx_fail("rocq_switch")
+    lifespan_state = ctx.lifespan_context
+
+    if not name or not name.strip():
+        return _fail(
+            lifespan_state,
+            "rocq_switch",
+            "rocq_switch requires a non-empty `name` (the opam switch to "
+            "activate, e.g. 'rocq9').",
+            reason="validation",
+        )
+    name = name.strip()
+
+    previous = _detect_switch(_resolve_binary(ROCQ_COQC_BINARY))["switch"]
+
+    env, error = await asyncio.to_thread(compute_switch_env, name)
+    if env is None:
+        extra: dict[str, Any] = {}
+        switches = await asyncio.to_thread(list_switches)
+        name_unknown = switches is not None and name not in switches
+        if name_unknown:
+            extra["available_switches"] = switches
+        # A syntactically-fine name that does not resolve to an installed
+        # switch is a name-resolution failure ("not_found", paired with
+        # available_switches for typo recovery), matching rocq_start.  The
+        # empty-name guard above stays "validation" (input-shape).
+        return _fail(
+            lifespan_state,
+            "rocq_switch",
+            error or "switch change failed",
+            reason="not_found" if name_unknown else "validation",
+            **extra,
+        )
+
+    # Apply the new environment + kill pet under _pet_lock so the mutation
+    # cannot interleave with a concurrent _ensure_pet spawn (which holds the
+    # same lock and would otherwise adopt a pet started on the OLD env, then
+    # survive our _invalidate_pet on a live process — no broken pipe, no
+    # respawn).  Serializing here guarantees the next spawn sees the new env.
+    # The semaphore matches every other pet-mutating path's `async with sem`.
+    lock_timeout = (lifespan_state.get("pet_timeout") or ROCQ_PET_TIMEOUT) * 0.8
+
+    def _apply_switch() -> bool:
+        lock = _pet_lock  # local ref survives a _force_release_pet_lock swap
+        if not lock.acquire(timeout=lock_timeout):
+            return False
+        try:
+            # Single update() to narrow the window in which a lock-free
+            # reader (rocq_health) could observe a half-applied env.
+            os.environ.update({k: env[k] for k in _SWITCH_ENV_KEYS if k in env})
+            # Kill pet + clear the state table + invalidate the import cache
+            # (via _pet_invalidation_hooks).  The next pet-routed call lazily
+            # respawns pet under the new environment.
+            _invalidate_pet(lifespan_state)
+            return True
+        finally:
+            lock.release()
+
+    async with _get_pet_semaphore():
+        applied = await asyncio.to_thread(_apply_switch)
+    if not applied:
+        return _fail(
+            lifespan_state,
+            "rocq_switch",
+            "rocq_switch: pet is busy (lock contention); the switch was not "
+            "applied. Retry once in-flight pet calls settle.",
+            reason="lock_contended",
+        )
+
+    snapshot = await asyncio.to_thread(build_health_snapshot, lifespan_state)
+    snapshot["switched"] = True
+    snapshot["previous_switch"] = previous
+    snapshot["note"] = (
+        f"Switched to {snapshot['switch']!r}. pet was killed and the state "
+        "table cleared — restart any interactive session with rocq_start. "
+        ".vo artifacts built under the previous switch may be "
+        "ABI-incompatible; recompile dependencies as needed."
+    )
+    return snapshot
 
 
 # ---------------------------------------------------------------------------

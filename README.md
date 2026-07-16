@@ -16,7 +16,7 @@ An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover
 ## Prerequisites
 
 - **Rocq / Coq** -- `coqc` must be on your `PATH`. If the workspace contains a `_RocqProject` or `_CoqProject` file, the server parses it for load-path flags (`-Q`, `-R`, `-I`). For **dune projects** (no `_CoqProject` but a `dune-project` file present), the server auto-detects load paths via `dune coq top` (once per `(coq.theory ...)` stanza, so multi-theory workspaces resolve cross-theory imports correctly) and writes a `_RocqProject` file in the workspace so that coq-lsp also picks them up. This generated file stays in the workspace and should be added to `.gitignore`. Otherwise it defaults to `-Q <workspace> Test`.
-- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- **recommended**. Powers the interactive tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`) and the proof-state enrichment / multi-error walker on `rocq_compile_file`. Without `pet` you fall back to `coqc`-only operation: `rocq_compile`, `rocq_compile_file` (first error only, no goals), `rocq_verify`, `rocq_diag` — a substantial reduction in what an agent can do.
+- **pet** (from [coq-lsp](https://github.com/ejgallego/coq-lsp)) -- **recommended**. Powers the interactive tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, `rocq_check`, `rocq_step_multi`, `rocq_toc`, `rocq_notations`) and the proof-state enrichment / multi-error walker on `rocq_compile_file`. Without `pet` you fall back to `coqc`-only operation: `rocq_compile`, `rocq_compile_file` (first error only, no goals), `rocq_verify`, `rocq_diag`, `rocq_health`, `rocq_switch` — a substantial reduction in what an agent can do.
 - **Python 3.11+**
 
 ## Installation
@@ -126,10 +126,10 @@ documentation ships inside the server itself**:
   workflows.
 
 Every failure response carries `{success: false, error, reason}` with a
-fixed `reason` taxonomy — agents dispatch on `reason`, never on message
-text: `validation`, `not_found`, `timeout`, `crashed`, `memory_exhausted`,
-`lock_contended`, `unavailable`, `tactic_failed`, `query_rejected`,
-`compile_error`, `axiom_dependency`, `type_mismatch`.
+fixed 12-value `reason` taxonomy — agents dispatch on `reason`, never on
+message text: `validation`, `not_found`, `timeout`, `crashed`,
+`memory_exhausted`, `lock_contended`, `unavailable`, `tactic_failed`,
+`query_rejected`, `compile_error`, `axiom_dependency`, `type_mismatch`.
 
 ## Recommended usage patterns
 
@@ -397,31 +397,24 @@ Tests for pytanque-based tools (`rocq_query`, `rocq_assumptions`, `rocq_start`, 
 ```
 src/rocq_mcp/
   __init__.py            Package init
-  server.py              MCP server, 13 @mcp.tool wrappers, pet subprocess management
+  server.py              MCP app: instructions, 15 tool wrappers, resources, prompts
+  config.py              Env-derived configuration (most ROCQ_* knobs)
+  taxonomy.py            The failure-reason taxonomy (wire protocol)
+  envelope.py            Failure envelope + degraded-enrichment reporting
+  schemas.py             Output schemas for the high-dispatch tools
+  workspace.py           Workspace validation, project markers, dune/coqc flags
+  pet_runtime.py         pet subprocess lifecycle: lock, watchdog, _run_with_pet
   compile.py             coqc-based tools: compile, compile_file, verify
-  compile_enrichment.py  Compile-error-state orchestration (PET state capture)
-  diag.py                rocq_diag snapshot builder (pet uptime, memory, recent errors)
-  health.py              rocq_health / rocq_switch backing: opam-switch detection, toolchain probe
-  interactive.py         pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
-  verify.py              Rocq lexer scanner, Module M. verification, Print Assumptions parsing
-tests/
-  conftest.py           Shared fixtures
-  test_compile.py       Tests for rocq_compile
-  test_compile_file.py  Tests for rocq_compile_file
-  test_verify.py        Tests for rocq_verify
-  test_assumptions.py   Tests for rocq_assumptions
-  test_auto_solve.py    Tests for sentence utilities and step_multi auto-solving
-  test_server.py        Tests for server helpers (_format_error, _parse_project_flags, etc.)
-  test_format_error.py  Tests for error formatting
-  test_query.py         Tests for rocq_query (requires pet)
-  test_start.py         Tests for rocq_start (requires pet)
-  test_check.py         Tests for rocq_check (requires pet)
-  test_step_multi.py    Tests for rocq_step_multi
-  test_toc.py           Tests for rocq_toc
-  test_notations.py     Tests for rocq_notations
-  test_health.py        Tests for rocq_health / rocq_switch + switch detection
-  test_timeout.py       Tests for timeout handling
-  test_integration.py   Integration tests
+  compile_enrichment.py  Compile-error proof-state capture + multi-error walk
+  interactive.py         pytanque-based tools: start, check, step_multi, query,
+                         search, goal, assumptions, toc, notations
+  verify.py              Rocq lexer scanner, Module M verification, Print Assumptions parsing
+  proof_walk.py          Whole-file multi-error walker
+  diag.py                rocq_diag snapshot builder
+  health.py              rocq_health / rocq_switch backing
+  guides/*.md            Agent documentation served as MCP resources
+scripts/gen_docs.py      Regenerates the README tools table from the registry
+tests/                   Test suite
 ```
 
 ## License

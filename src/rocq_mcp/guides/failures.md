@@ -10,7 +10,7 @@ recorded into the `recent_errors` ring buffer that `rocq_diag` returns.
 |---|---|---|
 | `validation` | any tool, pre-pet | Input shape was wrong (mode conflict, oversize source, empty name...). Fix the arguments; do not retry verbatim. |
 | `not_found` | rocq_start, rocq_assumptions, rocq_switch | Name resolution failed (typo). The response carries recovery data — see `available_in_file` below / `available_switches` on rocq_switch. |
-| `timeout` | pet-routed tools | The call exceeded its budget. Pet was killed and restarted (`pet_restarted: true`). Retry with a larger per-call `timeout=` — see the timeout trap below. |
+| `timeout` | pet-routed + coqc tools | The call exceeded its budget. On pet-routed tools pet was killed and restarted (`pet_restarted: true`; held state_ids are gone); on coqc tools (`rocq_compile*`, `rocq_verify`) nothing was killed. Retry with a larger per-call `timeout=` — see the timeout trap below. |
 | `crashed` | pet-routed tools | Pet died or raised unexpectedly. If `pet_restarted: true`, pet was respawned; retry once, then check `rocq_diag`. |
 | `memory_exhausted` | pet-routed tools | Pet RSS breached `ROCQ_MAX_PET_RSS_MB`; pet was killed. Check `rocq_diag` memory section; avoid the offending `vm_compute` or raise the cap. |
 | `lock_contended` | pet-routed tools | Another call holds the pet lock (pet is NOT killed). Retry after in-flight calls settle; under multi-agent sharing see the concurrency guide. |
@@ -50,7 +50,10 @@ capture the interactive proof state at the error position:
 On `compile_error` with pet available, the response may carry
 `errors: list` — pet's structured walk of the whole file, one entry per
 failing declaration: `{proof_name, kind, start_line, end_line, code,
-message}`. This surfaces errors *beyond* the first one coqc reports;
+message, start_args}` — `start_args` is a ready-made `{file, line,
+character}` for `rocq_start`/`rocq_goal` at the failing declaration
+(lines 0-based). This surfaces errors *beyond* the first one coqc
+reports;
 cascade failures inside one proof body are deduplicated. The field can be
 **present and empty** (`errors: []`) when the walker ran but pet did not
 reproduce the coqc failure — read that as "no additional errors found",
@@ -63,17 +66,21 @@ On `not_found` from `rocq_start` / `rocq_assumptions`, the response
 includes `available_in_file: list[str]` — the file's defined names,
 sorted and capped. When capped: `available_in_file_truncated: true`,
 `available_in_file_total` (uncapped count) and `available_in_file_limit`
-(the active cap) are also present; call `rocq_toc` for the full list.
+(the active cap) are also present; call `rocq_toc` for the outline
+(itself char-capped).
 Fuzzy-match the requested name against this list to recover from typos.
 
 ## proof_tactics_status (broken chain on a finished proof)
 
 When `rocq_check` reports `proof_finished: true` it normally returns
-`proof_tactics` (the root-to-leaf tactic list). If an ancestor state was
-LRU-evicted or a cycle was detected, `proof_tactics` and `proof_hint` are
-omitted and the response carries `proof_tactics_status`
-(`"ancestor_evicted"` | `"cycle"`), `proof_tactics_broken_at` (the state
-id where the walk stopped) and `proof_tactics_hint`. You never see a
+`proof_tactics` (the root-to-leaf tactic list). The chain is
+materialized at each state's creation, so ancestor eviction can no
+longer break it; the only remaining break is the finished state itself
+being evicted before the response was assembled (LRU churn or a pet
+restart mid-call). Then `proof_tactics` and `proof_hint` are omitted
+and the response carries `proof_tactics_status: "ancestor_evicted"`
+(`"cycle"` is reserved but no longer produced), `proof_tactics_broken_at`
+(the finished state's id) and `proof_tactics_hint`. You never see a
 half-chain. Recovery: re-run the assembled tactic sequence you already
 know from your own transcript, or restart with `rocq_start` and replay.
 

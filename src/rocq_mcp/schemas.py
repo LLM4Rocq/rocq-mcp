@@ -1,6 +1,7 @@
 """Output schemas for the pilot tools (structured-content declarations).
 
-Design rules (tests/test_schemas.py pins them):
+Design rules (permissiveness and the taxonomy-sourced ``reason`` enum
+are pinned by tests/test_schemas.py):
 
 - **Permissive**: only ``success`` is required and
   ``additionalProperties`` stays ``true`` — every tool returns a union

@@ -381,10 +381,6 @@ async def _memory_watchdog(
         return
 
 
-# _notify/_progress/_log_info/_log_warning moved to rocq_mcp.envelope
-# (notification = reporting).  Re-bound below for import compatibility.
-
-
 async def _handle_pet_failure(
     lifespan_state: dict[str, Any],
     tool: str,

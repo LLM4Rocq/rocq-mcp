@@ -2639,7 +2639,7 @@ async def run_step_multi(
     Results are ephemeral — commit with ``rocq_check(body=..., from_state=...)``.
 
     When ``include_warnings=False``, per-tactic feedback drops entries at
-    LSP Severity (level 2).
+    LSP Warning severity (level 2).
 
     Identical outcomes are deduplicated: the first tactic reaching a
     proof state carries the full payload; subsequent tactics reaching

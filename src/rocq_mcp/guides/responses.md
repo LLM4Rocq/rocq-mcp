@@ -86,9 +86,9 @@ covers what shows up conditionally and how output size is bounded.
   cap and appends a "N more results" line — use it for broad `Search`
   patterns.
 - `include_warnings=False` drops LSP Warning-severity feedback entries
-  (6 tools accept this; keeps output compact on warning-heavy files).
-- `rocq_toc` caps the outline at 500 names; when capped the response
-  carries `available_in_file_truncated`-style overflow fields.
+  (7 tools accept this; keeps output compact on warning-heavy files).
+- `rocq_toc` returns the outline as a single `output` string under
+  the same 8,000-char cap — no per-name cap or overflow fields.
 
 ## rocq_search response
 
@@ -187,9 +187,10 @@ pet {path, version, pytanque_importable}}`, `pet {running, pid}`,
 
 | Control | Tools | Effect |
 |---|---|---|
-| `goals_format` | check (5 modes), start, step_multi (3 modes) | Goals representation: `pretty` / `structured` / `names_only`, plus check-only `diff` / `none` |
+| `goals_format` | check (5 modes), start, step_multi, goal (3 modes) | Goals representation: `pretty` / `structured` / `names_only`, plus check-only `diff` / `none` |
 | `include_raw` | rocq_assumptions | Opt back into the verbatim `raw_output` |
 | `max_results` | rocq_query | Cap Search hits before char truncation |
-| `include_warnings=False` | compile, compile_file, verify, query, check, step_multi | Drop warning-severity feedback |
-| `timeout=<s>` | all pet-routed + compile tools | Per-call budget (clamped to `ROCQ_QUERY_TIMEOUT_CAP`) |
+| `include_warnings=False` | compile, compile_file, verify, query, search, check, step_multi | Drop warning-severity feedback |
+| `timeout=<s>` | pet-routed tools | Per-call budget, clamped to `ROCQ_QUERY_TIMEOUT_CAP` (response carries `clamped_timeout`) |
+| `timeout=<s>` | compile, compile_file, verify | Per-call budget, used as-is (0 = `ROCQ_COQC_TIMEOUT` / `ROCQ_VERIFY_TIMEOUT`) |
 | Input cap | source/body/proof params | `ROCQ_MAX_SOURCE_SIZE` (default 1 MB) rejects oversize input |

@@ -167,9 +167,9 @@ def _check_timeout_config(pet_timeout: float, cap: int) -> str | None:
     """
     if pet_timeout > cap:
         return (
-            f"ROCQ_PET_TIMEOUT={pet_timeout} exceeds config.ROCQ_QUERY_TIMEOUT_CAP={cap}; "
+            f"ROCQ_PET_TIMEOUT={pet_timeout} exceeds ROCQ_QUERY_TIMEOUT_CAP={cap}; "
             f"calls without a per-call timeout= will park the pet lock longer "
-            f"than config.ROCQ_QUERY_TIMEOUT_CAP claims."
+            f"than ROCQ_QUERY_TIMEOUT_CAP claims."
         )
     return None
 
@@ -277,8 +277,7 @@ async def app_lifespan(server: Any) -> Any:
 # Always-visible server guidance.  With deferred tool loading (the default
 # in Claude Code) tool descriptions may not be in context until a tool is
 # looked up — these instructions are the one place cross-tool knowledge is
-# guaranteed to be visible.  Budget: keep under ~2,200 characters (enforced
-# by tests/test_mcp_surface.py).
+# guaranteed to be visible.  Budget: keep under ~2,200 characters.
 _SERVER_INSTRUCTIONS = """\
 Rocq/Coq proof tools: coqc-based batch compile/verify plus a held \
 interactive session (pet/coq-lsp) that keeps imports warm across calls.
@@ -302,9 +301,10 @@ unavailable, tactic_failed, query_rejected, compile_error, \
 axiom_dependency, type_mismatch. When a response carries pet_restarted: true, call \
 rocq_diag to see what happened.
 
-Timeouts: timeout=0 means "use the server default"; larger per-call \
-values are clamped to a server cap and the response then carries \
-clamped_timeout.
+Timeouts: timeout=0 means "use the server default". On session/query \
+tools larger per-call values are clamped to a server cap and the \
+response then carries clamped_timeout; compile/verify timeouts are \
+used as-is.
 
 Deep reference (MCP resources, fetch on demand): rocq://guide/workflows \
 (tool selection + proof patterns — read before a proof campaign), \
@@ -496,9 +496,9 @@ async def rocq_compile(
 
     Args:
         source: Complete .v file content, including imports.
-        workspace: Workspace directory; default config.ROCQ_WORKSPACE env var
+        workspace: Workspace directory; default ROCQ_WORKSPACE env var
             (see rocq://guide/responses for workspace resolution).
-        timeout: Seconds; 0 = config.ROCQ_COQC_TIMEOUT default.
+        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
         include_warnings: False drops warning-severity output.
     """
     resolved = _resolve_tool_envelope(
@@ -555,8 +555,9 @@ async def rocq_compile_file(
 
     Prefer this over ``rocq_compile`` for files on disk (the source is not
     resent over the transport); prefer ``rocq_start`` + ``rocq_check`` for
-    scratch iteration.  Compilation artifacts are cleaned up by default;
-    the source file is preserved.
+    scratch iteration.  The file's ``.vo``/``.vok``/``.vos`` artifacts
+    (including pre-existing ones) are overwritten and then deleted
+    unless ``keep_vo=True``; the source file is preserved.
 
     On failure: ``error_positions`` + ``hint``; with coq-lsp also
     ``state_capture_status`` (``"ok"`` → a live ``state_id`` to continue
@@ -570,7 +571,7 @@ async def rocq_compile_file(
         file: Path to the .v file (relative to workspace).
         workspace: Auto-detected from project markers when omitted
             (rocq://guide/responses).
-        timeout: Seconds; 0 = config.ROCQ_COQC_TIMEOUT default.
+        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
         include_warnings: False drops warning-severity output.
         keep_vo: Keep .vo/.vok/.vos after the compile (for sibling
             Require Import).  Footgun: with mode="vos" only a .vos is
@@ -645,7 +646,10 @@ async def rocq_verify(
 
     Failure ``reason`` values: ``compile_error``, ``axiom_dependency``
     (Admitted/admit or a non-whitelisted axiom), ``type_mismatch``,
-    ``timeout``, ``validation``.  On success ``verification_method``
+    ``timeout``, ``validation``; pet-side ``crashed`` /
+    ``memory_exhausted`` can surface from the internal structure
+    lookup (then with ``pet_restarted: true``).  On success
+    ``verification_method``
     reports the phase used (``module_m``, ``shared_defs``, ``direct`` —
     the last has weaker guarantees; see the README security model).
 
@@ -654,9 +658,10 @@ async def rocq_verify(
         problem_name: Unqualified theorem name (e.g. "add_comm").
         problem_statement: The original problem file content (with
             Admitted/Abort).
-        workspace: Workspace directory; default config.ROCQ_WORKSPACE.
-        timeout: Seconds; 0 = config.ROCQ_VERIFY_TIMEOUT default (budget spans
-            all verification phases).
+        workspace: Workspace directory; default ROCQ_WORKSPACE.
+        timeout: Seconds; 0 = ROCQ_VERIFY_TIMEOUT default (budget is
+            shared across phases; worst case ~2x when a sandbox phase
+            times out and direct verification retries).
         include_warnings: False drops warning-severity output.
     """
     resolved = _resolve_tool_envelope(
@@ -751,8 +756,8 @@ async def rocq_query(
         workspace: Auto-detected from project markers when omitted.
         max_results: Cap Search hits (recommended for broad patterns).
         include_warnings: False drops warning-severity feedback.
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; clamped to
-            config.ROCQ_QUERY_TIMEOUT_CAP.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
+            ROCQ_QUERY_TIMEOUT_CAP.
         from_state: Live state_id to query against (mutually exclusive
             with file).
     """
@@ -805,7 +810,7 @@ async def rocq_assumptions(
     defined in *file*, which sets up the exact environment so the right
     name resolves.  Returns ``assumptions: list["name : type"]`` (empty =
     closed under the global context; Admitted and Axiom/Parameter appear
-    here indistinguishably) plus ``raw_output``.
+    here indistinguishably); ``include_raw=True`` adds ``raw_output``.
 
     Timeout trap: the first call fetches opaque proofs from .vo files
     (slow on heavy imports) and a pet restart wipes that progress — set
@@ -818,10 +823,11 @@ async def rocq_assumptions(
         file: .v file where the theorem is defined (relative to
             workspace).
         workspace: Auto-detected from project markers when omitted.
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; set 180+ up front on
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; set 180+ up front on
             heavy imports.
-        include_raw: True additionally returns raw_output (the verbatim
-            Print Assumptions text; redundant with the parsed list).
+        include_raw: True additionally returns raw_output (the Print
+            Assumptions text, opaque-proof loader notices stripped;
+            redundant with the parsed list).
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_assumptions",
@@ -868,13 +874,13 @@ async def rocq_toc(
 
     No session needed.  Use it to find theorem names before
     ``rocq_start`` / ``rocq_assumptions``, or to orient in an unfamiliar
-    file.  Output capped at 500 names (overflow is flagged in the
-    response).
+    file.  Output is a plain-text outline capped at 8,000 characters
+    (a truncation marker reports the total).
 
     Args:
         file: Path to the .v file (relative to workspace).
         workspace: Auto-detected from project markers when omitted.
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for heavy imports.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_toc", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -922,8 +928,8 @@ async def rocq_notations(
         statement: The proposition/type to analyze, e.g.
             "forall n, n + 0 = n".
         preamble: Import lines for context (e.g. "Require Import QArith.").
-        workspace: Workspace directory; default config.ROCQ_WORKSPACE.
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT.
+        workspace: Workspace directory; default ROCQ_WORKSPACE.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_notations", ctx=ctx, workspace=workspace, timeout=timeout
@@ -997,7 +1003,7 @@ async def rocq_start(
         force_restart: DESTRUCTIVE — kills pet and clears every caller's
             states before starting.  Recovery-only (repeated state expiry,
             RAM bloat); never routine (rocq://guide/concurrency).
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for heavy imports.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
         goals_format: Goals representation — "pretty" (default),
             "structured", or "names_only".
     """
@@ -1051,8 +1057,11 @@ async def rocq_step_multi(
 
     Read-only exploration — the state table is untouched; commit the
     winner with ``rocq_check(from_state=<same state>, body=<tactic>)``.
-    Each result entry carries ``success``, ``goals``, ``proof_finished``,
-    ``focus_depth`` (and ``feedback`` when a tactic prints).  Advance a
+    Each entry carries ``success`` and ``time_ms``; successes add
+    ``proof_finished`` and ``goals_count``, the first entry per
+    distinct outcome adds ``goals``/``focus_depth`` (repeats carry
+    ``same_outcome_as``), failed tactics carry ``error`` (and
+    ``feedback`` when a tactic prints).  Advance a
     confident prefix with ``rocq_check`` FIRST, then branch from the new
     state — do not repeat the prefix inside every entry.  Tactic
     batteries and patterns: ``rocq://guide/workflows``.
@@ -1064,7 +1073,7 @@ async def rocq_step_multi(
             rocq_check).  Required; there is no implicit current state.
         include_warnings: False drops warning-severity feedback.
         timeout: Whole-batch seconds; each tactic gets
-            timeout/len(tactics).  0 = config.ROCQ_PET_TIMEOUT.
+            timeout/len(tactics).  0 = ROCQ_PET_TIMEOUT.
         goals_format: Goals representation for full entries — "pretty"
             (default), "structured", or "names_only".  Identical
             outcomes are deduplicated: repeats carry same_outcome_as
@@ -1145,7 +1154,7 @@ async def rocq_check(
             a previous rocq_check).  Required; no implicit current state.
         workspace: Accepted for compatibility; unused (the workspace
             comes from the state entry).
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for
             vm_compute/native_compute.
         include_warnings: False drops warning-severity feedback.
         goals_format: Goals representation — "pretty" (default string),
@@ -1423,8 +1432,8 @@ async def rocq_search(
         include_types: False returns names only (token-lean for broad
             queries).
         include_warnings: False drops warning-severity feedback.
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; clamped to
-            config.ROCQ_QUERY_TIMEOUT_CAP.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
+            ROCQ_QUERY_TIMEOUT_CAP.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_search", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -1481,7 +1490,8 @@ async def rocq_goal(
 
     Pure inspection: unlike ``rocq_start`` (which allocates a session
     state), this leaves the state table untouched — use it to peek at
-    goals mid-file or re-read a held state without LRU side effects.
+    goals mid-file or re-read a held state without allocating a new
+    entry (reading refreshes the state's LRU recency).
     Position mode uses rocq_start's cursor semantics (0-indexed, rounds
     forward through the sentence — rocq://guide/workflows).
     ``diff_from`` compares two live states (returns ``goals_diff``
@@ -1498,7 +1508,7 @@ async def rocq_goal(
             "names_only".
         diff_from: Another live state_id to diff against (requires
             from_state).
-        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_goal",
@@ -1615,12 +1625,11 @@ Method — use the held interactive session, never a coqc loop:
 1. Read `rocq://guide/workflows` if you have not already.
 2. `rocq_toc(file="{file}")` if you need to confirm the theorem name.
 3. `s = rocq_start(file="{file}", theorem="{theorem}")` — read the goals.
-4. Explore with `rocq_step_multi(from_state=s, tactics=[...])`.  Start
-   with the automation battery: ["trivial.", "reflexivity.",
-   "assumption.", "auto.", "eauto.", "tauto.", "intuition.", "lia.",
-   "lra.", "ring.", "firstorder."] (lia/lra/ring need the matching
-   imports), then structural steps ("intros.", "induction x.",
-   "destruct x.", "simpl.") as the goals demand.
+4. Explore with `rocq_step_multi(from_state=s, tactics=[...],
+   preset="auto")` — the preset appends the full automation battery
+   (deduped, capped at 20; see rocq://guide/workflows).  Add
+   structural steps ("intros.", "induction x.", "destruct x.",
+   "simpl.") as the goals demand.
 5. Commit each winning step with `rocq_check(from_state=..., body=...)`
    and continue from the returned state_id.  On tactic_failed, continue
    from last_valid_state_id — do not restart.

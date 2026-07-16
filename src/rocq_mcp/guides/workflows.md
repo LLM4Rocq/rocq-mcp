@@ -14,7 +14,7 @@ guide carries the patterns.
 | Run raw vernacular queries (Print / About / Locate / Check / Search) | `rocq_query` |
 | Compile a finished `.v` file (whole-file check, axiom audit) | `rocq_compile_file` |
 | Compile a finished proof from a string buffer | `rocq_compile` |
-| Probe a scratch file in `/tmp` | `rocq_start(file='/tmp/probe.v', theorem=...)` — **never `coqc /tmp/probe.v`** (coqc reloads all imports each call; the session keeps them warm) |
+| Probe a scratch file in `/tmp` | `rocq_start(file='/tmp/probe.v', theorem=..., workspace='/tmp')` — **never `coqc /tmp/probe.v`** (coqc reloads all imports each call; the session keeps them warm) |
 | Verify a proof matches its stated theorem | `rocq_verify` |
 | Audit which axioms a proof depends on | `rocq_assumptions` |
 | List definitions / lemmas in a file | `rocq_toc` |
@@ -87,10 +87,13 @@ allocated and the state table is not polluted:
 
 `rocq_start(preamble='Require Import ...')` sets up an import-only
 session — no project files needed. The import set is content-hashed and
-stays warm across iterations even when the lemma body changes. For a
-scratch file under `/tmp` that needs the project's load path, keep the
-file name stable across iterations (e.g. `/tmp/probe.v`) — Fleche caches
-per file path, so rotating probe names defeats the warmth.
+stays warm across iterations even when the lemma body changes. For
+scratch iteration that needs the project's load path, put the probe
+file *inside* the workspace — files outside the workspace are
+rejected. For a self-contained probe under `/tmp`, pass
+`workspace='/tmp'` and keep the file name stable across iterations
+(e.g. `/tmp/probe.v`) — Fleche caches per file path, so rotating
+probe names defeats the warmth.
 
 ## Position semantics (rocq_start by position)
 
@@ -129,7 +132,7 @@ prefix its task prompt with:
       1. Consult project-specific Rocq guidance first (CLAUDE.md,
          AGENTS.md, or a Skill if available).
       2. For scratch iteration on a single proof, use rocq-mcp:
-           rocq_start file=/tmp/<name>.v theorem=<lemma>
+           rocq_start file=/tmp/<name>.v theorem=<lemma> workspace=/tmp
            rocq_step_multi tactics=[...]   (NOT  coqc /tmp/<name>.v)
       3. Use `coqc` only for: full-project rebuilds, axiom audits via
          `Print Assumptions`, and final compile verification.

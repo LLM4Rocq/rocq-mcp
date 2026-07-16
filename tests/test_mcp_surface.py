@@ -98,6 +98,64 @@ class TestToolInventory:
             assert tool.annotations is not None, f"{name} has no annotations"
             assert tool.annotations.title, f"{name} has no title"
 
+    async def test_description_budgets(self, surface):
+        """Every rendered description fits Claude Code's ~2KB deferred
+        budget untruncated, and the total stays lean (was 37.6K chars
+        before the diet)."""
+        _, _, tools = surface
+        total = 0
+        for name, tool in tools.items():
+            size = len(tool.description or "")
+            total += size
+            assert size <= 2_000, f"{name} description is {size} chars (> 2000)"
+        assert total <= 15_000, f"descriptions total {total} chars (> 15000)"
+
+    async def test_description_first_line_is_the_contract(self, surface):
+        """The first line decides tool selection — it must be a sentence,
+        not a fragment or a heading."""
+        _, _, tools = surface
+        for name, tool in tools.items():
+            first = (tool.description or "").strip().splitlines()[0]
+            assert first.endswith((".", "?")), f"{name}: {first!r}"
+            assert len(first) <= 100, f"{name} first line too long: {len(first)}"
+
+
+class TestResourcesAndPrompts:
+    async def test_guides_are_served(self):
+        from fastmcp import Client
+
+        from rocq_mcp.server import mcp
+
+        async with Client(mcp) as client:
+            uris = {str(r.uri) for r in await client.list_resources()}
+            assert uris == {
+                "rocq://guide/workflows",
+                "rocq://guide/failures",
+                "rocq://guide/concurrency",
+                "rocq://guide/responses",
+            }
+            content = await client.read_resource("rocq://guide/workflows")
+            assert "rocq_step_multi" in content[0].text
+            assert content[0].mimeType == "text/markdown"
+
+    async def test_prompts_render(self):
+        from fastmcp import Client
+
+        from rocq_mcp.server import mcp
+
+        async with Client(mcp) as client:
+            names = {p.name for p in await client.list_prompts()}
+            assert names == {"prove_theorem", "debug_compile_error"}
+            got = await client.get_prompt(
+                "prove_theorem", {"file": "A.v", "theorem": "t_ok"}
+            )
+            text = got.messages[0].content.text
+            assert "t_ok" in text and "rocq_start" in text and "rocq_verify" in text
+
+    async def test_instructions_point_at_the_guides(self, surface):
+        instructions, _, _ = surface
+        assert "rocq://guide/workflows" in instructions
+
 
 class TestAnnotations:
     async def test_hints_match_the_table(self, surface):

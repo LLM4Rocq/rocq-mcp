@@ -2802,37 +2802,42 @@ class TestVoRebuildWarning:
 
 
 # =========================================================================
-# README documentation patterns smoke test
+# Usage-pattern documentation smoke test
 # =========================================================================
 
 
-class TestReadmeUsagePatterns:
-    """Catch accidental deletion of the §1.8 'Recommended usage patterns' sections.
+class TestUsagePatternDocs:
+    """Catch accidental deletion of the usage-pattern documentation.
 
-    Pure docs assertion — no Rocq invocation.  If these sections are
-    renamed deliberately, update this test.
+    The patterns moved from the README into the agent-facing workflows
+    guide (served as the MCP resource ``rocq://guide/workflows``); the
+    README keeps pointers.  Pure docs assertion — no Rocq invocation.
+    If sections are renamed deliberately, update this test.
     """
 
-    def _readme_text(self) -> str:
-        readme = Path(__file__).resolve().parent.parent / "README.md"
-        return readme.read_text(encoding="utf-8")
+    def _guide_text(self) -> str:
+        guide = (
+            Path(__file__).resolve().parent.parent / "src/rocq_mcp/guides/workflows.md"
+        )
+        return guide.read_text(encoding="utf-8")
 
-    def test_recommended_patterns_section_present(self):
-        readme = self._readme_text()
-        assert "## Recommended usage patterns" in readme
-
-    def test_multi_tactic_exploration_subsection_present(self):
-        readme = self._readme_text()
-        assert "Multi-tactic exploration" in readme
+    def test_multi_tactic_exploration_pattern_present(self):
+        guide = self._guide_text()
+        assert "Multi-tactic exploration" in guide
         # Canonical example references both tools.
-        assert "rocq_check" in readme
-        assert "rocq_step_multi" in readme
+        assert "rocq_check" in guide
+        assert "rocq_step_multi" in guide
 
-    def test_imports_and_scopes_subsection_present(self):
-        readme = self._readme_text()
-        assert "Imports and scopes in `rocq_query`" in readme
+    def test_imports_and_scopes_pattern_present(self):
+        guide = self._guide_text()
+        assert "Imports and scopes in rocq_query" in guide
         # Names the parameter agents should reach for.
-        assert "preamble=" in readme
+        assert "preamble=" in guide
+
+    def test_readme_points_at_the_guides(self):
+        readme = Path(__file__).resolve().parent.parent / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        assert "rocq://guide/workflows" in text
 
 
 # ---------------------------------------------------------------------------

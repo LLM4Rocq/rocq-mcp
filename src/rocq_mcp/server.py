@@ -209,6 +209,12 @@ rocq_diag to see what happened.
 Timeouts: timeout=0 means "use the server default"; larger per-call \
 values are clamped to a server cap and the response then carries \
 clamped_timeout.
+
+Deep reference (MCP resources, fetch on demand): rocq://guide/workflows \
+(tool selection + proof patterns — read before a proof campaign), \
+rocq://guide/failures (recovery playbook), rocq://guide/concurrency \
+(sharing this server between agents), rocq://guide/responses \
+(field-level reference).
 """
 
 mcp = FastMCP(
@@ -1654,47 +1660,24 @@ async def rocq_compile(
     include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Compile a finished .v file via coqc.
+    """Compile Rocq source from a string buffer via coqc.
 
-    For *scratch iteration* on a single proof, prefer the interactive tools:
+    For files on disk use ``rocq_compile_file``; for iterating on a proof
+    use ``rocq_start`` + ``rocq_check`` (coqc reloads every import per
+    call, the interactive session does not).
 
-    - ``rocq_start`` opens a held session (imports stay warm across
-      attempts).
-    - ``rocq_check`` runs a candidate proof body against a held state.
-    - ``rocq_step_multi`` tries several tactics at once against a held
-      state and reports which succeeded.
-
-    Use ``rocq_compile`` for finished proofs, axiom audits, and final
-    verification — coqc reloads all imports per call (often several
-    seconds on heavy library imports).
-
-    On failure, the result includes ``error_positions`` and a ``hint``.
-    When coq-lsp is available in the active MCP session, the result
-    also includes ``state_capture_status``:
-
-      - ``"ok"``: proof state was captured at the error position; the
-        result also includes ``state_id``, ``goals``, ``file``,
-        ``theorem``, and ``proof_finished``.  Recover via
-        ``rocq_check(from_state=state_id)`` or
-        ``rocq_step_multi(from_state=state_id)``.
-      - ``"outside_proof"``: error is outside any open proof; no
-        ``state_id`` is returned.  Follow the original ``hint``.
-      - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
-        ``"unavailable"`` / ``"memory_exhausted"`` /
-        ``"no_position"``: enrichment did not
-        succeed; follow the original ``hint`` (typically
-        ``rocq_start(file=..., line=..., character=...)``).
+    On failure: ``error_positions``, a ``hint`` naming the next call, and
+    (with coq-lsp available) ``state_capture_status`` — ``"ok"`` means the
+    response carries a live ``state_id`` to continue from via
+    ``rocq_check(from_state=...)``.  Full recovery matrix:
+    ``rocq://guide/failures``.
 
     Args:
-        source: Complete Rocq (.v) file content to compile.
-        workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
-        timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
-        include_warnings: If True (default), include deduplicated warnings
-            before the error in the output.  Set to False to get only the
-            error diagnostic, which keeps context compact.
-
-    On ``pet_restarted: True`` (state-capture path crashed pet), call
-    ``rocq_diag`` for memory headroom and recent error history.
+        source: Complete .v file content, including imports.
+        workspace: Workspace directory; default ROCQ_WORKSPACE env var
+            (see rocq://guide/responses for workspace resolution).
+        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
+        include_warnings: False drops warning-severity output.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_compile",
@@ -1745,132 +1728,37 @@ async def rocq_compile_file(
     timing: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Compile a finished .v file on disk via coqc.
+    """Compile a .v file on disk via coqc — whole-file check and final verification.
 
-    For *scratch iteration* on a single proof, prefer the interactive tools:
+    Prefer this over ``rocq_compile`` for files on disk (the source is not
+    resent over the transport); prefer ``rocq_start`` + ``rocq_check`` for
+    scratch iteration.  Compilation artifacts are cleaned up by default;
+    the source file is preserved.
 
-    - ``rocq_start`` opens a held session (imports stay warm across
-      attempts).
-    - ``rocq_check`` runs a candidate proof body against a held state.
-    - ``rocq_step_multi`` tries several tactics at once against a held
-      state and reports which succeeded.
-
-    Use ``rocq_compile_file`` for whole-file verification, axiom audits,
-    and final compile — coqc reloads all imports per call (often several
-    seconds on heavy library imports).  Preferred over ``rocq_compile``
-    for large files because the source stays on disk (avoids transmitting
-    the full text through the MCP transport).
-
-    On failure, the result includes ``error_positions`` and a ``hint``.
-    When coq-lsp is available in the active MCP session, the result
-    also includes ``state_capture_status``:
-
-      - ``"ok"``: proof state was captured at the error position; the
-        result also includes ``state_id``, ``goals``, ``file``,
-        ``theorem``, and ``proof_finished``.  Recover via
-        ``rocq_check(from_state=state_id)`` or
-        ``rocq_step_multi(from_state=state_id)``.
-      - ``"outside_proof"``: error is outside any open proof; no
-        ``state_id`` is returned.  Follow the original ``hint``.
-      - ``"timeout"`` / ``"crashed"`` / ``"lock_contended"`` /
-        ``"unavailable"`` / ``"memory_exhausted"`` /
-        ``"no_position"``: enrichment did not
-        succeed; follow the original ``hint`` (typically
-        ``rocq_start(file=..., line=..., character=...)``).
-
-    On a ``compile_error`` failure with coq-lsp available, the result
-    may also include ``errors``: a list of per-proof errors discovered
-    by walking the file through pet (one entry per failing chunk).
-    Each entry is ``{proof_name, kind, start_line, end_line, code,
-    message}``.  Complements ``error_positions`` — the latter is
-    coqc's raw parse of the first diagnostic, while ``errors`` is
-    pet's structured walk of the whole file.  The field may be
-    *present and empty* (``errors: []``) when the walker ran but pet
-    did not reproduce the coqc-reported failure — treat this as "no
-    additional errors found" rather than "no errors at all."  Absent
-    on success, when coq-lsp is unavailable, when the walker could
-    not run, and when ``ROCQ_COMPILE_MULTI_ERROR_CAP=0`` (feature
-    disabled).  Tune via ``ROCQ_COMPILE_MULTI_ERROR_CAP`` (default 20,
-    max entries) and ``ROCQ_COMPILE_MULTI_ERROR_TIMEOUT`` (default
-    5.0s, per-``pet.run`` budget inside the walker).
-
-    Compilation artifacts (``.vo``/``.vok``/``.vos``/``.glob``/``.aux``)
-    are cleaned up by default; the source file is preserved.  Set
-    ``keep_vo=True`` to retain the compiled-artifact family
-    (``.vo``/``.vok``/``.vos``) while still cleaning the diagnostic
-    artifacts (``.glob``/``.aux``/``.vio``/``.timing``/``.coqaux``).
-    Typical use: compiling a file whose ``.vo`` will be imported by a
-    sibling ``.v`` in the same workspace, or incremental compile loops
-    that want to avoid rebuilding unchanged dependencies.
-
-    When the call rewrites ``.vo`` files in a workspace that has active
-    interactive sessions, the result also includes ``vo_rebuild_warning``:
-    a soft advisory naming the workspace and the count of potentially
-    affected sessions, with a hint to call ``rocq_start`` again to refresh
-    held dependency state.  Quiet when no ``.vo`` changed, when no
-    interactive session in this workspace exists, or when the workspace
-    exceeds ``_VO_SCAN_FILE_CAP`` (.vo paths).  Setting ``keep_vo=True``
-    makes this warning *more likely to fire* on subsequent
-    ``rocq_compile_file`` calls in the same workspace: the produced
-    ``.vo`` now persists between calls, so any later compile that
-    rewrites it is observable as a fresh mtime delta.
+    On failure: ``error_positions`` + ``hint``; with coq-lsp also
+    ``state_capture_status`` (``"ok"`` → a live ``state_id`` to continue
+    from) and ``errors`` — a per-declaration multi-error list for the
+    whole file (may be present-and-empty, meaning "no additional errors
+    found").  May carry ``vo_rebuild_warning`` when the compile rewrites
+    ``.vo`` files under active interactive sessions.  Recovery matrix:
+    ``rocq://guide/failures``; field details: ``rocq://guide/responses``.
 
     Args:
         file: Path to the .v file (relative to workspace).
-        workspace: Workspace directory.  If omitted, auto-detected by walking
-            up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
-            ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
-            (default: cwd).
-        timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
-        include_warnings: If True (default), include deduplicated warnings
-            before the error in the output.  Set to False to get only the
-            error diagnostic, which keeps context compact.
-        keep_vo: If True, preserve the ``.vo``/``.vok``/``.vos`` outputs
-            after coqc returns (diagnostic artifacts are still cleaned).
-            Default False matches today's "clean everything but the
-            source" behavior.  Useful when a sibling file in the same
-            workspace will ``Require Import`` the result.  **Note**:
-            combining ``keep_vo=True`` with ``mode="vos"`` produces
-            only a ``.vos`` artifact; downstream files compiled in
-            ``mode="full"`` will fail with ``"Unable to locate
-            library ... (while searching for a .vos file)"`` — use
-            ``mode="full" keep_vo=True`` when the sibling consumer
-            expects a ``.vo``.
-        mode: Which coqc pass to run.  ``"full"`` (default) is today's
-            behavior — coqc fully elaborates every proof body.  ``"vos"``
-            adds ``-vos`` so coqc *skips proof bodies entirely* — it
-            does NOT execute them.  ``"vos"`` is fast and catches
-            missing imports, statement type errors, holes left in
-            statements, and notation conflicts.  It does NOT validate
-            proofs: a ``Theorem t : False. Proof. exact I. Qed.``
-            passes under ``"vos"``.  Use it as a cheap pre-pass during
-            iteration, then run ``"full"`` for the real check.
-            ``"vos"`` produces a ``.vos`` artifact rather than a ``.vo``.
-        timing: If True, invoke coqc with ``-time`` and attach a
-            ``timing`` field to the response with per-sentence
-            diagnostics — ``{"total_sentences": int, "top_slowest":
-            list[{line, characters, name, duration_seconds}],
-            "last_completed": {...} | None}``.  ``top_slowest`` holds
-            up to 5 entries sorted by descending duration.  On
-            timeout, ``last_completed`` is the final sentence coqc
-            finished and the ``error`` string names it so "timed out
-            after 590s" becomes "Last completed sentence: line 221
-            [Theorem.foo] (15.3s)."  On a successful compile,
-            ``last_completed`` is the file's literal final sentence
-            (not a failure marker).  Default False is zero-overhead.
-
-    The response envelope additionally carries several optional fields
-    depending on flags / failure mode: ``error_positions`` and
-    ``state_capture_status`` on ``reason="compile_error"`` (see the
-    ``state_capture_status`` paragraph above); ``errors`` per-declaration
-    list when ``pet`` is available (see the Multi-error callout in the
-    README); ``vo_rebuild_warning`` when the call rewrites ``.vo``
-    artifacts in a workspace with active sessions; ``clamped_timeout``
-    when the per-call timeout was clamped by ``ROCQ_QUERY_TIMEOUT_CAP``;
-    ``timing`` when ``timing=True``.
-
-    On ``pet_restarted: True`` (state-capture path crashed pet), call
-    ``rocq_diag`` for memory headroom and recent error history.
+        workspace: Auto-detected from project markers when omitted
+            (rocq://guide/responses).
+        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
+        include_warnings: False drops warning-severity output.
+        keep_vo: Keep .vo/.vok/.vos after the compile (for sibling
+            Require Import).  Footgun: with mode="vos" only a .vos is
+            produced and downstream full-mode imports fail — pair keep_vo
+            with mode="full".
+        mode: "full" (default) elaborates every proof; "vos" skips proof
+            bodies ENTIRELY — a fast statement/import pre-pass that accepts
+            any proof body, so always finish with "full".
+        timing: Attach per-sentence timing {total_sentences, top_slowest,
+            last_completed}; on timeout the error names the last completed
+            sentence.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_compile_file",
@@ -1924,40 +1812,29 @@ async def rocq_verify(
     include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Verify that a proof actually proves the original statement.
+    """Verify a proof proves the original statement — sandboxed admit/axiom/statement check.
 
-    Wraps the proof in a Module M sandbox and checks that the theorem
-    matches the original problem_statement. Catches type redefinition,
-    Admitted/Abort, custom axioms, and statement mismatches. Standard
-    mathematical axioms (classical logic, Reals, etc.) are accepted.
+    Wraps the proof in a Module M sandbox: catches type redefinition,
+    Admitted/Abort, custom axioms, and statement mismatches; standard
+    library axioms (classical logic, Reals, ...) are accepted.  Run after
+    a successful compile.  This is the *trust decision*;
+    ``rocq_assumptions`` is the raw axiom listing.
 
-    Run this after rocq_compile succeeds to confirm correctness.
+    Failure ``reason`` values: ``compile_error``, ``axiom_dependency``
+    (Admitted/admit or a non-whitelisted axiom), ``type_mismatch``,
+    ``timeout``, ``validation``.  On success ``verification_method``
+    reports the phase used (``module_m``, ``shared_defs``, ``direct`` —
+    the last has weaker guarantees; see the README security model).
 
     Args:
-        proof: The complete proof file content (including imports).
-        problem_name: The unqualified theorem name (e.g., "add_comm", not "Nat.add_comm").
-        problem_statement: The original problem file content (with Admitted/Abort).
-        workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
-        timeout: Verification timeout in seconds (default: ROCQ_VERIFY_TIMEOUT env var).
-        include_warnings: If True (default), include deduplicated warnings
-            before the error in the output.  Set to False for compact errors.
-
-    Returns the unified envelope ``{success, error, reason, ...}``.
-    On failure, ``reason`` is one of:
-        - ``"validation"``: invalid identifier, oversize source, malformed input.
-        - ``"compile_error"``: the proof failed to compile.
-        - ``"axiom_dependency"``: the proof relies on Admitted, ``admit``, or
-          a custom (non-standard) axiom.
-        - ``"type_mismatch"``: Phase 3 found that the proof's type differs
-          from the problem's type.
-        - ``"timeout"``: verification exceeded the budget across all phases.
-
-    On success, ``assumptions`` and ``verification_method`` describe how
-    the verdict was reached (``module_m``, ``shared_defs``, ``direct``).
-
-    On ``pet_restarted: True`` (Phase 2 ``rocq_query`` path crashed pet
-    while extracting shared definitions), call ``rocq_diag`` for memory
-    headroom and recent error history.
+        proof: Complete proof file content, including imports.
+        problem_name: Unqualified theorem name (e.g. "add_comm").
+        problem_statement: The original problem file content (with
+            Admitted/Abort).
+        workspace: Workspace directory; default ROCQ_WORKSPACE.
+        timeout: Seconds; 0 = ROCQ_VERIFY_TIMEOUT default (budget spans
+            all verification phases).
+        include_warnings: False drops warning-severity output.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_verify",
@@ -2029,70 +1906,30 @@ async def rocq_query(
     from_state: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Search the Rocq environment — find lemmas, check types, inspect definitions.
+    """Run a Rocq query (Search / Check / Print / About / Locate) and return its output.
 
-    Does NOT modify any proof state. Use this to explore before proving:
-      command="Search (nat -> nat -> nat)."  — find relevant lemmas
-      command="Check Nat.add."               — check a term's type
-      command="Print Nat.add."               — see a definition
-      command="About plus."                  — summary of a name
-
-    Three context modes (mutually exclusive in practice):
-    - **preamble mode** (default): pass import / scope commands as a
-      string.  Scope and import statements like ``Require Import``,
-      ``From X Require Y``, ``Open Scope``, ``Set``, ``Unset``,
-      ``Local``, and ``Section`` belong here — NOT inside ``command=``.
-      ``command=`` runs each statement in isolation, so e.g. an
-      ``Open Scope`` placed in ``command`` would not propagate to a
-      following ``Search``.  See README "Recommended usage patterns →
-      Imports and scopes in rocq_query".
-    - **file mode**: pass a ``.v`` file path; the query runs with all
-      definitions from that file in scope.  More reliable than preamble
-      because it captures ``Open Scope``, ``Set`` options, etc., in the
-      exact order the file declares them.
-    - **from_state mode**: pass a ``state_id`` from a live ``rocq_check``
-      session to query against the live proof context — opened scopes,
-      hypotheses, and local definitions are all visible to ``Search`` /
-      ``Print`` / ``About`` / ``Locate``.  The query runs against a
-      transient child state which is discarded; the parent state is
-      unchanged.  Canonical pattern::
-
-          state_id = (await rocq_check(body=..., from_state=...))["state_id"]
-          await rocq_query(command="Search _.", from_state=state_id)
-
-      Prefer this over ``rocq_check(from_state=N, body="Search ...")``
-      for pure queries — no new ``state_id`` is allocated and the
-      state-table is not polluted.
+    Read-only; modifies no proof state.  Context comes from one of three
+    modes: ``preamble=`` (import/scope commands as a string — Require
+    Import, Open Scope, Set/Unset belong HERE, never in ``command=``,
+    where each statement runs in isolation), ``file=`` (a .v whose
+    definitions are in scope), or ``from_state=`` (a live state_id —
+    Search sees hypotheses, opened scopes, and local definitions; the
+    query runs on a discarded child state, the parent is untouched).
+    Prefer ``from_state`` over ``rocq_check(body="Search ...")`` for pure
+    queries.  Patterns: ``rocq://guide/workflows``.
 
     Args:
-        command: The Rocq query command to execute.
-        preamble: Optional import lines needed for the query context
-                  (e.g., "Require Import Reals.\\nOpen Scope R_scope.").
-        file: Path to a .v file (relative to workspace) whose definitions
-            should be in scope. Mutually exclusive with preamble and
-            from_state.
-        workspace: Workspace directory.  If omitted, auto-detected by walking
-            up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
-            ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
-            (default: cwd).
-        max_results: Optional maximum number of results to return.
-            Useful for broad Search patterns. If omitted, all results are
-            returned (subject to character limit).
-        include_warnings: If True (default), include all feedback returned
-            by the query.  If False, drop entries at LSP Warning severity
-            so warning noise does not crowd out tool output.
-        timeout: Per-call timeout in seconds for expensive computations
-            like ``Time Eval vm_compute in ...``.  ``0`` (default) means
-            use ``ROCQ_PET_TIMEOUT``.  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP``
-            (default 300s); when clamping fires the response includes
-            ``clamped_timeout: <cap>`` so the caller can diagnose unexpected
-            timeouts.
-        from_state: A live state_id (from ``rocq_start`` / ``rocq_check`` /
-            ``rocq_step_multi``) to query against.  Mutually exclusive with
-            *file*.  When set, *preamble* is ignored.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        command: The query to run, e.g. "Search (_ + _ = _ + _).".
+        preamble: Import/scope lines for context.
+        file: .v path whose definitions should be in scope (mutually
+            exclusive with preamble / from_state).
+        workspace: Auto-detected from project markers when omitted.
+        max_results: Cap Search hits (recommended for broad patterns).
+        include_warnings: False drops warning-severity feedback.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
+            ROCQ_QUERY_TIMEOUT_CAP.
+        from_state: Live state_id to query against (mutually exclusive
+            with file).
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_query", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -2135,66 +1972,28 @@ async def rocq_assumptions(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """List the axioms a theorem depends on.
+    """List the axioms a theorem depends on (Print Assumptions), parsed.
 
-    Runs ``Print Assumptions`` on the given theorem/lemma name and returns
-    the resulting assumption list verbatim.  No classification is performed
-    — this tool is pure introspection; the agent decides what's safe to
-    trust.  Use ``rocq_verify`` for an admit-free / sandboxed trust
-    decision on a candidate proof.
+    Pure introspection — no trust classification; use ``rocq_verify`` for
+    a sandboxed admit-free / axiom-policy verdict.  The theorem must be
+    defined in *file*, which sets up the exact environment so the right
+    name resolves.  Returns ``assumptions: list["name : type"]`` (empty =
+    closed under the global context; Admitted and Axiom/Parameter appear
+    here indistinguishably) plus ``raw_output``.
 
-    The theorem must be defined in the given file.  The tool reads the file
-    to set up the full Rocq environment (imports, scopes, definitions),
-    ensuring the correct theorem is resolved even when names are reused
-    across sections.
+    Timeout trap: the first call fetches opaque proofs from .vo files
+    (slow on heavy imports) and a pet restart wipes that progress — set
+    ``timeout`` high on the FIRST call, not on a retry
+    (``rocq://guide/failures``).  On a typo the ``not_found`` response
+    carries ``available_in_file`` for fuzzy matching.
 
     Args:
-        name: The theorem/lemma name to check (e.g., "add_comm").
-        file: Path to the .v file where the theorem is defined (relative to workspace).
-        workspace: Workspace directory.  If omitted, auto-detected by walking
-            up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
-            ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
-            (default: cwd).
-        timeout: Per-call timeout in seconds for the ``Print Assumptions``
-            query.  Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default
-            30).  Raise this when the theorem's opaque-proof fetch from
-            ``.vo`` files is slow.  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP``
-            (default 300s) so a stray large value cannot park the pet
-            lock indefinitely; when clamping fires the response includes
-            ``clamped_timeout: <cap>`` so the caller can diagnose
-            unexpected timeouts.
-
-            **Tip:** ``Print Assumptions`` triggers ``.vo`` opaque-proof
-            fetching on first call (often 40+ modules on heavy library
-            imports).  A pet restart from a timeout wipes Fleche, so a
-            retry with the *same* timeout pays the same opaque-fetch
-            cost from scratch and will time out again — the cost
-            survives ``pet_restarted: True``.  Set ``timeout=`` high on
-            the *first* call rather than relying on a retry after
-            restart.
-
-    Returns (key fields):
-        success:     bool.
-        theorem:     the cleaned theorem name.
-        assumptions: list[str] of ``"name : type"`` pairs from
-                     ``Print Assumptions``.  Empty when the theorem is closed
-                     under the global context.  ``Print Assumptions`` does
-                     not distinguish ``Admitted`` from ``Axiom`` / ``Parameter``
-                     / ``Conjecture``, so admits and user axioms appear here
-                     side-by-side.
-        raw_output:  full raw ``Print Assumptions`` output.
-
-    On theorem-not-found errors: response includes ``available_in_file:
-    list[str]`` with the file's defined names (sorted, capped — see
-    ``available_in_file_limit`` in the response when truncated).  When the
-    file has more names than the cap, ``available_in_file_truncated:
-    true``, ``available_in_file_total: <int>`` (uncapped count), and
-    ``available_in_file_limit: <int>`` (the active cap) are also
-    included; call ``rocq_toc`` for the full list.  Agents can fuzzy-
-    match the requested name against this list to recover from typos.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        name: Theorem/lemma name to audit (e.g. "add_comm").
+        file: .v file where the theorem is defined (relative to
+            workspace).
+        workspace: Auto-detected from project markers when omitted.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; set 180+ up front on
+            heavy imports.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_assumptions",
@@ -2236,30 +2035,17 @@ async def rocq_toc(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Get the structure of a Rocq file: all definitions, lemmas, theorems, and sections.
+    """Outline a .v file: definitions, lemmas, theorems, and sections as a hierarchy.
 
-    Returns a hierarchical outline showing what is defined in the file.
-    Useful for understanding a file before working with it, or finding
-    the name of a theorem to prove.
-
-    Does NOT require a rocq_start session.
+    No session needed.  Use it to find theorem names before
+    ``rocq_start`` / ``rocq_assumptions``, or to orient in an unfamiliar
+    file.  Output capped at 500 names (overflow is flagged in the
+    response).
 
     Args:
         file: Path to the .v file (relative to workspace).
-        workspace: Workspace directory.  If omitted, auto-detected by walking
-            up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
-            ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
-            (default: cwd).
-        timeout: Per-call timeout in seconds for the ``pet.toc`` lookup.
-            Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).
-            Raise this for very large files with heavy library imports.
-            Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s) so a
-            stray large value cannot park the pet lock indefinitely;
-            when clamping fires the response includes ``clamped_timeout:
-            <cap>`` so the caller can diagnose unexpected timeouts.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        workspace: Auto-detected from project markers when omitted.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_toc", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -2297,31 +2083,18 @@ async def rocq_notations(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """List all notations in a Rocq statement and how they resolve.
+    """Resolve every notation in a statement: which notation, scope, and module.
 
-    Helps debug notation ambiguity (e.g., which scope does "+" resolve to?
-    Is "=" Leibniz equality or Qeq?).
-
-    Pass the statement part of a Lemma/Theorem declaration (after the colon).
-    For example, for "Lemma foo : forall n, n + 0 = n", pass
-    statement="forall n, n + 0 = n".
-
-    NOTE: Only works on statements (propositions/types), not arbitrary terms.
+    Debugs notation ambiguity (is ``+`` in nat_scope or Z_scope?).  Pass
+    the statement part after the colon of a Lemma/Theorem declaration — a
+    proposition or type, not an arbitrary term.
 
     Args:
-        statement: The proposition/type to analyze.
-        preamble: Import lines for context (e.g., "Require Import QArith.").
-        workspace: Workspace directory (default: ROCQ_WORKSPACE env var).
-        timeout: Per-call timeout in seconds for the notation lookup.
-            Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).
-            Raise this for statements that require heavy library imports.
-            Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s) so a
-            stray large value cannot park the pet lock indefinitely;
-            when clamping fires the response includes ``clamped_timeout:
-            <cap>`` so the caller can diagnose unexpected timeouts.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        statement: The proposition/type to analyze, e.g.
+            "forall n, n + 0 = n".
+        preamble: Import lines for context (e.g. "Require Import QArith.").
+        workspace: Workspace directory; default ROCQ_WORKSPACE.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_notations", ctx=ctx, workspace=workspace, timeout=timeout
@@ -2367,102 +2140,34 @@ async def rocq_start(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Start an interactive proof session — see goals, explore tactics.
+    """Open an interactive proof session; returns a state_id plus the goals there.
 
-    Returns a state_id for use with rocq_check and rocq_step_multi.
-    Also returns the current proof goals at the starting position,
-    so this tool can be used to inspect goals at any point in a file.
-    For a position inside a proof, the response also carries
-    ``focus_depth`` — how many ``{...}`` / bullet focus frames are open
-    above the goal (0 at the top level) — so a session resumed mid-proof
-    knows its bullet nesting (omitted for preamble-only starts).
+    The session keeps imports warm across calls — this is the entry point
+    of the core loop (then ``rocq_step_multi`` to explore, ``rocq_check``
+    to commit).  Three modes, precedence theorem > position > preamble:
+    (1) file+theorem — prove a named theorem; (2) file+line+character —
+    inspect goals anywhere in a file (0-indexed; the cursor rounds
+    FORWARD through its sentence: pointing at a tactic yields the state
+    after it, whitespace before it yields the state before it — full rule
+    in ``rocq://guide/workflows``); (3) preamble — imports-only scratch
+    session, preferred for iteration without a project.
 
-    Three start modes (precedence: theorem > position > preamble):
-    1. By theorem: file + theorem — start proving a specific theorem.
-       Tip: for a scratch file under ``/tmp`` that needs the project's
-       load path, keep the file name stable across iterations (e.g.
-       ``/tmp/probe.v``) — Fleche caches per file path, so rotating
-       probe names defeats the warmth.
-    2. By position: file + line + character — jump to any position in
-       a file and see the proof goals there.  Useful for inspecting
-       proof state at a specific point, or recovering from an error
-       position returned by rocq_compile.
-    3. From imports: preamble — set up an import context only.
-       **Preferred for scratch iteration** (no project files needed,
-       preferred over ``coqc /tmp/foo.v``): call
-       ``rocq_start(preamble='Require Import ...')`` once, then iterate
-       with rocq_check / rocq_step_multi against the returned state_id.
-       The import set is content-hashed and warm across iterations even
-       if you change the lemma body (see
-       ``interactive.py:_get_or_create_import_state``).
-
-    **Position semantics (mode 2):** ``line`` and ``character`` are
-    0-indexed.  Petanque resolves the cursor to a sentence boundary by
-    *rounding forward* through the sentence that contains the cursor:
-
-    - Cursor on any character of a sentence — its first letter, any
-      character inside, or its terminating period — yields the state
-      **after** that whole sentence has executed.
-    - Cursor in the whitespace **before** a sentence's first
-      non-whitespace character yields the state **before** that
-      sentence (= after the previous sentence).
-    - Cursor in the whitespace **after** a sentence's terminating
-      period yields the state **after** that sentence.
-
-    So to inspect goals **before** a tactic, point at the whitespace
-    just before its first character.  To inspect goals **after** a
-    tactic, point at any character of the tactic (including its
-    period) or at the whitespace immediately following the period.
-
-    **Important:** The interactive session reads the file at start time and
-    does not track subsequent edits. If another process or agent modifies the
-    file while a session is active, the proof state becomes stale and tactics
-    may fail or produce wrong results. To avoid this, work on a **copy** of
-    the file for interactive proving, or restart the session after edits.
+    The file is read once at start: later edits make held states stale
+    (``stale_warning``; rocq_start again after edits).  On an unknown
+    theorem the ``not_found`` response carries ``available_in_file`` for
+    typo recovery.
 
     Args:
-        file: Path to the .v file (relative to workspace).
-        theorem: Name of the theorem to prove.
-        workspace: Workspace directory.  If omitted, auto-detected by walking
-            up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
-            ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
-            (default: cwd).
-        line: 0-based line number for position-based start.  See
-            "Position semantics" above for how the cursor is resolved
-            to a sentence boundary.
-        character: 0-based character offset for position-based start.
-            See "Position semantics" above.
-        preamble: Import commands for preamble mode (e.g., "Require Import Lia.").
-        force_restart: If True, kill pet, clear the state table, and
-            respawn before starting.  Recovery primitive for the rare
-            cases where the shared pet is in a bad state: accumulated
-            RAM bloat after long shared use, indexing corruption, or a
-            "State N expired" that repeats after a plain ``rocq_start``
-            retry (suggesting a peer caller is also force-restarting).
-            Actively-used states survive peer churn via LRU eviction —
-            ``force_restart=True`` is *not* needed as routine insurance
-            and is unhelpful when a recent response already carried
-            ``pet_restarted: True`` (pet is already fresh).  See README
-            "Concurrency model".  Default: False.
-        timeout: Per-call timeout in seconds for opening the session.
-            Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).
-            Raise this for files with heavy library imports.
-            Clamped to ``ROCQ_QUERY_TIMEOUT_CAP`` (default 300s) so a stray
-            large value cannot park the pet lock indefinitely; when
-            clamping fires the response includes ``clamped_timeout:
-            <cap>`` so the caller can diagnose unexpected timeouts.
-
-    On theorem-not-found errors: response includes ``available_in_file:
-    list[str]`` with the file's defined names (sorted, capped — see
-    ``available_in_file_limit`` in the response when truncated).  When the
-    file has more names than the cap, ``available_in_file_truncated:
-    true``, ``available_in_file_total: <int>`` (uncapped count), and
-    ``available_in_file_limit: <int>`` (the active cap) are also
-    included; call ``rocq_toc`` for the full list.  Agents can fuzzy-
-    match the requested name against this list to recover from typos.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        file: .v path (relative to workspace) for modes 1-2.
+        theorem: Theorem name to prove (mode 1).
+        workspace: Auto-detected from project markers when omitted.
+        line: 0-based line (mode 2; see position semantics above).
+        character: 0-based character offset (mode 2).
+        preamble: Import commands for mode 3, e.g. "Require Import Lia.".
+        force_restart: DESTRUCTIVE — kills pet and clears every caller's
+            states before starting.  Recovery-only (repeated state expiry,
+            RAM bloat); never routine (rocq://guide/concurrency).
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_start", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -2505,59 +2210,24 @@ async def rocq_step_multi(
     timeout: int = 0,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Try multiple tactics at once — find what works without guessing.
+    """Try up to 20 tactics against one state; report each outcome without committing.
 
-    Tests each tactic against a specific proof state and returns all
-    results. Does NOT advance the state — commit the winner with
-    rocq_check.
-
-    Use this whenever you're unsure which tactic to apply:
-      tactics=["auto.", "lia.", "lra.", "ring.", "tauto.", "firstorder."]
-
-    Or to auto-solve a subgoal, try the standard automation battery:
-      tactics=["trivial.", "reflexivity.", "assumption.", "exact I.",
-               "auto.", "eauto.", "tauto.", "intuition.", "lia.", "lra.",
-               "nia.", "nra.", "ring.", "field.", "decide equality.",
-               "firstorder."]
-    Note: lia/lra/ring/field require the .v file to import Lia/Lra/Ring/Field.
-
-    Or to explore proof structure:
-      tactics=["destruct n.", "induction n.", "case_eq n."]
-
-    Each result entry includes a ``feedback`` field (truncated string)
-    when the tactic produces visible output (e.g., ``Print``, ``Search``).
-    Each *successful* entry also carries a ``focus_depth`` field — how
-    many ``{...}`` / bullet focus frames that tactic leaves open above
-    the goal (0 at the top level).
-
-    **Canonical exploration pattern:** if the first few steps of a proof
-    are a confident prefix, advance with ``rocq_check`` first and pass
-    the resulting ``state_id`` as ``from_state`` here — don't repeat the
-    prefix inside every entry of ``tactics``.  See README
-    "Recommended usage patterns → Multi-tactic exploration".
+    Read-only exploration — the state table is untouched; commit the
+    winner with ``rocq_check(from_state=<same state>, body=<tactic>)``.
+    Each result entry carries ``success``, ``goals``, ``proof_finished``,
+    ``focus_depth`` (and ``feedback`` when a tactic prints).  Advance a
+    confident prefix with ``rocq_check`` FIRST, then branch from the new
+    state — do not repeat the prefix inside every entry.  Tactic
+    batteries and patterns: ``rocq://guide/workflows``.
 
     Args:
-        tactics: List of tactics to try (max 20).
-        from_state: State ID to try the tactics from.  Required — use the
-            ``state_id`` returned by ``rocq_start`` or a previous
-            ``rocq_check``.  There is no implicit "current state"
-            fallback (avoids cross-agent state confusion when peers
-            share this rocq-mcp process).
-        include_warnings: If True (default), per-tactic ``feedback`` includes
-            all severities.  If False, drop entries at LSP Warning severity.
-        timeout: Per-call timeout in seconds for the whole batch.  The
-            per-tactic budget is ``timeout / len(tactics)`` (subject to the
-            usual ``Timeout`` eligibility rules).  Default 0 uses
-            ``ROCQ_PET_TIMEOUT`` (env var, default 30).  Raise this when
-            individual tactics in the batch are expensive.  Clamped to
-            ``ROCQ_QUERY_TIMEOUT_CAP``
-            (default 300s) so a stray large value cannot park the pet
-            lock indefinitely; when clamping fires the response includes
-            ``clamped_timeout: <cap>`` so the caller can diagnose
-            unexpected timeouts.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        tactics: Tactics to try (max 20), e.g.
+            ["auto.", "lia.", "induction n."].
+        from_state: State to branch from (a state_id from rocq_start or
+            rocq_check).  Required; there is no implicit current state.
+        include_warnings: False drops warning-severity feedback.
+        timeout: Whole-batch seconds; each tactic gets
+            timeout/len(tactics).  0 = ROCQ_PET_TIMEOUT.
     """
     if ctx is None:
         return _no_ctx_fail("rocq_step_multi")
@@ -2601,67 +2271,28 @@ async def rocq_check(
     include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Run proof commands from cached imports — fast iterative checking.
+    """Run proof commands from a held state; returns a new state_id — the commit step.
 
-    Much faster than rocq_compile for iterative proof development:
-    imports are cached (first call processes them, subsequent calls skip), and on error
-    returns the last valid state for immediate interactive recovery
-    via rocq_check(from_state=...) or rocq_step_multi(from_state=...).
-
-    When proof_finished=True, also returns proof_tactics (ordered list of
-    all tactics from root to current state) and proof_hint (instructions
-    for assembling the final .v file).  On a broken walk (an ancestor
-    state was LRU-evicted, or a cycle was detected), proof_tactics and
-    proof_hint are omitted; the response carries ``proof_tactics_status``
-    (``"ancestor_evicted"`` or ``"cycle"``), ``proof_tactics_broken_at``
-    (the state id where the walk gave up), and ``proof_tactics_hint``
-    instead — clients that ignore these keys see no half-chain at all.
-
-    Recommended workflow (each step threads ``state_id`` explicitly):
-    1. ``s0 = rocq_start(file=..., theorem=...)["state_id"]``
-    2. ``s1 = rocq_check(from_state=s0, body="intros. simpl.")["state_id"]``
-    3. If stuck: ``rocq_step_multi(from_state=s1, tactics=[...])`` to explore
-    4. ``rocq_check(from_state=s1, body="winning_tactic.")`` to commit
-
-    When commands produce visible output (e.g., ``Print``, ``Check``,
-    ``vm_compute``, ``native_compute``), a ``feedback`` field is included
-    as a list of ``[command, output]`` pairs (truncated per step at 50K
-    chars).  Omitted when no command produces output.
-
-    When proof goals are available, the success response carries
-    ``focus_depth`` — how many ``{...}`` / bullet focus frames are
-    currently open above the goal (0 at the top level) — so an agent
-    stepping through nested subgoals can tell how deep its focus nesting
-    is.  (Omitted on empty-body checks and when goal state cannot be
-    retrieved, like the other goal-derived fields.)
-
-    **Note:** If the underlying .v file is modified after rocq_start, the
-    session state becomes stale. A ``stale_warning`` field is returned when
-    this is detected. Restart the session with rocq_start after file edits.
+    Imports stay cached across calls, so this is the fast inner loop (vs
+    coqc, which reloads everything).  On success: ``goals``, new
+    ``state_id``, ``focus_depth``; commands that print return
+    ``feedback`` pairs.  On a rejected tactic (reason ``tactic_failed``):
+    ``last_valid_state_id`` and ``failed_command`` — continue from
+    ``last_valid_state_id`` immediately, no restart needed.  On
+    ``proof_finished``: ``proof_tactics`` (root-to-leaf) plus a hint to
+    assemble and validate the final .v — or the ``proof_tactics_status``
+    family when the chain broke (``rocq://guide/failures``).
+    ``stale_warning`` fires if the file changed since rocq_start.
 
     Args:
-        body: Commands to execute (one or more Rocq sentences).
-        from_state: State ID to execute from.  Required — use the
-            ``state_id`` returned by ``rocq_start`` or a previous
-            ``rocq_check``.  There is no implicit "current state"
-            fallback (avoids cross-agent state confusion when peers
-            share this rocq-mcp process).
-        workspace: Accepted for API compatibility but unused; the
-            active workspace comes from the state entry set by
-            ``rocq_start``.
-        timeout: Per-call timeout in seconds for the batch of commands.
-            Default 0 uses ``ROCQ_PET_TIMEOUT`` (env var, default 30).
-            Raise this for compute-heavy tactics (``vm_compute``,
-            ``native_compute``).  Clamped to ``ROCQ_QUERY_TIMEOUT_CAP``
-            (default 300s) so a stray large value cannot park the pet
-            lock indefinitely; when clamping fires the response includes
-            ``clamped_timeout: <cap>`` so the caller can diagnose
-            unexpected timeouts.
-        include_warnings: If True (default), per-step ``feedback`` includes
-            all severities.  If False, drop entries at LSP Warning severity.
-
-    On ``pet_restarted: True``, call ``rocq_diag`` for memory headroom and
-    recent error history.
+        body: One or more Rocq sentences to execute.
+        from_state: State to execute from (a state_id from rocq_start or
+            a previous rocq_check).  Required; no implicit current state.
+        workspace: Accepted for compatibility; unused (the workspace
+            comes from the state entry).
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for
+            vm_compute/native_compute.
+        include_warnings: False drops warning-severity feedback.
     """
     # Note: workspace param is accepted for API compatibility but unused;
     # the active workspace comes from the state entry set by rocq_start.
@@ -2691,59 +2322,16 @@ async def rocq_check(
     )
 )
 async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
-    """Operational diagnostics: pet health, memory headroom, recent errors.
+    """Server runtime diagnostics: pet health, memory, lock contention, recent errors.
 
-    Use this when:
-    - A tool returned ``pet_restarted: True`` and you want to see what
-      happened.
-    - You're considering a long ``vm_compute`` and want to check memory
-      headroom against ``max_rss_mb_threshold``.
-    - You want to know which proof states are currently live in pet's
-      state table.
-    - You suspect another agent is sharing this rocq-mcp process.
-      Heuristic: compare ``live_states[*].file`` against the files you
-      opened this session — entries you did not create signal a foreign
-      caller (works only when agents are on disjoint files).  Actively
-      used states are LRU-protected against peer churn, so sharing is
-      mostly a latency and RAM concern; if repeated state expiries
-      survive that floor, ``rocq_start(..., force_restart=True)`` is
-      the recovery — see README "Concurrency model".
-
-    Does NOT spawn pet if it's not running; just reports state.
-
-    Response shape:
-
-    - ``server_version``: the rocq-mcp package version (from
-      ``importlib.metadata``).  Include in bug reports.
-    - ``pet``: ``{pid, uptime_seconds, restarts, generation}``
-    - ``memory``: ``{pet_rss_mb, peak_pet_rss_mb, max_rss_mb_threshold,
-      sample_status}`` where ``sample_status`` is one of ``"ok"`` /
-      ``"no_pet"`` / ``"psutil_error"`` and disambiguates a ``None``
-      ``pet_rss_mb``.
-    - ``load_average``: ``{"1m": float, "5m": float, "15m": float}`` —
-      kernel-tracked system load averages over the last 1, 5, and 15
-      minutes (from ``os.getloadavg()``).  ``None`` on platforms without
-      an equivalent (e.g. Windows).  Use this to disambiguate CPU
-      contention from tactic divergence when a timeout fires.
-    - ``live_states``: capped at 50 most-recent entries (by
-      ``created_at``) to keep the payload bounded.  Each entry has
-      ``{state_id, parent, file, theorem, age_seconds}``.
-    - ``live_states_total``: full count of entries in the state table
-      (use this to detect that ``live_states`` was truncated).
-    - ``recent_errors``: ring buffer of the last 20 errors, each
-      ``{tool, message, reason, ago_seconds}``.  ``reason`` is one of:
-
-      - **Pet-side** (set by ``_run_with_pet``): ``"timeout"``,
-        ``"crashed"``, ``"memory_exhausted"``, ``"lock_contended"``,
-        ``"unavailable"``.
-      - **Validation / lookup** (set by tools before pet): ``"validation"``,
-        ``"not_found"`` (rocq_start / rocq_assumptions on a typo).
-      - **rocq_check mid-batch**: ``"tactic_failed"`` (a tactic was
-        rejected by Coq — distinct from a transport-level ``"crashed"``).
-      - **rocq_verify-specific**: ``"compile_error"``,
-        ``"axiom_dependency"``, ``"type_mismatch"``.
-
-      The full set is :data:`_RECENT_ERROR_REASONS`.
+    Call after any ``pet_restarted: true`` (why did pet die?), before a
+    long ``vm_compute`` (memory headroom vs ``max_rss_mb_threshold``), or
+    between sub-agent dispatches when sharing one server (foreign
+    ``live_states`` entries, ``lock.contended_total``,
+    ``enrichment_failures``).  Does not spawn pet.  ``rocq_health`` is
+    the toolchain-side counterpart.  Full response shape:
+    ``rocq://guide/responses``; recovery playbook:
+    ``rocq://guide/failures``.
     """
     if ctx is None:
         return _no_ctx_fail("rocq_diag")
@@ -2764,44 +2352,16 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
     )
 )
 async def rocq_health(ctx: Context = None) -> dict[str, Any]:
-    """Health check: is the server OK, and which Rocq/opam switch is it on?
+    """Toolchain health: is coqc resolvable, and which opam switch is this server on?
 
-    Call this first when something looks wrong (e.g. a proof that built
-    yesterday now fails, or ``coqc`` behaves like a different version than
-    your shell) — an MCP server inherits its ``PATH`` / opam environment
-    from whatever launched it, which can differ from your interactive
-    shell.  This tool reports the toolchain the server *actually* resolves.
-
-    Read-only: does NOT spawn pet (mirrors ``rocq_diag``).  Use
-    ``rocq_diag`` for runtime health (memory, live states, recent errors);
-    use this for *toolchain* health (which binaries / which switch).
-
-    Response shape:
-
-    - ``ok``: ``True`` when ``coqc`` resolves on ``PATH`` (the server can
-      do its core job).  Interactive capability is reported separately under
-      ``toolchain.pet`` so a coqc-only deployment still reads as healthy.
-    - ``server_version``: the rocq-mcp package version.
-    - ``switch``: the active switch name (e.g. ``"rocq9"``), or the project
-      path for a local ``_opam`` switch, or ``None`` for a non-opam install.
-    - ``switch_prefix``: the resolved ``OPAM_SWITCH_PREFIX``-style path
-      (``None`` when no switch was identified).
-    - ``switch_is_local``: ``True`` for a project-local (``_opam``) switch.
-    - ``switch_source``: how the switch was determined — ``"opam_env"``
-      (from ``$OPAM_SWITCH_PREFIX``, authoritative), ``"binary_path"``
-      (inferred from the resolved ``coqc`` path), or ``"unknown"``
-      (non-opam / unrecognised layout).
-    - ``toolchain``: ``{coqc: {path, version}, pet: {path, version,
-      pytanque_importable}}`` — the binaries the server resolves and their
-      versions (``None`` when a binary is missing).
-    - ``pet``: ``{running, pid}`` — whether the pet subprocess is currently
-      live (not spawned by this call).
-    - ``warnings``: human-readable notes (missing ``coqc`` / ``pet`` /
-      pytanque, or a switch that could not be identified).
-
-    To change switch, see ``rocq_switch`` — and note the caveats there:
-    live ``state_id``s and previously-built ``.vo`` artifacts do not carry
-    across a switch change.
+    An MCP server inherits PATH / opam environment from whatever launched
+    it — which can differ from your interactive shell.  Call this first
+    when coqc behaves like the wrong version or a previously-building
+    proof fails.  Reports ``ok``, ``switch`` (+ prefix/source),
+    ``toolchain`` (coqc / pet paths and versions), ``pet`` liveness, and
+    ``warnings``.  Read-only; does not spawn pet.  ``rocq_diag`` is the
+    runtime-side counterpart; ``rocq_switch`` changes the switch (with
+    sharp caveats).
     """
     if ctx is None:
         return _no_ctx_fail("rocq_health")
@@ -2828,47 +2388,26 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
     meta={"anthropic/requiresUserInteraction": True},
 )
 async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
-    """Switch the running server to a different opam switch, in-session.
+    """Switch the running server to another opam switch — process-global and destructive.
 
-    Resolves *name* via ``opam env --switch <name> --set-switch``, applies
-    the resulting environment to the live server process, and kills the pet
-    subprocess so the next pet-routed call respawns under the new switch.
-    Subsequent ``coqc`` invocations resolve the new switch's binary too.
+    Applies the new switch environment to the live process and kills pet;
+    the next call respawns under the new switch.  Costs: ALL live
+    state_ids are discarded (rocq_start again), .vo files built under the
+    old switch may be ABI-incompatible (recompile), and every agent
+    sharing this server is moved.  In shared sessions check
+    ``rocq_diag``'s ``live_states`` first.  For a stable setup prefer
+    pinning the switch at launch — register the server command as
+    ``opam exec --switch=<name> -- rocq-mcp``
+    (``rocq://guide/concurrency``).
 
-    **This is a sharp tool — read before use:**
-
-    - **All live ``state_id``s are discarded.** The pet state table is
-      cleared (a state from the old switch is meaningless under the new
-      one). Any in-flight ``rocq_start`` / ``rocq_check`` session must be
-      restarted with ``rocq_start`` after switching.
-    - **``.vo`` artifacts may be ABI-incompatible.** Files compiled under
-      the old switch may fail to ``Require`` under the new one
-      (``Compiled library ... makes inconsistent assumptions``). Recompile
-      dependencies after switching.
-    - **Process-global.** The change affects the whole server process, so
-      *every* agent sharing this rocq-mcp instance is moved to the new
-      switch. Do not use in a shared multi-agent setup without coordination:
-      call ``rocq_diag`` first and check its ``live_states`` to confirm no
-      peer has an in-flight session before switching.
-    - For a stable per-deployment switch, prefer pinning it at launch in the
-      MCP client config (e.g. ``opam exec --switch=<name> -- ...`` as the
-      server ``command``) rather than switching at runtime.
+    On failure: ``not_found`` carries ``available_switches`` (typo
+    recovery); ``validation`` = empty name or opam unavailable;
+    ``lock_contended`` = pet busy, nothing was changed — retry once
+    in-flight calls settle.
 
     Args:
-        name: The opam switch to activate (e.g. ``"rocq9"``). Must be an
-            installed switch; see ``rocq_health`` / ``opam switch list``.
-
-    On success returns the post-switch ``rocq_health`` snapshot, augmented
-    with ``switched: True``, ``previous_switch``, and a ``note`` describing
-    the invalidation. Failure envelopes (``{success: False, reason, error}``):
-
-    - ``reason="not_found"`` — ``name`` is not an installed switch; the
-      response carries ``available_switches: list[str]`` for typo recovery.
-    - ``reason="validation"`` — empty ``name``, or opam is unavailable /
-      its ``opam env`` output could not be parsed (the installed-switch
-      list was unavailable, so the name could not be classified).
-    - ``reason="lock_contended"`` — pet was busy and the switch was not
-      applied; retry once in-flight calls settle.
+        name: Installed opam switch to activate (e.g. "rocq9"); see
+            rocq_health / `opam switch list`.
     """
     if ctx is None:
         return _no_ctx_fail("rocq_switch")
@@ -2959,6 +2498,145 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
         "ABI-incompatible; recompile dependencies as needed."
     )
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Guides (MCP resources) and workflow prompts
+# ---------------------------------------------------------------------------
+#
+# The tool descriptions carry the per-call contracts; the deep reference
+# (recovery matrices, position semantics, concurrency model, verbose
+# field docs) lives in markdown guides served as MCP resources — fetched
+# only when needed, @-mentionable in Claude Code, zero standing context
+# cost.  Content files ship as package data under rocq_mcp/guides/.
+
+_GUIDES_DIR = Path(__file__).parent / "guides"
+
+
+def _read_guide(name: str) -> str:
+    return (_GUIDES_DIR / f"{name}.md").read_text(encoding="utf-8")
+
+
+@mcp.resource(
+    "rocq://guide/workflows",
+    name="rocq-workflows",
+    mime_type="text/markdown",
+    description=(
+        "Choosing-a-tool table, the core proof loop, multi-tactic "
+        "exploration patterns, rocq_query import/scope rules, scratch "
+        "iteration, position semantics, sub-agent briefing."
+    ),
+)
+def guide_workflows() -> str:
+    return _read_guide("workflows")
+
+
+@mcp.resource(
+    "rocq://guide/failures",
+    name="rocq-failures",
+    mime_type="text/markdown",
+    description=(
+        "Failure recovery playbook: the reason taxonomy with per-reason "
+        "recovery, state_capture_status, multi-error entries, "
+        "available_in_file, proof_tactics_status, the pet_restarted "
+        "diag playbook, and the degraded field."
+    ),
+)
+def guide_failures() -> str:
+    return _read_guide("failures")
+
+
+@mcp.resource(
+    "rocq://guide/concurrency",
+    name="rocq-concurrency",
+    mime_type="text/markdown",
+    description=(
+        "Sharing one rocq-mcp between agents: LRU state protection, "
+        "force_restart recovery, rocq_diag monitoring, per-sub-agent "
+        "server + worktree isolation patterns, rocq_switch caveats."
+    ),
+)
+def guide_concurrency() -> str:
+    return _read_guide("concurrency")
+
+
+@mcp.resource(
+    "rocq://guide/responses",
+    name="rocq-responses",
+    mime_type="text/markdown",
+    description=(
+        "Field-level response reference: optional envelope fields, "
+        "truncation caps, compile-file options (keep_vo/mode/timing), "
+        "workspace auto-detection, diag/health shapes, size controls."
+    ),
+)
+def guide_responses() -> str:
+    return _read_guide("responses")
+
+
+@mcp.prompt(
+    name="prove_theorem",
+    description=(
+        "Briefing for proving one theorem with the rocq-mcp interactive "
+        "loop (start -> step_multi -> check -> compile+verify)."
+    ),
+)
+def prove_theorem(file: str, theorem: str) -> str:
+    """Drive the full interactive proof loop for one theorem."""
+    return f"""\
+Prove the theorem `{theorem}` in `{file}` using the rocq-mcp tools.
+
+Method — use the held interactive session, never a coqc loop:
+1. Read `rocq://guide/workflows` if you have not already.
+2. `rocq_toc(file="{file}")` if you need to confirm the theorem name.
+3. `s = rocq_start(file="{file}", theorem="{theorem}")` — read the goals.
+4. Explore with `rocq_step_multi(from_state=s, tactics=[...])`.  Start
+   with the automation battery: ["trivial.", "reflexivity.",
+   "assumption.", "auto.", "eauto.", "tauto.", "intuition.", "lia.",
+   "lra.", "ring.", "firstorder."] (lia/lra/ring need the matching
+   imports), then structural steps ("intros.", "induction x.",
+   "destruct x.", "simpl.") as the goals demand.
+5. Commit each winning step with `rocq_check(from_state=..., body=...)`
+   and continue from the returned state_id.  On tactic_failed, continue
+   from last_valid_state_id — do not restart.
+6. When proof_finished is true: write the finished proof into the file
+   (imports + statement + Proof. + the proof_tactics + Qed.), then run
+   `rocq_compile_file` and `rocq_verify`, and audit axioms with
+   `rocq_assumptions(name="{theorem}", file="{file}")`.
+
+Report: the final proof script, the verification verdict, and any
+axioms the proof depends on."""
+
+
+@mcp.prompt(
+    name="debug_compile_error",
+    description=(
+        "Briefing for fixing a .v file that does not compile, using "
+        "compile-error state capture and the interactive session."
+    ),
+)
+def debug_compile_error(file: str) -> str:
+    """Diagnose and fix a failing .v file."""
+    return f"""\
+The file `{file}` fails to compile.  Diagnose and fix it with rocq-mcp.
+
+Method:
+1. `rocq_compile_file(file="{file}")` — read `reason`,
+   `error_positions`, and (if present) the per-declaration `errors`
+   list to see every failing declaration, not just the first.
+2. If the response carries `state_capture_status: "ok"`, continue
+   directly from the captured proof state:
+   `rocq_step_multi(from_state=<state_id>, tactics=[...])` /
+   `rocq_check(from_state=<state_id>, ...)`.  Otherwise open the error
+   position yourself: `rocq_start(file="{file}", line=<line>,
+   character=<char>)` (0-indexed; see rocq://guide/failures).
+3. Find a working replacement for the broken step, edit the file, and
+   recompile.  Repeat for each entry in `errors`.
+4. Finish with a clean `rocq_compile_file` run — and `rocq_verify` if
+   the fix touched a proof of a stated problem.
+
+Report: each error found, the fix applied, and the final compile
+status."""
 
 
 # ---------------------------------------------------------------------------

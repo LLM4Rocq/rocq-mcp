@@ -38,33 +38,23 @@ uv pip install -e ".[dev]"
 
 The server exposes thirteen MCP tools:
 
-### Compilation tools (coqc-based, no pytanque needed)
-
-| Tool | Description |
-|------|-------------|
-| **`rocq_compile`** | Batch-compile Rocq source code via coqc. Best for checking a finished proof. On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). |
-| **`rocq_compile_file`** | Whole-file `coqc` compile of a `.v` file on disk. Best for finished proofs, axiom audits, and final verification. Preferred over `rocq_compile` for large files (source stays on disk, no full-text transmission over MCP). On error, returns error positions and a `state_capture_status` field; when `pet`/coq-lsp is available and the failure is inside a proof, also returns a reusable `state_id` and the goals at the error position. Cleans up compilation artifacts but preserves the source file. Three opt-in tuning kwargs (`keep_vo`, `mode`, `timing`) — see the **Compile-file options** callout below. For scratch iteration, prefer `rocq_start` + `rocq_check` / `rocq_step_multi` (interactive session keeps imports warm). On failure with `pet` available, the response also carries an `errors` list with per-declaration entries — see the Multi-error reporting callout below. |
-| **`rocq_verify`** | Verify that a proof actually proves the original statement. Wraps in a `Module M.` sandbox to catch type redefinition, `Admitted`/`Abort`, custom axioms, and statement mismatches. Run after `rocq_compile` or `rocq_compile_file` succeeds. |
-
-### Interactive tools (pytanque-based, require `pet`)
-
-| Tool | Description |
-|------|-------------|
-| **`rocq_query`** | Search the Rocq environment — find lemmas, check types, inspect definitions. Three context modes: **preamble** (import commands as a string), **file** (a `.v` file path whose definitions are in scope), or **from_state** (a live `state_id` from a `rocq_check` session — the query sees opened scopes, hypotheses, and local definitions). Use `from_state=<state_id>` to introspect mid-proof without re-specifying preamble. Optional `max_results` parameter limits output for broad searches. Does not modify any proof state. |
-| **`rocq_assumptions`** | List the axioms a theorem depends on. Takes a required `file` parameter (path to the `.v` file where the theorem is defined) to set up the full environment. Returns `assumptions: list[str]` of `"name : type"` pairs from `Print Assumptions` (empty when the theorem is closed under the global context) plus the full `raw_output` for agents that want it. No classification — `rocq_assumptions` is pure introspection; the agent decides what's safe to trust. Use `rocq_verify` for a sandboxed admit-free / axiom-policy decision on a candidate proof. |
-| **`rocq_start`** | Start an interactive proof session and return proof goals. Three modes: (1) by theorem name, (2) by position — jump to any point in a file to inspect proof goals there (e.g., error positions from `rocq_compile`); cursor rounds forward through the sentence containing it, so a cursor anywhere on a sentence (including its period) yields the state **after** that sentence, and whitespace before a sentence yields the state **before** it (see docstring for the full rule), (3) from imports. Returns a `state_id` for use with `rocq_check` and `rocq_step_multi`. Optional `force_restart=True` kills pet and clears the state table — recovery primitive for accumulated RAM bloat, indexing corruption, or a state expiry that repeats after a plain retry (see Concurrency model). |
-| **`rocq_check`** | Run proof commands with cached imports — fast iterative checking. **Requires `from_state`** (the `state_id` returned by `rocq_start` or a previous `rocq_check`). On error, returns `last_valid_state_id` for immediate recovery via `rocq_check(from_state=...)` or `rocq_step_multi(from_state=...)`. Includes `stale_warning` if the source file was modified since session start. |
-| **`rocq_step_multi`** | Try multiple tactics at once — find what works without guessing. **Requires `from_state`**. Useful for auto-solving subgoals (pass standard automation tactics) or exploring proof structure. Does not advance the state; commit the winner with `rocq_check`. Max 20 tactics per call. |
-| **`rocq_toc`** | Get the structure of a `.v` file: all definitions, lemmas, theorems, and sections as a hierarchical outline. Does not require an active session. |
-| **`rocq_notations`** | List all notations in a Rocq statement and how they resolve (which scope, which module). Helps debug notation ambiguity (e.g., is `+` in `nat_scope` or `Z_scope`?). |
-
-### Diagnostic tools
-
-| Tool | Description |
-|------|-------------|
-| **`rocq_diag`** | Operational diagnostics: pet health, memory headroom, system load average, recent errors, currently-live proof states. Use after `pet_restarted: True` to diagnose what happened, before a long `vm_compute` to check memory headroom, or **as an orchestrator's monitoring primitive** — call it between sub-agent dispatches to spot shared-pet contention (`live_states[*].file` shows entries from peer callers), accumulating RAM bloat, or a pile-up in `recent_errors`. Does not spawn pet if it is not running; safe to call without `pet` installed. |
-| **`rocq_health`** | Toolchain health check: returns `ok` plus **which opam switch** the server is running on and the resolved `coqc` / `pet` binary paths + versions. An MCP server inherits its `PATH` / opam environment from whatever launched it (e.g. an `opam exec --switch=<name> -- …` wrapper), which can differ from your interactive shell — so call this first when `coqc` behaves like a different version than you expect, or when a proof that built before now fails. Read-only; does not spawn pet. (`rocq_diag` is for *runtime* health; `rocq_health` is for *toolchain* health.) |
-| **`rocq_switch`** | Change the running server's opam switch in-session: resolves the switch via `opam env`, applies it to the live process, and kills pet so the next call respawns under the new switch. **Sharp tool** — clears the state table (all live `state_id`s are discarded; restart sessions with `rocq_start`), and `.vo` artifacts built under the old switch may be ABI-incompatible. The change is process-global (affects every agent sharing this server). For a stable per-deployment switch, prefer pinning it at launch (see the **Switch selection** callout). |
+<!-- BEGIN GENERATED: tools (scripts/gen_docs.py) -->
+| Tool | What it does |
+|------|--------------|
+| **`rocq_compile`** | Compile Rocq source from a string buffer via coqc. |
+| **`rocq_compile_file`** | Compile a .v file on disk via coqc — whole-file check and final verification. |
+| **`rocq_verify`** | Verify a proof proves the original statement — sandboxed admit/axiom/statement check. |
+| **`rocq_query`** | Run a Rocq query (Search / Check / Print / About / Locate) and return its output. |
+| **`rocq_assumptions`** | List the axioms a theorem depends on (Print Assumptions), parsed. |
+| **`rocq_toc`** | Outline a .v file: definitions, lemmas, theorems, and sections as a hierarchy. |
+| **`rocq_notations`** | Resolve every notation in a statement: which notation, scope, and module. |
+| **`rocq_start`** | Open an interactive proof session; returns a state_id plus the goals there. |
+| **`rocq_step_multi`** | Try up to 20 tactics against one state; report each outcome without committing. |
+| **`rocq_check`** | Run proof commands from a held state; returns a new state_id — the commit step. |
+| **`rocq_diag`** | Server runtime diagnostics: pet health, memory, lock contention, recent errors. |
+| **`rocq_health`** | Toolchain health: is coqc resolvable, and which opam switch is this server on? |
+| **`rocq_switch`** | Switch the running server to another opam switch — process-global and destructive. |
+<!-- END GENERATED: tools -->
 
 > **Switch selection:** The server resolves `coqc` and `pet` from the `PATH` / opam environment of **the process Claude Code (or your MCP client) launched** — *not* from your interactive shell. So the switch is fixed at server-launch time and can silently differ from `opam switch show` in your terminal. Pin it explicitly in the MCP client config, e.g. register the server command as `opam exec --switch=<name> -- uv run --directory <repo> rocq-mcp`, or set `env: { … }` (PATH / OPAM_SWITCH_PREFIX). Call `rocq_health` to see the switch the server is actually on. To change it: either edit the launch command and reconnect the MCP server (`/mcp` → reconnect, or restart the client), or call `rocq_switch(name=…)` to swap in-session — the latter clears all live `state_id`s and may leave `.vo` artifacts ABI-incompatible, so prefer the launch-time pin for a stable setup.
 
@@ -107,6 +97,37 @@ The tools table above is reference-style.  This subsection is intent → tool: f
 | Check pet health, memory, recent errors | `rocq_diag` |
 | Check the server is OK & which opam switch it runs on | `rocq_health` |
 | Change the server's opam switch in-session | `rocq_switch` |
+
+## Agent documentation
+
+This README covers installing and operating the server. The **agent-facing
+documentation ships inside the server itself**:
+
+- **Server instructions** (auto-loaded into the model's context): the core
+  proof loop, the explicit-`from_state` rule, the failure envelope and its
+  `reason` taxonomy, timeout semantics.
+- **Guides** (MCP resources, fetched on demand; `@`-mentionable in Claude
+  Code):
+  - `rocq://guide/workflows` — choosing a tool, proof patterns, query
+    import/scope rules, scratch iteration, position semantics, sub-agent
+    briefing.
+  - `rocq://guide/failures` — the recovery playbook for every failure
+    `reason`, `state_capture_status`, typo recovery, the `pet_restarted`
+    diagnostics playbook.
+  - `rocq://guide/concurrency` — sharing one server between agents,
+    per-instance isolation (named-server pool + git worktree),
+    `rocq_switch` caveats.
+  - `rocq://guide/responses` — field-level response reference, truncation
+    caps, size-control parameters.
+- **Prompts** (slash commands in Claude Code): `prove_theorem(file,
+  theorem)` and `debug_compile_error(file)` package the recommended
+  workflows.
+
+Every failure response carries `{success: false, error, reason}` with a
+fixed `reason` taxonomy — agents dispatch on `reason`, never on message
+text: `validation`, `not_found`, `timeout`, `crashed`, `memory_exhausted`,
+`lock_contended`, `unavailable`, `tactic_failed`, `compile_error`,
+`axiom_dependency`, `type_mismatch`.
 
 ## Recommended usage patterns
 
@@ -257,6 +278,8 @@ Before any Write or `coqc` on a .v file:
 | `ROCQ_MAX_STATES` | `1000` | Cap on the in-memory state table (LRU-evicted). The entry itself is tiny; the real cost lives in pet's Fleche cache and is bounded by `ROCQ_MAX_PET_RSS_MB`. Bump if two or more callers share this process (e.g. parallel sub-agents) and parked states get evicted before they're reused. |
 | `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
 | `ROCQ_MAX_SOURCE_SIZE` | `1000000` | Maximum source size in bytes |
+| `ROCQ_PET_TIMEOUT_GRACE` | `5.0` | Extra grace (seconds) added to the pet lock-acquisition wait beyond the per-call timeout, so a slow callee is distinguished from a genuinely stuck lock. |
+| `ROCQ_DEBUG_ENRICHMENT` | unset | When set, degraded-enrichment notices are surfaced verbatim in responses instead of being logged best-effort; a debugging aid for the proof-state capture path. |
 
 ## Security Model
 

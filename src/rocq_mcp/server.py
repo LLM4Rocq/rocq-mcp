@@ -28,6 +28,12 @@ from fastmcp.server.lifespan import lifespan
 from mcp.types import ToolAnnotations
 
 import rocq_mcp
+from rocq_mcp.schemas import (
+    CHECK_OUTPUT_SCHEMA,
+    COMPILE_FILE_OUTPUT_SCHEMA,
+    SEARCH_OUTPUT_SCHEMA,
+    STEP_MULTI_OUTPUT_SCHEMA,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration (env vars with defaults)
@@ -145,6 +151,9 @@ async def app_lifespan(server: Any) -> Any:
     """Server lifespan. Pet is spawned lazily on first pytanque call."""
     state: dict[str, Any] = {
         "pet_client": None,
+        # The server's event loop — lets worker threads schedule MCP
+        # notifications (progress / log) via run_coroutine_threadsafe.
+        "event_loop": asyncio.get_running_loop(),
         "workspace": ROCQ_WORKSPACE,
         "pet_timeout": ROCQ_PET_TIMEOUT,
         "current_workspace": None,
@@ -1006,6 +1015,12 @@ def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
         lifespan_state["pet_client"] = pet
         lifespan_state["pet_started_at"] = time.time()
         lifespan_state["total_spawns"] = prev_spawns + 1
+        _log_info(
+            lifespan_state,
+            f"pet spawned (pid={getattr(pet.process, 'pid', None)}, "
+            f"spawn #{prev_spawns + 1}, "
+            f"generation {int(lifespan_state.get('pet_generation', 0))})",
+        )
     return pet
 
 
@@ -1343,6 +1358,65 @@ async def _memory_watchdog(
         return
 
 
+def _notify(
+    lifespan_state: dict[str, Any] | None, coro_factory: Callable[[Any], Any]
+) -> None:
+    """Best-effort MCP notification from sync code or worker threads.
+
+    Resolves the ambient request context (fastmcp dependency injection),
+    builds the notification coroutine via *coro_factory(ctx)*, and
+    schedules it on the current loop (async context) or on the server
+    loop captured in lifespan_state (worker thread).  Never raises —
+    a notification failure must not break an envelope.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        ctx = get_context()
+    except Exception:
+        return
+    try:
+        coro = coro_factory(ctx)
+    except Exception:
+        return
+    try:
+        asyncio.get_running_loop().create_task(coro)
+        return
+    except RuntimeError:
+        pass
+    loop = (lifespan_state or {}).get("event_loop")
+    if loop is None:
+        coro.close()
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:
+        coro.close()
+
+
+def _progress(
+    lifespan_state: dict[str, Any] | None,
+    progress: float,
+    total: float | None = None,
+    message: str | None = None,
+) -> None:
+    """Best-effort progress notification (no-op without a progressToken)."""
+    _notify(
+        lifespan_state,
+        lambda ctx: ctx.report_progress(
+            progress=progress, total=total, message=message
+        ),
+    )
+
+
+def _log_info(lifespan_state: dict[str, Any] | None, message: str) -> None:
+    _notify(lifespan_state, lambda ctx: ctx.info(message))
+
+
+def _log_warning(lifespan_state: dict[str, Any] | None, message: str) -> None:
+    _notify(lifespan_state, lambda ctx: ctx.warning(message))
+
+
 async def _handle_pet_failure(
     lifespan_state: dict[str, Any],
     tool: str,
@@ -1372,6 +1446,11 @@ async def _handle_pet_failure(
     ``run_assumptions`` distinguishing ``not_found`` from generic crash).
     """
     if killed_pet:
+        _log_warning(
+            lifespan_state,
+            f"pet killed ({reason} in {tool}); held state_ids are gone — "
+            "the next pet call respawns fresh",
+        )
         _invalidate_pet(lifespan_state)
         await _force_release_pet_lock()
         if on_timeout is not None:
@@ -1712,13 +1791,14 @@ async def rocq_compile(
 
 
 @mcp.tool(
+    output_schema=COMPILE_FILE_OUTPUT_SCHEMA,
     annotations=ToolAnnotations(
         title="Compile a .v file (coqc)",
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
         openWorldHint=False,
-    )
+    ),
 )
 async def rocq_compile_file(
     file: str,
@@ -1726,7 +1806,7 @@ async def rocq_compile_file(
     timeout: int = 0,
     include_warnings: bool = True,
     keep_vo: bool = False,
-    mode: str = "full",
+    mode: Literal["full", "vos"] = "full",
     timing: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
@@ -2208,12 +2288,13 @@ async def rocq_start(
 
 
 @mcp.tool(
+    output_schema=STEP_MULTI_OUTPUT_SCHEMA,
     annotations=ToolAnnotations(
         title="Try tactics without committing",
         readOnlyHint=True,
         idempotentHint=True,
         openWorldHint=False,
-    )
+    ),
 )
 async def rocq_step_multi(
     tactics: list[str],
@@ -2281,6 +2362,7 @@ async def rocq_step_multi(
 
 
 @mcp.tool(
+    output_schema=CHECK_OUTPUT_SCHEMA,
     annotations=ToolAnnotations(
         # Additive, never destructive: allocates a fresh state_id and
         # leaves existing states untouched.  Not idempotent (each call
@@ -2290,7 +2372,7 @@ async def rocq_step_multi(
         destructiveHint=False,
         idempotentHint=False,
         openWorldHint=False,
-    )
+    ),
 )
 async def rocq_check(
     body: str,
@@ -2543,12 +2625,13 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
 
 
 @mcp.tool(
+    output_schema=SEARCH_OUTPUT_SCHEMA,
     annotations=ToolAnnotations(
         title="Search for lemmas and definitions",
         readOnlyHint=True,
         idempotentHint=True,
         openWorldHint=False,
-    )
+    ),
 )
 async def rocq_search(
     pattern: str = "",

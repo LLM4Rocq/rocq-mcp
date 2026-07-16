@@ -2208,6 +2208,11 @@ async def run_start(
         )
 
     if force_restart:
+        _server._log_warning(
+            lifespan_state,
+            "force_restart: killing pet and clearing the state table for "
+            "every caller of this server",
+        )
         _server._invalidate_pet(lifespan_state)
 
     return await _server._run_with_pet(
@@ -2837,6 +2842,12 @@ async def run_step_multi(
 
             entry_dict["time_ms"] = int((time.monotonic() - tactic_started) * 1000)
             partial_state["partial_results"].append(entry_dict)
+            _server._progress(
+                lifespan_state,
+                tactic_index + 1,
+                len(tactics),
+                f"step_multi: tried {tac}",
+            )
 
         # Read-only exploration — do NOT update state table
         results = list(partial_state["partial_results"])

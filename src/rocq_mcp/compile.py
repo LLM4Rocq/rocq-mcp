@@ -1427,6 +1427,7 @@ async def run_verify(
     t0 = time.monotonic()
 
     # Phase 1: Standard Module M
+    _server._progress(lifespan_state, 1, 3, "verify: Module M sandbox")
     phase1_result, phase1_failure = _run_phase1_module_m(
         proof,
         problem_name,
@@ -1439,6 +1440,9 @@ async def run_verify(
         return phase1_result
 
     # Phase 2: Shared-defs Module M (includes Phase 3 fallback)
+    _server._progress(
+        lifespan_state, 2, 3, "verify: shared-defs sandbox (phase 3 may follow)"
+    )
     return await _run_phase2_shared_defs(
         proof,
         problem_name,

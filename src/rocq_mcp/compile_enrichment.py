@@ -316,6 +316,9 @@ async def _multi_error_walk(
             pet=pet,
             per_call_timeout=per_call_timeout,
             max_errors=cap,
+            progress=lambda i, n: _server._progress(
+                lifespan_state, i, n, "multi-error walk"
+            ),
         )
 
     # Walker budget: generous enough that pet.toc + ``cap`` chunked runs

@@ -251,6 +251,7 @@ def collect_file_errors(
     *,
     per_call_timeout: float = 5.0,
     max_errors: int = 20,
+    progress: Any = None,
 ) -> list[ProofError] | None:
     """Walk *file* via incremental ``pet.run`` chunked by toc.
 
@@ -296,6 +297,11 @@ def collect_file_errors(
     timeout_arg = int(per_call_timeout) if per_call_timeout >= 1 else per_call_timeout
 
     for idx, chunk in enumerate(chunks):
+        if progress is not None:
+            try:
+                progress(idx + 1, len(chunks))
+            except Exception:
+                pass  # progress must never break the walk
         body = _chunk_text(lines, chunk)
         if not body.strip():
             continue

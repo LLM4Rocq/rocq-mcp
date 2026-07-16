@@ -16,6 +16,7 @@ recorded into the `recent_errors` ring buffer that `rocq_diag` returns.
 | `lock_contended` | pet-routed tools | Another call holds the pet lock (pet is NOT killed). Retry after in-flight calls settle; under multi-agent sharing see the concurrency guide. |
 | `unavailable` | pet-routed tools | pytanque / the `pet` binary is not installed. Only coqc-based tools work; see README prerequisites. |
 | `tactic_failed` | rocq_check (mid-batch) | Coq rejected a tactic — a *proof* problem, not a transport problem. Use `last_valid_state_id` (below). |
+| `query_rejected` | rocq_search | Coq rejected the Search pattern/filter syntax. Fix the pattern (see rocq_query for raw vernacular escape hatch). |
 | `compile_error` | rocq_compile, rocq_compile_file, rocq_verify | coqc returned non-zero. Use `error_positions` / `state_capture_status` / `errors` (below). |
 | `axiom_dependency` | rocq_verify | The proof relies on `Admitted`/`admit` or a non-whitelisted axiom. |
 | `type_mismatch` | rocq_verify | Phase-3 check: the proof proves a different type than the problem statement. |

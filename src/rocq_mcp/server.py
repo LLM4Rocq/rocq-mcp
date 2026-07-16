@@ -202,8 +202,8 @@ a state_id goes missing, restart the session with rocq_start.
 Failures: every failure response is {success: false, error, reason}. \
 Dispatch on reason, not on message text; reason is one of: validation, \
 not_found, timeout, crashed, memory_exhausted, lock_contended, \
-unavailable, tactic_failed, compile_error, axiom_dependency, \
-type_mismatch. When a response carries pet_restarted: true, call \
+unavailable, tactic_failed, query_rejected, compile_error, \
+axiom_dependency, type_mismatch. When a response carries pet_restarted: true, call \
 rocq_diag to see what happened.
 
 Timeouts: timeout=0 means "use the server default"; larger per-call \
@@ -1620,6 +1620,8 @@ from rocq_mcp.interactive import (  # noqa: E402
     run_step_multi,
     run_toc,
     run_notations,
+    run_goal,
+    run_search,
 )
 from rocq_mcp.diag import (  # noqa: E402
     _DIAG_LIVE_STATES_CAP,
@@ -1906,8 +1908,10 @@ async def rocq_query(
     from_state: int | None = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Run a Rocq query (Search / Check / Print / About / Locate) and return its output.
+    """Run a raw Rocq query (Check / Print / About / Locate / Search) and return its output.
 
+    For lemma search prefer ``rocq_search`` (structured hits, filters,
+    pagination); this tool is the raw-vernacular escape hatch.
     Read-only; modifies no proof state.  Context comes from one of three
     modes: ``preamble=`` (import/scope commands as a string — Require
     Import, Open Scope, Set/Unset belong HERE, never in ``command=``,
@@ -2217,6 +2221,8 @@ async def rocq_step_multi(
     include_warnings: bool = True,
     timeout: int = 0,
     goals_format: Literal["pretty", "structured", "names_only"] = "pretty",
+    timeouts: list[float] | None = None,
+    preset: Literal["", "auto"] = "",
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try up to 20 tactics against one state; report each outcome without committing.
@@ -2240,7 +2246,14 @@ async def rocq_step_multi(
         goals_format: Goals representation for full entries — "pretty"
             (default), "structured", or "names_only".  Identical
             outcomes are deduplicated: repeats carry same_outcome_as
-            instead of goals; the response carries distinct_outcomes.
+            instead of goals; the response carries distinct_outcomes
+            and a summary (tried/succeeded/finished/best).
+        timeouts: Optional per-tactic budgets in seconds (one per
+            tactic); the batch wall-clock is their sum.  Each entry
+            also reports time_ms.
+        preset: "auto" appends the standard automation battery
+            (trivial ... firstorder, cheapest first) after your
+            tactics, deduplicated, capped at 20.
     """
     if ctx is None:
         return _no_ctx_fail("rocq_step_multi")
@@ -2254,6 +2267,8 @@ async def rocq_step_multi(
         include_warnings=include_warnings,
         timeout=effective_timeout,
         goals_format=goals_format,
+        timeouts=timeouts,
+        preset=preset,
     )
     if clamped:
         result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
@@ -2520,6 +2535,168 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
         "ABI-incompatible; recompile dependencies as needed."
     )
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_search
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Search for lemmas and definitions",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+async def rocq_search(
+    pattern: str = "",
+    patterns: list[str] | None = None,
+    kind: str = "",
+    inside: list[str] | None = None,
+    outside: list[str] | None = None,
+    preamble: str = "",
+    file: str = "",
+    workspace: str = "",
+    from_state: int | None = None,
+    max_results: int = 30,
+    offset: int = 0,
+    include_types: bool = True,
+    include_warnings: bool = True,
+    timeout: int = 0,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Search the environment for lemmas/definitions matching a pattern — structured hits.
+
+    Returns ``hits: [{name, type}]`` with ``total`` / ``truncated`` and
+    pagination — prefer this over raw ``Search`` through ``rocq_query``
+    (one joined string).  Multiple ``patterns`` fan out and merge: each
+    hit then carries ``matched_patterns`` (hits matching several
+    patterns are the strongest premise candidates).  Same context modes
+    as rocq_query: preamble | file | from_state (live proof context).
+    A pattern Coq rejects returns ``reason: "query_rejected"``.
+
+    Args:
+        pattern: Coq Search pattern, e.g. "(_ + _ = _ + _)" or
+            '"comm" (_ * _)'.  Trailing dot optional.
+        patterns: Fan-out mode — additional patterns to merge (max 8
+            total).
+        kind: Restrict via Coq's is: filter, e.g. "Lemma",
+            "Definition", "Instance".
+        inside: Only results from these modules.
+        outside: Exclude results from these modules.
+        preamble: Import/scope lines for context.
+        file: .v path whose definitions should be in scope (mutually
+            exclusive with preamble / from_state).
+        workspace: Auto-detected from project markers when omitted.
+        from_state: Live state_id to search against (sees hypotheses
+            and opened scopes).
+        max_results: Page size (default 30).
+        offset: Pagination offset into the merged hit list.
+        include_types: False returns names only (token-lean for broad
+            queries).
+        include_warnings: False drops warning-severity feedback.
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
+            ROCQ_QUERY_TIMEOUT_CAP.
+    """
+    resolved = _resolve_tool_envelope(
+        tool="rocq_search", ctx=ctx, workspace=workspace, file=file, timeout=timeout
+    )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
+    result = await run_search(
+        pattern=pattern,
+        workspace=workspace,
+        lifespan_state=lifespan_state,
+        patterns=patterns,
+        kind=kind,
+        inside=inside,
+        outside=outside,
+        preamble=preamble,
+        file=file,
+        from_state=from_state,
+        max_results=max_results,
+        offset=offset,
+        include_types=include_types,
+        include_warnings=include_warnings,
+        timeout=effective_timeout,
+    )
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_goal
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Show goals at a state or position",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+async def rocq_goal(
+    from_state: int | None = None,
+    file: str = "",
+    line: int | None = None,
+    character: int | None = None,
+    workspace: str = "",
+    goals_format: Literal["pretty", "structured", "names_only"] = "pretty",
+    diff_from: int | None = None,
+    timeout: int = 0,
+    ctx: Context = None,
+) -> dict[str, Any]:
+    """Show proof goals at a live state_id or a file position — registers no state.
+
+    Pure inspection: unlike ``rocq_start`` (which allocates a session
+    state), this leaves the state table untouched — use it to peek at
+    goals mid-file or re-read a held state without LRU side effects.
+    Position mode uses rocq_start's cursor semantics (0-indexed, rounds
+    forward through the sentence — rocq://guide/workflows).
+    ``diff_from`` compares two live states (returns ``goals_diff``
+    instead of ``goals``) — e.g. two exploration branches.
+
+    Args:
+        from_state: Live state_id to inspect (mutually exclusive with
+            the file position).
+        file: .v path (with line+character) for position mode.
+        line: 0-based line (position mode).
+        character: 0-based character offset (position mode).
+        workspace: Auto-detected from project markers when omitted.
+        goals_format: "pretty" (default), "structured", or
+            "names_only".
+        diff_from: Another live state_id to diff against (requires
+            from_state).
+        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
+    """
+    resolved = _resolve_tool_envelope(
+        tool="rocq_goal",
+        ctx=ctx,
+        workspace=workspace,
+        file=file or None,
+        timeout=timeout,
+    )
+    if not isinstance(resolved, tuple):
+        return resolved
+    workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
+
+    result = await run_goal(
+        lifespan_state=lifespan_state,
+        from_state=from_state,
+        file=file,
+        line=line,
+        character=character,
+        workspace=workspace,
+        goals_format=goals_format,
+        diff_from=diff_from,
+        timeout=effective_timeout,
+    )
+    return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
 
 # ---------------------------------------------------------------------------

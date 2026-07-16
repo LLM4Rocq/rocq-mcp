@@ -1526,8 +1526,10 @@ class TestReconstructTacticPath:
         assert path.status == "ancestor_evicted"
         assert path.broken_at == 9999
 
-    def test_broken_chain_returns_partial(self):
-        """If ancestor is evicted, returns partial chain from first found."""
+    def test_ancestor_eviction_no_longer_breaks_the_chain(self):
+        """The path is materialized per entry at creation: evicting every
+        ancestor leaves the leaf's chain complete (the old walk-the-parents
+        implementation reported ancestor_evicted here)."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1536,32 +1538,16 @@ class TestReconstructTacticPath:
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "intros.", step=1)
         s2 = add_mock_state(s1, "auto.", step=2)
-        # Simulate eviction of root and s1
         del _state_table[root]
         del _state_table[s1]
-        # Only s2 survives — chain is broken at s1 (first missing ancestor)
         path = _reconstruct_tactic_path(s2)
-        assert path.tactics == ["auto."]
-        assert path.status == "ancestor_evicted"
-        assert path.broken_at == s1
+        assert path.tactics == ["intros.", "auto."]
+        assert path.status == "complete"
+        assert path.broken_at is None
 
-    def test_cycle_detection(self):
-        """A state whose parent_id points to itself terminates without infinite loop."""
-        from rocq_mcp.interactive import (
-            _reconstruct_tactic_path,
-            _state_table,
-        )
-
-        s1 = add_mock_state(None, "intros.", step=0)
-        # Manually create a cycle: s1's parent_id points to itself
-        _state_table[s1].parent_id = s1
-        path = _reconstruct_tactic_path(s1)
-        assert isinstance(path.tactics, list)
-        assert path.status == "cycle"
-        assert path.broken_at == s1
-
-    def test_cycle_detection_multi_state(self):
-        """A multi-state cycle (s2 -> s1 -> s2) reports the repeating id."""
+    def test_parent_id_cycles_are_irrelevant(self):
+        """parent_id is bookkeeping only — a spliced cycle cannot corrupt
+        the materialized path (the old walker had to detect it)."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1569,12 +1555,12 @@ class TestReconstructTacticPath:
 
         s1 = add_mock_state(None, "t1.", step=0)
         s2 = add_mock_state(s1, "t2.", step=1)
-        # Splice s1's parent back to s2 to form s2 -> s1 -> s2 -> ...
+        # Splice s1's parent back to s2: would have looped the old walker.
         _state_table[s1].parent_id = s2
         path = _reconstruct_tactic_path(s2)
-        assert path.status == "cycle"
-        # Walk visits s2, s1, then would revisit s2 → breaks at s2
-        assert path.broken_at == s2
+        assert path.tactics == ["t1.", "t2."]
+        assert path.status == "complete"
+        assert path.broken_at is None
 
     def test_status_complete_on_normal_chain(self):
         """A normal chain root->s1->s2 returns status=complete."""
@@ -1588,8 +1574,9 @@ class TestReconstructTacticPath:
         assert path.status == "complete"
         assert path.broken_at is None
 
-    def test_status_ancestor_evicted_on_root_eviction(self):
-        """When the root is evicted, status=ancestor_evicted at root id."""
+    def test_root_eviction_leaves_the_chain_complete(self):
+        """Root eviction no longer degrades the chain — the leaf carries
+        the full materialized path."""
         from rocq_mcp.interactive import (
             _reconstruct_tactic_path,
             _state_table,
@@ -1598,13 +1585,10 @@ class TestReconstructTacticPath:
         root = add_mock_state(None, None, step=0)
         s1 = add_mock_state(root, "intros.", step=1)
         s2 = add_mock_state(s1, "auto.", step=2)
-        # Evict root
         del _state_table[root]
         path = _reconstruct_tactic_path(s2)
-        assert path.status == "ancestor_evicted"
-        assert path.broken_at == root
-        # Should still have the tactics from surviving states
-        assert "auto." in path.tactics
+        assert path.status == "complete"
+        assert path.tactics == ["intros.", "auto."]
 
 
 class TestBuildCheckSuccessDictTacticPath:
@@ -1635,7 +1619,9 @@ class TestBuildCheckSuccessDictTacticPath:
         assert "proof_tactics_hint" not in result
         assert "proof_tactics_complete" not in result
 
-    def test_ancestor_evicted_drops_tactics_emits_status(self):
+    def test_mid_chain_eviction_keeps_the_full_chain(self):
+        """Ancestor eviction no longer degrades the proof-finished
+        envelope: the materialized path yields complete proof_tactics."""
         from rocq_mcp.interactive import (
             _build_check_success_dict,
             _state_remove,
@@ -1658,23 +1644,20 @@ class TestBuildCheckSuccessDictTacticPath:
             complete=None,
         )
         assert result["proof_finished"] is True
-        assert "proof_tactics" not in result
-        assert result["proof_tactics_status"] == "ancestor_evicted"
-        assert result["proof_tactics_broken_at"] == s1
-        assert "proof_tactics_hint" in result
-        assert "proof_hint" not in result
-        assert "proof_tactics_complete" not in result
+        assert result["proof_tactics"] == ["intros.", "reflexivity."]
+        assert "proof_hint" in result
+        assert "proof_tactics_status" not in result
 
-    def test_cycle_drops_tactics_emits_status(self):
+    def test_leaf_eviction_drops_tactics_emits_status(self):
+        """Only the leaf itself going missing breaks the chain now."""
         from rocq_mcp.interactive import (
             _build_check_success_dict,
-            _state_table,
+            _state_remove,
         )
 
         s1 = add_mock_state(None, "t1.", step=0)
         s2 = add_mock_state(s1, "t2.", step=1)
-        # Splice s1's parent back to s2 to form s2 -> s1 -> s2 -> ...
-        _state_table[s1].parent_id = s2
+        _state_remove(s2)
 
         result = _build_check_success_dict(
             goals_text="",
@@ -1689,7 +1672,7 @@ class TestBuildCheckSuccessDictTacticPath:
         )
         assert result["proof_finished"] is True
         assert "proof_tactics" not in result
-        assert result["proof_tactics_status"] == "cycle"
+        assert result["proof_tactics_status"] == "ancestor_evicted"
         assert result["proof_tactics_broken_at"] == s2
         assert "proof_tactics_hint" in result
         assert "proof_hint" not in result

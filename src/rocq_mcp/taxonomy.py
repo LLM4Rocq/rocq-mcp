@@ -37,6 +37,8 @@ class FailureReason(StrEnum):
     NOT_FOUND = "not_found"
     #: rocq_check mid-batch: Coq rejected a tactic (pet still healthy).
     TACTIC_FAILED = "tactic_failed"
+    #: rocq_search: Coq rejected the Search pattern/filter syntax.
+    QUERY_REJECTED = "query_rejected"
     #: coqc returned non-zero (rocq_compile / rocq_compile_file / rocq_verify).
     COMPILE_ERROR = "compile_error"
     #: rocq_verify: proof relies on Admitted/admit or a non-whitelisted axiom.

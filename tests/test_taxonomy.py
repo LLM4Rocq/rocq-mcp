@@ -22,6 +22,7 @@ EXPECTED_REASONS = {
     "validation",
     "not_found",
     "tactic_failed",
+    "query_rejected",
     "compile_error",
     "axiom_dependency",
     "type_mismatch",

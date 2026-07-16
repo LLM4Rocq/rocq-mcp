@@ -445,6 +445,10 @@ class _StateEntry:
     proof_finished: bool = False
     file_mtime: float | None = None  # mtime at session creation
     resolved_file: str | None = None  # absolute path for staleness check
+    # Cumulative root->here command path, materialized at creation so a
+    # finished proof's tactic chain survives LRU eviction of ancestors
+    # (the tuple shares structure with the parent's — pointer copies).
+    tactic_path: tuple[str, ...] = ()
     # Wall-clock timestamp; used by rocq_diag for age.
     created_at: float = field(default_factory=time.time)
 
@@ -474,6 +478,8 @@ def _state_add(
     global _state_next_id
     sid = _state_next_id
     _state_next_id += 1
+    parent_entry = _state_table.get(parent_id) if parent_id is not None else None
+    base_path = parent_entry.tactic_path if parent_entry is not None else ()
     _state_table[sid] = _StateEntry(
         state=state,
         file=file,
@@ -485,6 +491,7 @@ def _state_add(
         proof_finished=getattr(state, "proof_finished", False),
         file_mtime=file_mtime,
         resolved_file=resolved_file,
+        tactic_path=(*base_path, tactic) if tactic is not None else base_path,
     )
     # Evict LRU entries when table exceeds max size.
     while len(_state_table) > _MAX_STATES:
@@ -605,32 +612,117 @@ class _TacticPathResult:
 
 
 def _reconstruct_tactic_path(state_id: int) -> _TacticPathResult:
-    """Walk the parent_id chain backward; return a ``_TacticPathResult``.
+    """Return the root->leaf command path for *state_id*.
 
-    See ``_TacticPathResult`` for the meaning of each field and the
-    three possible status values.
+    Since every ``_StateEntry`` materializes its cumulative
+    ``tactic_path`` at creation, the chain survives LRU eviction of
+    ancestors — the walk-the-parents failure modes (``ancestor_evicted``
+    mid-chain, ``cycle``) are structurally gone.  The only remaining
+    break is the leaf itself missing from the table (evicted or pet
+    restarted), reported as ``ancestor_evicted`` at *state_id* for
+    contract continuity.
     """
-    tactics: list[str] = []
-    current_id: int | None = state_id
-    visited: set[int] = set()
-    status: Literal["complete", "ancestor_evicted", "cycle"] = "complete"
-    broken_at: int | None = None
-    while current_id is not None:
-        if current_id in visited:
-            status = "cycle"
-            broken_at = current_id
-            break
-        visited.add(current_id)
-        entry = _state_get(current_id)
-        if entry is None:
-            status = "ancestor_evicted"
-            broken_at = current_id
-            break
-        if entry.tactic is not None:
-            tactics.append(entry.tactic)
-        current_id = entry.parent_id
-    tactics.reverse()
-    return _TacticPathResult(tactics=tactics, status=status, broken_at=broken_at)
+    entry = _state_get(state_id)
+    if entry is None:
+        return _TacticPathResult(
+            tactics=[], status="ancestor_evicted", broken_at=state_id
+        )
+    return _TacticPathResult(
+        tactics=list(entry.tactic_path), status="complete", broken_at=None
+    )
+
+
+_DECL_KEYWORDS = (
+    "Theorem",
+    "Lemma",
+    "Fact",
+    "Remark",
+    "Corollary",
+    "Proposition",
+    "Property",
+    "Example",
+)
+_DECL_RE = re.compile(rf"^\s*({'|'.join(_DECL_KEYWORDS)})\b")
+
+
+def _recover_statement(
+    entry: _StateEntry, tactics: list[str]
+) -> tuple[str | None, str]:
+    """Best-effort ``(statement, statement_source)`` for a finished proof.
+
+    - theorem-mode sessions: extract the declaration sentence from the
+      session's ``.v`` file (``statement_source="file"``).
+    - preamble-mode sessions: the statement is one of the session
+      commands (``"session_commands"``).
+    - otherwise ``(None, "unrecoverable")`` — e.g. position-mode starts.
+    """
+    theorem = entry.theorem or ""
+    if (
+        entry.resolved_file
+        and theorem
+        and not theorem.startswith("@pos(")
+        and theorem != "<preamble>"
+    ):
+        try:
+            source = Path(entry.resolved_file).read_text()
+        except OSError:
+            source = None
+        if source is not None:
+            name_re = re.compile(
+                rf"^\s*({'|'.join(_DECL_KEYWORDS)})\s+{re.escape(theorem)}\b"
+            )
+            for sentence in _split_rocq_sentences(source):
+                if name_re.match(sentence.strip()):
+                    return sentence.strip(), "file"
+    for command in tactics:
+        if _DECL_RE.match(command):
+            return command.strip(), "session_commands"
+    return None, "unrecoverable"
+
+
+_PROOF_CLOSERS = ("Qed.", "Defined.", "Admitted.", "Abort.", "Save.")
+
+
+def _assemble_proof_script(entry: _StateEntry, tactics: list[str]) -> dict[str, Any]:
+    """Build ``{proof_script?, statement?, statement_source}``.
+
+    The script is the ready-to-paste declaration + ``Proof.`` + tactic
+    body + ``Qed.``; preamble-mode sessions additionally prepend the
+    session's import commands so the script is self-contained.
+    """
+    statement, source_kind = _recover_statement(entry, tactics)
+    if statement is None:
+        return {"statement_source": source_kind}
+
+    if source_kind == "session_commands":
+        split = tactics.index(statement) if statement in tactics else 0
+        preamble_cmds = tactics[:split]
+        body = tactics[split + 1 :]
+    else:
+        preamble_cmds = []
+        body = list(tactics)
+
+    # Normalize: the agent may have run "Proof." / a closer explicitly.
+    if body and body[0].strip() == "Proof.":
+        body = body[1:]
+    closer = "Qed."
+    if body and body[-1].strip() in _PROOF_CLOSERS:
+        closer = body[-1].strip()
+        body = body[:-1]
+
+    lines: list[str] = []
+    if preamble_cmds:
+        lines.extend(cmd.strip() for cmd in preamble_cmds)
+        lines.append("")
+    lines.append(statement)
+    lines.append("Proof.")
+    lines.extend(f"  {t.strip()}" for t in body)
+    lines.append(closer)
+    return {
+        "proof_script": "\n".join(lines) + "\n",
+        "statement": statement,
+        "statement_source": source_kind,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +740,47 @@ _server._pet_invalidation_hooks.append(_state_invalidate_all)
 # ---------------------------------------------------------------------------
 
 _MAX_QUERY_OUTPUT = 8000
+
+
+def _query_context_state(
+    pet: Any,
+    *,
+    tool: str,
+    file: str,
+    preamble: str,
+    from_state: int | None,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+) -> tuple[Any, int | None, str | None] | dict[str, Any]:
+    """Resolve the environment state for a query-style tool.
+
+    Same three modes as ``rocq_query`` (from_state > file > preamble).
+    Returns ``(state, from_state_id, stale_warning)`` on success, or a
+    failure-envelope dict.  Callers run under ``_run_with_pet``.
+    """
+    if from_state is not None:
+        entry, base_id, err = _resolve_check_base_state(from_state)
+        if err or entry is None:
+            return _server._fail(
+                lifespan_state, tool, err or f"State {from_state} not found."
+            )
+        return entry.state, base_id, _check_staleness(entry)
+    if file:
+        try:
+            return (
+                _get_file_end_state(pet, file, workspace, lifespan_state),
+                None,
+                None,
+            )
+        except (ValueError, FileNotFoundError) as e:
+            return _server._fail(lifespan_state, tool, str(e))
+    preamble_text = preamble.strip()
+    preamble_cmds = _split_rocq_sentences(preamble_text) if preamble_text else []
+    return (
+        _get_or_create_import_state(pet, workspace, preamble_cmds, lifespan_state),
+        None,
+        None,
+    )
 
 
 @collects_degraded
@@ -730,37 +863,18 @@ async def run_query(
             return _server._fail(lifespan_state, "rocq_query", forbidden)
 
     def _do_query(pet: Any) -> dict[str, Any]:
-        from_state_id: int | None = None
-        stale_warning: str | None = None
-        if from_state is not None:
-            entry, base_id, err = _resolve_check_base_state(from_state)
-            if err or entry is None:
-                return _server._fail(
-                    lifespan_state,
-                    "rocq_query",
-                    err or f"State {from_state} not found.",
-                )
-            state = entry.state
-            from_state_id = base_id
-            # Match the staleness check rocq_check does: a query against
-            # a state whose backing file changed on disk would resolve
-            # symbols against the new file's environment.  Surface a
-            # warning so the agent knows the state may not match the
-            # source they're reading.
-            stale_warning = _check_staleness(entry)
-        elif file:
-            try:
-                state = _get_file_end_state(pet, file, workspace, lifespan_state)
-            except (ValueError, FileNotFoundError) as e:
-                return _server._fail(lifespan_state, "rocq_query", str(e))
-        else:
-            preamble_text = preamble.strip()
-            preamble_cmds = (
-                _split_rocq_sentences(preamble_text) if preamble_text else []
-            )
-            state = _get_or_create_import_state(
-                pet, workspace, preamble_cmds, lifespan_state
-            )
+        resolved = _query_context_state(
+            pet,
+            tool="rocq_query",
+            file=file,
+            preamble=preamble,
+            from_state=from_state,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        state, from_state_id, stale_warning = resolved
 
         cmd = command.strip()
         if not cmd.endswith("."):
@@ -801,6 +915,334 @@ async def run_query(
         "rocq_query",
         timeout=timeout,
         auto_record=auto_record,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_search (structured Search)
+# ---------------------------------------------------------------------------
+
+#: One Search hit per feedback message: ``name: type`` (type may wrap
+#: across lines).  Unparseable messages are kept as raw hits.
+_SEARCH_HIT_RE = re.compile(r"^([^\s:]+)\s*:\s*(.*)$", re.DOTALL)
+
+_SEARCH_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.']*$")
+_MAX_SEARCH_PATTERNS = 8
+
+
+def _build_search_command(
+    pat: str, kind: str, inside: list[str], outside: list[str]
+) -> str:
+    parts = ["Search"]
+    if kind:
+        parts.append(f"is:{kind}")
+    parts.append(pat.strip().rstrip("."))
+    if inside:
+        parts.append("inside " + " ".join(inside))
+    if outside:
+        parts.append("outside " + " ".join(outside))
+    return " ".join(parts) + "."
+
+
+@collects_degraded
+async def run_search(
+    pattern: str,
+    workspace: str,
+    lifespan_state: dict[str, Any],
+    *,
+    patterns: list[str] | None = None,
+    kind: str = "",
+    inside: list[str] | None = None,
+    outside: list[str] | None = None,
+    preamble: str = "",
+    file: str = "",
+    from_state: int | None = None,
+    max_results: int = 30,
+    offset: int = 0,
+    include_types: bool = True,
+    include_warnings: bool = True,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Structured ``Search``: parsed hits, filters, fan-out, pagination.
+
+    Each Coq Search hit arrives as its own feedback message, so parsing
+    is per-message (``name: type``), not blob regexing.  With multiple
+    *patterns*, hits are merged and deduplicated by name, and each hit
+    records which patterns matched it (``matched_patterns``) — a cheap
+    premise-ranking signal.
+
+    Coq rejecting the Search syntax surfaces as ``reason:
+    "query_rejected"`` with the offending command in the message.
+    """
+    all_patterns = [pat for pat in [pattern, *(patterns or [])] if pat and pat.strip()]
+    if not all_patterns:
+        return _server._fail(
+            lifespan_state, "rocq_search", "Provide a non-empty pattern."
+        )
+    if len(all_patterns) > _MAX_SEARCH_PATTERNS:
+        return _server._fail(
+            lifespan_state,
+            "rocq_search",
+            f"Too many patterns: {len(all_patterns)} exceeds "
+            f"{_MAX_SEARCH_PATTERNS}.",
+        )
+    if kind and not _SEARCH_IDENT_RE.match(kind):
+        return _server._fail(lifespan_state, "rocq_search", f"Invalid kind {kind!r}.")
+    for module in (inside or []) + (outside or []):
+        if not _SEARCH_IDENT_RE.match(module):
+            return _server._fail(
+                lifespan_state, "rocq_search", f"Invalid module name {module!r}."
+            )
+    if max_results < 1:
+        return _server._fail(lifespan_state, "rocq_search", "max_results must be >= 1.")
+    if offset < 0:
+        return _server._fail(lifespan_state, "rocq_search", "offset must be >= 0.")
+    if file and from_state is not None:
+        return _server._fail(
+            lifespan_state,
+            "rocq_search",
+            "Provide either 'file' or 'from_state', not both.",
+        )
+    if from_state is not None and preamble.strip():
+        return _server._fail(
+            lifespan_state,
+            "rocq_search",
+            "preamble is not used in from_state mode; the live state already "
+            "provides the context.",
+        )
+    if from_state is None and file and preamble.strip():
+        return _server._fail(
+            lifespan_state,
+            "rocq_search",
+            "Provide either 'file' or 'preamble', not both.",
+        )
+
+    commands = [
+        _build_search_command(pat, kind, inside or [], outside or [])
+        for pat in all_patterns
+    ]
+    for cmd in commands + ([preamble] if preamble.strip() else []):
+        forbidden = _check_forbidden_commands(cmd)
+        if forbidden:
+            return _server._fail(lifespan_state, "rocq_search", forbidden)
+
+    multi = len(all_patterns) > 1
+
+    def _do_search(pet: Any) -> dict[str, Any]:
+        try:
+            from pytanque import PetanqueError
+        except ImportError:
+            return {
+                "success": False,
+                "error": _server._PYTANQUE_NOT_INSTALLED_HINT,
+            }
+
+        resolved = _query_context_state(
+            pet,
+            tool="rocq_search",
+            file=file,
+            preamble=preamble,
+            from_state=from_state,
+            workspace=workspace,
+            lifespan_state=lifespan_state,
+        )
+        if isinstance(resolved, dict):
+            return resolved
+        state, from_state_id, stale_warning = resolved
+
+        # name/raw-key -> {"name"|"raw", "type", "patterns"} in first-seen order
+        merged: dict[str, dict[str, Any]] = {}
+        for pat, cmd in zip(all_patterns, commands, strict=True):
+            try:
+                result_state = pet.run(state, cmd)
+            except PetanqueError as e:
+                if not _server._pet_alive(lifespan_state.get("pet_client")):
+                    raise
+                return _server._fail(
+                    lifespan_state,
+                    "rocq_search",
+                    f"Coq rejected {cmd!r}: {e.message}",
+                    reason="query_rejected",
+                )
+            feedback = result_state.feedback or []
+            if not include_warnings:
+                feedback = [
+                    (lvl, msg) for lvl, msg in feedback if lvl != _LSP_SEVERITY_WARNING
+                ]
+            for _, msg in feedback:
+                text = (msg or "").strip()
+                if not text:
+                    continue
+                match = _SEARCH_HIT_RE.match(text)
+                if match:
+                    key = match.group(1)
+                    entry = merged.setdefault(
+                        key,
+                        {"name": key, "type": match.group(2).strip(), "patterns": []},
+                    )
+                else:
+                    key = text
+                    entry = merged.setdefault(
+                        key, {"raw": text, "type": None, "patterns": []}
+                    )
+                if pat not in entry["patterns"]:
+                    entry["patterns"].append(pat)
+
+        order = list(merged)
+        total = len(order)
+        window = order[offset : offset + max_results]
+        hits: list[dict[str, Any]] = []
+        for key in window:
+            entry = merged[key]
+            hit: dict[str, Any] = {}
+            if "name" in entry:
+                hit["name"] = entry["name"]
+                if include_types and entry["type"]:
+                    hit["type"] = _cap_type(entry["type"])
+            else:
+                hit["raw"] = _cap_type(entry["raw"])
+            if multi:
+                hit["matched_patterns"] = entry["patterns"]
+            hits.append(hit)
+
+        resp: dict[str, Any] = {
+            "success": True,
+            "hits": hits,
+            "total": total,
+            "offset": offset,
+            "truncated": offset + len(hits) < total,
+            "query": commands if multi else commands[0],
+        }
+        if from_state_id is not None:
+            resp["from_state_id"] = from_state_id
+        if stale_warning:
+            resp["stale_warning"] = stale_warning
+        return resp
+
+    return await _server._run_with_pet(
+        _do_search,
+        lifespan_state,
+        "rocq_search",
+        timeout=timeout,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: rocq_goal (stateless goal inspection)
+# ---------------------------------------------------------------------------
+
+
+@collects_degraded
+async def run_goal(
+    lifespan_state: dict[str, Any],
+    *,
+    from_state: int | None = None,
+    file: str = "",
+    line: int | None = None,
+    character: int | None = None,
+    workspace: str = "",
+    goals_format: str = "pretty",
+    diff_from: int | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Show goals at a live state_id or a file position — registers no state.
+
+    Unlike ``rocq_start`` in position mode, this never allocates a
+    ``state_id``: pure inspection with zero LRU-table footprint.
+    ``diff_from`` (with ``from_state``) returns the delta between two
+    live states instead of full goals.
+    """
+    if goals_format not in GOALS_RENDER_FORMATS:
+        return _server._fail(
+            lifespan_state,
+            "rocq_goal",
+            f"Invalid goals_format {goals_format!r}; expected one of "
+            "pretty | structured | names_only.",
+        )
+    by_state = from_state is not None
+    by_pos = bool(file) and line is not None and character is not None
+    if by_state == by_pos:
+        return _server._fail(
+            lifespan_state,
+            "rocq_goal",
+            "Provide either from_state, or file+line+character (not both).",
+        )
+    if diff_from is not None and not by_state:
+        return _server._fail(
+            lifespan_state, "rocq_goal", "diff_from requires from_state."
+        )
+
+    resolved_file = ""
+    if by_pos:
+        if not (0 <= line <= _MAX_LINE_CHAR_RANGE) or not (
+            0 <= character <= _MAX_LINE_CHAR_RANGE
+        ):
+            return _server._fail(
+                lifespan_state,
+                "rocq_goal",
+                f"line and character must be in range [0, {_MAX_LINE_CHAR_RANGE}].",
+            )
+        try:
+            resolved_file = _server._resolve_file_in_workspace(file, workspace)
+        except (ValueError, FileNotFoundError) as e:
+            return _server._fail(lifespan_state, "rocq_goal", str(e))
+
+    def _do_goal(pet: Any) -> dict[str, Any]:
+        stale_warning: str | None = None
+        if by_state:
+            entry, base_id, err = _resolve_check_base_state(from_state)
+            if err or entry is None:
+                return _server._fail(
+                    lifespan_state, "rocq_goal", err or "State not found."
+                )
+            state = entry.state
+            stale_warning = _check_staleness(entry)
+            from_state_id: int | None = base_id
+        else:
+            _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+            state = pet.get_state_at_pos(resolved_file, line, character)
+            from_state_id = None
+
+        complete = pet.complete_goals(state)
+        goals_list = complete.goals if complete else []
+
+        resp: dict[str, Any] = {
+            "success": True,
+            "stateless": True,
+            "proof_finished": getattr(state, "proof_finished", False),
+            "goals_count": len(goals_list),
+        }
+        if diff_from is not None:
+            other, _, err2 = _resolve_check_base_state(diff_from)
+            if err2 or other is None:
+                return _server._fail(
+                    lifespan_state, "rocq_goal", err2 or "diff_from state not found."
+                )
+            other_complete = pet.complete_goals(other.state)
+            other_goals = other_complete.goals if other_complete else []
+            resp["goals_diff"] = _goals_diff(other_goals, goals_list)
+        elif goals_format == "pretty":
+            resp["goals"] = _format_goals(goals_list) or "No goals remaining."
+        else:
+            resp["goals"] = _render_goals(goals_list, goals_format)
+        depth = _focus_depth(complete)
+        if depth is not None:
+            resp["focus_depth"] = depth
+        if complete and complete.shelf:
+            resp["shelved_goals"] = len(complete.shelf)
+        if complete and complete.given_up:
+            resp["given_up_goals"] = len(complete.given_up)
+        if from_state_id is not None:
+            resp["from_state_id"] = from_state_id
+        if stale_warning:
+            resp["stale_warning"] = stale_warning
+        return resp
+
+    return await _server._run_with_pet(
+        _do_goal,
+        lifespan_state,
+        "rocq_goal",
+        timeout=timeout,
     )
 
 
@@ -1435,6 +1877,29 @@ async def run_notations(
 
 _MAX_STEP_MULTI_TACTICS = 20
 
+#: The standard automation battery for ``rocq_step_multi(preset="auto")``,
+#: cheapest first.  (Restores the convenience of the removed
+#: ``rocq_auto_solve`` tool as a parameter instead of a tool slot.)
+#: lia/lra/nia/nra/ring/field need the matching imports in scope.
+_AUTO_SOLVE_TACTICS: tuple[str, ...] = (
+    "trivial.",
+    "reflexivity.",
+    "assumption.",
+    "exact I.",
+    "auto.",
+    "eauto.",
+    "tauto.",
+    "intuition.",
+    "lia.",
+    "lra.",
+    "nia.",
+    "nra.",
+    "ring.",
+    "field.",
+    "decide equality.",
+    "firstorder.",
+)
+
 
 def _build_position_start_result(
     pet: Any,
@@ -1934,11 +2399,21 @@ def _build_check_success_dict(
         if path.status == "complete":
             if path.tactics:
                 result["proof_tactics"] = path.tactics
-            result["proof_hint"] = (
-                "Proof complete. Assemble the .v (imports + statement + "
-                "Proof. + proof_tactics + Qed.), then validate with "
-                "rocq_compile_file and rocq_verify."
-            )
+            leaf = _state_get(state_id)
+            script_fields = _assemble_proof_script(leaf, path.tactics) if leaf else {}
+            result.update(script_fields)
+            if "proof_script" in script_fields:
+                result["proof_hint"] = (
+                    "Proof complete. Validate proof_script with "
+                    "rocq_compile_file (after writing it into the .v) "
+                    "and rocq_verify."
+                )
+            else:
+                result["proof_hint"] = (
+                    "Proof complete. Assemble the .v (imports + statement "
+                    "+ Proof. + proof_tactics + Qed.), then validate with "
+                    "rocq_compile_file and rocq_verify."
+                )
         else:
             result["proof_tactics_status"] = path.status
             result["proof_tactics_broken_at"] = path.broken_at
@@ -2148,6 +2623,8 @@ async def run_step_multi(
     include_warnings: bool = True,
     timeout: float | None = None,
     goals_format: str = "pretty",
+    timeouts: list[float] | None = None,
+    preset: str = "",
 ) -> dict[str, Any]:
     """Core implementation of rocq_step_multi (testable without FastMCP Context).
 
@@ -2170,6 +2647,45 @@ async def run_step_multi(
             f"Invalid goals_format {goals_format!r}; expected one of "
             "pretty | structured | names_only.",
         )
+    if preset not in ("", "auto"):
+        return _server._fail(
+            lifespan_state,
+            "rocq_step_multi",
+            f'Invalid preset {preset!r}; expected "auto" or omit.',
+        )
+    preset_truncated = False
+    if preset == "auto":
+        if timeouts is not None:
+            return _server._fail(
+                lifespan_state,
+                "rocq_step_multi",
+                "timeouts cannot be combined with preset (the battery "
+                "changes the tactic list length).",
+            )
+        seen = {t.strip() for t in tactics}
+        battery = [t for t in _AUTO_SOLVE_TACTICS if t not in seen]
+        room = _MAX_STEP_MULTI_TACTICS - len(tactics)
+        if room < len(battery):
+            preset_truncated = True
+        tactics = list(tactics) + battery[: max(0, room)]
+        if not tactics:
+            return _server._fail(
+                lifespan_state, "rocq_step_multi", "No tactics to try."
+            )
+    if timeouts is not None:
+        if len(timeouts) != len(tactics):
+            return _server._fail(
+                lifespan_state,
+                "rocq_step_multi",
+                f"timeouts has {len(timeouts)} entries for " f"{len(tactics)} tactics.",
+            )
+        if any(t <= 0 for t in timeouts):
+            return _server._fail(
+                lifespan_state,
+                "rocq_step_multi",
+                "every timeouts entry must be > 0.",
+            )
+
     # Validate each tactic up front
     if len(tactics) > _MAX_STEP_MULTI_TACTICS:
         return _server._fail(
@@ -2195,7 +2711,11 @@ async def run_step_multi(
         if timeout is not None and timeout > 0
         else lifespan_state["pet_timeout"]
     )
-    hard_timeout = _compute_hard_timeout(_timeout)
+    if timeouts is not None:
+        # Per-tactic budgets: the batch's wall clock is their sum.
+        hard_timeout = _compute_hard_timeout(sum(timeouts))
+    else:
+        hard_timeout = _compute_hard_timeout(_timeout)
 
     # Quick pre-check to avoid acquiring lock for invalid states.
     # Re-validated inside _execute (state may be invalidated between checks).
@@ -2235,21 +2755,23 @@ async def run_step_multi(
         # that reached this proof state.
         outcome_index: dict[tuple[Any, ...], int] = {}
 
-        for tactic in tactics:
+        for tactic_index, tactic in enumerate(tactics):
             tac = tactic.strip()
             # Focus/bullet tokens ({, }, -, +, * runs) must stay bare:
             # Rocq rejects a trailing dot (e.g. "-." is a syntax error).
             if not _is_focus_token(tac) and not tac.endswith("."):
                 tac += "."
 
-            per_tactic_budget = max(1, int(_timeout / len(tactics)))
-            tac_rocq_timeout = (
-                per_tactic_budget
-                if _is_timeout_eligible(tac) and _timeout >= 1
-                else None
-            )
+            if timeouts is not None:
+                per_tactic_budget = max(1, int(timeouts[tactic_index]))
+                budget_eligible = _is_timeout_eligible(tac)
+            else:
+                per_tactic_budget = max(1, int(_timeout / len(tactics)))
+                budget_eligible = _is_timeout_eligible(tac) and _timeout >= 1
+            tac_rocq_timeout = per_tactic_budget if budget_eligible else None
 
             entry_dict: dict[str, Any] = {"tactic": tac}
+            tactic_started = time.monotonic()
             try:
                 new_state = pet.run(parent_state, tac, timeout=tac_rocq_timeout)
 
@@ -2273,6 +2795,8 @@ async def run_step_multi(
                 )
                 entry_dict["success"] = True
                 entry_dict["proof_finished"] = new_state.proof_finished
+
+                entry_dict["goals_count"] = len(goals_list)
 
                 fingerprint = (
                     goals_text,
@@ -2311,14 +2835,47 @@ async def run_step_multi(
                 entry_dict["reason"] = "tactic_failed"
                 entry_dict["error"] = e.message
 
+            entry_dict["time_ms"] = int((time.monotonic() - tactic_started) * 1000)
             partial_state["partial_results"].append(entry_dict)
 
         # Read-only exploration — do NOT update state table
+        results = list(partial_state["partial_results"])
+        successes = [e for e in results if e.get("success")]
+        finished = [e["tactic"] for e in successes if e.get("proof_finished")]
+        best: dict[str, Any] | None = None
+        for e in successes:
+            count = e.get("goals_count")
+            if count is None:
+                continue
+            key = (not e.get("proof_finished", False), count)
+            if best is None or key < (
+                not best.get("proof_finished", False),
+                best.get("goals_count", 1 << 30),
+            ):
+                best = e
         resp: dict[str, Any] = {
             "success": True,
-            "results": list(partial_state["partial_results"]),
+            "results": results,
             "distinct_outcomes": len(outcome_index),
+            "summary": {
+                "tried": len(results),
+                "succeeded": len(successes),
+                "finished": finished,
+                "distinct_outcomes": len(outcome_index),
+                **(
+                    {
+                        "best": {
+                            "tactic": best["tactic"],
+                            "goals_count": best["goals_count"],
+                        }
+                    }
+                    if best is not None
+                    else {}
+                ),
+            },
         }
+        if preset_truncated:
+            resp["preset_truncated"] = True
         if base_state_id is not None:
             resp["from_state_id"] = base_state_id
         if stale_warning:

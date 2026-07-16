@@ -8,8 +8,10 @@ guide carries the patterns.
 | If you want to... | Use |
 |---|---|
 | Iteratively develop a single proof, trying tactics | `rocq_start` + `rocq_check` / `rocq_step_multi` |
-| Inspect proof state at a specific line / character | `rocq_start(file=..., line=..., character=...)` — see Position semantics below |
-| Search for a lemma by pattern (e.g. `Search _.`) | `rocq_query` |
+| Peek at goals (state or file position) without creating a session | `rocq_goal` |
+| Inspect goals AND open a session at a position | `rocq_start(file=..., line=..., character=...)` — see Position semantics below |
+| Search for a lemma by pattern (structured hits, filters, pagination) | `rocq_search` |
+| Run raw vernacular queries (Print / About / Locate / Check / Search) | `rocq_query` |
 | Compile a finished `.v` file (whole-file check, axiom audit) | `rocq_compile_file` |
 | Compile a finished proof from a string buffer | `rocq_compile` |
 | Probe a scratch file in `/tmp` | `rocq_start(file='/tmp/probe.v', theorem=...)` — **never `coqc /tmp/probe.v`** (coqc reloads all imports each call; the session keeps them warm) |

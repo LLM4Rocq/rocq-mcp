@@ -6,7 +6,7 @@
 
 An [MCP](https://modelcontextprotocol.io/) server for [Rocq](https://rocq-prover.org/) (formerly Coq) proof development. It exposes compilation, verification, querying, and interactive tactic stepping as MCP tools, so that LLM agents can write and check Rocq proofs.
 
-- **Thirteen MCP tools** backed by [pet](https://github.com/ejgallego/coq-lsp) (Rocq's coq-lsp interactive backend).
+- **Fifteen MCP tools** backed by [pet](https://github.com/ejgallego/coq-lsp) (Rocq's coq-lsp interactive backend).
 - **Interactive tools.** Inspect proof goals, search the environment, step through tactics.
 - **Staged verification.** Sandboxed audit of admits, axioms, and statement mismatches.
 - **State is cached across calls** for fast iteration.
@@ -44,7 +44,7 @@ The server exposes thirteen MCP tools:
 | **`rocq_compile`** | Compile Rocq source from a string buffer via coqc. |
 | **`rocq_compile_file`** | Compile a .v file on disk via coqc — whole-file check and final verification. |
 | **`rocq_verify`** | Verify a proof proves the original statement — sandboxed admit/axiom/statement check. |
-| **`rocq_query`** | Run a Rocq query (Search / Check / Print / About / Locate) and return its output. |
+| **`rocq_query`** | Run a raw Rocq query (Check / Print / About / Locate / Search) and return its output. |
 | **`rocq_assumptions`** | List the axioms a theorem depends on (Print Assumptions), parsed. |
 | **`rocq_toc`** | Outline a .v file: definitions, lemmas, theorems, and sections as a hierarchy. |
 | **`rocq_notations`** | Resolve every notation in a statement: which notation, scope, and module. |
@@ -54,6 +54,8 @@ The server exposes thirteen MCP tools:
 | **`rocq_diag`** | Server runtime diagnostics: pet health, memory, lock contention, recent errors. |
 | **`rocq_health`** | Toolchain health: is coqc resolvable, and which opam switch is this server on? |
 | **`rocq_switch`** | Switch the running server to another opam switch — process-global and destructive. |
+| **`rocq_search`** | Search the environment for lemmas/definitions matching a pattern — structured hits. |
+| **`rocq_goal`** | Show proof goals at a live state_id or a file position — registers no state. |
 <!-- END GENERATED: tools -->
 
 > **Switch selection:** The server resolves `coqc` and `pet` from the `PATH` / opam environment of **the process Claude Code (or your MCP client) launched** — *not* from your interactive shell. So the switch is fixed at server-launch time and can silently differ from `opam switch show` in your terminal. Pin it explicitly in the MCP client config, e.g. register the server command as `opam exec --switch=<name> -- uv run --directory <repo> rocq-mcp`, or set `env: { … }` (PATH / OPAM_SWITCH_PREFIX). Call `rocq_health` to see the switch the server is actually on. To change it: either edit the launch command and reconnect the MCP server (`/mcp` → reconnect, or restart the client), or call `rocq_switch(name=…)` to swap in-session — the latter clears all live `state_id`s and may leave `.vo` artifacts ABI-incompatible, so prefer the launch-time pin for a stable setup.
@@ -126,8 +128,8 @@ documentation ships inside the server itself**:
 Every failure response carries `{success: false, error, reason}` with a
 fixed `reason` taxonomy — agents dispatch on `reason`, never on message
 text: `validation`, `not_found`, `timeout`, `crashed`, `memory_exhausted`,
-`lock_contended`, `unavailable`, `tactic_failed`, `compile_error`,
-`axiom_dependency`, `type_mismatch`.
+`lock_contended`, `unavailable`, `tactic_failed`, `query_rejected`,
+`compile_error`, `axiom_dependency`, `type_mismatch`.
 
 ## Recommended usage patterns
 

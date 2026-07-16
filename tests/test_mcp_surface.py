@@ -16,9 +16,11 @@ EXPECTED_TOOLS = {
     "rocq_compile_file",
     "rocq_verify",
     "rocq_query",
+    "rocq_search",
     "rocq_assumptions",
     "rocq_toc",
     "rocq_notations",
+    "rocq_goal",
     "rocq_start",
     "rocq_step_multi",
     "rocq_check",
@@ -35,6 +37,8 @@ EXPECTED_ANNOTATIONS = {
     "rocq_compile_file": (False, False, True),
     "rocq_verify": (False, False, True),
     "rocq_query": (True, None, True),
+    "rocq_search": (True, None, True),
+    "rocq_goal": (True, None, True),
     "rocq_assumptions": (True, None, True),
     "rocq_toc": (True, None, True),
     "rocq_notations": (True, None, True),
@@ -100,15 +104,16 @@ class TestToolInventory:
 
     async def test_description_budgets(self, surface):
         """Every rendered description fits Claude Code's ~2KB deferred
-        budget untruncated, and the total stays lean (was 37.6K chars
-        before the diet)."""
+        budget untruncated, and the average stays lean (the pre-diet
+        13-tool surface averaged ~2.9K chars per tool)."""
         _, _, tools = surface
         total = 0
         for name, tool in tools.items():
             size = len(tool.description or "")
             total += size
             assert size <= 2_000, f"{name} description is {size} chars (> 2000)"
-        assert total <= 15_000, f"descriptions total {total} chars (> 15000)"
+        budget = 1_200 * len(tools)
+        assert total <= budget, f"descriptions total {total} chars (> {budget})"
 
     async def test_description_first_line_is_the_contract(self, surface):
         """The first line decides tool selection — it must be a sentence,

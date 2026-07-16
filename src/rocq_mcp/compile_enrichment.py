@@ -428,6 +428,13 @@ async def run_compile_file_with_state(
                     "end_line": e.end_line,
                     "code": e.code,
                     "message": e.message,
+                    # Ready-made recovery call: rocq_start (or rocq_goal)
+                    # at the failing declaration — no manual position math.
+                    "start_args": {
+                        "file": file,
+                        "line": e.start_line,
+                        "character": 0,
+                    },
                 }
                 for e in proof_errors
             ]

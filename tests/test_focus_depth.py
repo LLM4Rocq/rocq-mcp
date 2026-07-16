@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import _MockPetBase
 
 
@@ -88,7 +89,7 @@ class TestFocusDepthCheck(_MockPetBase):
         sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
         mock_pet.complete_goals.return_value = _fake_goals(2)
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_check(
                 body="intros.",
                 lifespan_state=lifespan_state,
@@ -115,7 +116,7 @@ class TestFocusDepthStepMulti(_MockPetBase):
         sid, mock_pet, lifespan_state = self._setup_state_and_pet(fake_run)
         mock_pet.complete_goals.return_value = _fake_goals(1)
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_step_multi(
                 tactics=["intros.", "auto."],
                 lifespan_state=lifespan_state,

@@ -20,6 +20,7 @@ import types
 import pytest
 
 import rocq_mcp.health as health
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.server as _server
 from rocq_mcp.health import (
     _detect_switch,
@@ -42,7 +43,7 @@ def _reset_pet_state(monkeypatch):
     """Reset pet lock between tests (rocq_switch invalidates pet)."""
     import threading
 
-    monkeypatch.setattr(_server, "_pet_lock", threading.Lock())
+    monkeypatch.setattr(_pet_runtime, "_pet_lock", threading.Lock())
     yield
 
 

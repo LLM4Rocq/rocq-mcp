@@ -68,19 +68,19 @@ class TestNotifyHelpers:
     def test_notify_is_a_noop_outside_a_request(self):
         """No ambient MCP context (unit tests, direct calls): the
         helpers must silently do nothing."""
-        import rocq_mcp.server as srv
+        from rocq_mcp import envelope as env
 
-        srv._progress({}, 1, 2, "msg")
-        srv._log_info({}, "hello")
-        srv._log_warning(None, "hello")
+        env._progress({}, 1, 2, "msg")
+        env._log_info({}, "hello")
+        env._log_warning(None, "hello")
 
     def test_notify_never_raises_even_if_factory_explodes(self):
-        import rocq_mcp.server as srv
+        from rocq_mcp import envelope as env
 
         def bomb(ctx):
             raise RuntimeError("factory bug")
 
-        srv._notify({}, bomb)  # must not raise
+        env._notify({}, bomb)  # must not raise
 
     def test_walker_progress_callback_is_fault_isolated(self):
         """A raising progress callback must not break the walk loop."""

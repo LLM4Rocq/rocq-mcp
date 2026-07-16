@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-import rocq_mcp.server as _server
 import rocq_mcp.interactive as _int
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import _MockPetBase, make_lifespan_state
 
 
@@ -42,7 +42,7 @@ def _patch_pet_boundary(monkeypatch):
             pass
 
     mock_pet = MockPet()
-    monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+    monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
     # Bypass import caching — just return a mock state directly
     monkeypatch.setattr(
         _int,
@@ -51,9 +51,9 @@ def _patch_pet_boundary(monkeypatch):
     )
     # Reset the global pet semaphore between tests so the orchestrator
     # rebuilds its own lock fresh inside each test's event loop.
-    _server._pet_semaphore = None
+    _pet_runtime._pet_semaphore = None
     yield
-    _server._pet_semaphore = None
+    _pet_runtime._pet_semaphore = None
 
 
 class TestMaxResultsEdgeCases(_MockPetBase):

@@ -7,9 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Ensure the full module graph is loaded (resolves circular import between
-# server.py and interactive.py) before any test imports individual symbols.
-import rocq_mcp.server  # noqa: F401
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 
 # ---------------------------------------------------------------------------
 # Availability flags
@@ -268,8 +267,6 @@ def make_lifespan_state(pet_timeout: float = 30.0, *, full: bool = False) -> dic
     if full:
         import collections
 
-        import rocq_mcp.server as _server
-
         state.update(
             {
                 "workspace": "/tmp",
@@ -277,7 +274,7 @@ def make_lifespan_state(pet_timeout: float = 30.0, *, full: bool = False) -> dic
                 "total_spawns": 0,
                 "peak_pet_rss_mb": 0.0,
                 "pet_generation": 0,
-                "recent_errors": collections.deque(maxlen=_server._RECENT_ERRORS_MAX),
+                "recent_errors": collections.deque(maxlen=_config._RECENT_ERRORS_MAX),
                 "enrichment_failures": {},
                 "lock_wait_ms_last": 0.0,
                 "lock_wait_ms_max": 0.0,
@@ -359,14 +356,13 @@ class _MockPetBase:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):

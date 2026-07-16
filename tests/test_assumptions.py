@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import rocq_mcp.config as _config
 import rocq_mcp.workspace as _workspace
 from rocq_mcp.interactive import run_assumptions
 from tests.conftest import PET_AVAILABLE
@@ -587,8 +588,8 @@ class TestRocqAssumptionsWrapper:
             ctx=mock_ctx,
         )
 
-        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
-        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)
+        assert result["clamped_timeout"] == _config.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_config.ROCQ_QUERY_TIMEOUT_CAP)
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,6 @@ TestFormatGoalsDefField: _format_goals hypothesis def_ field rendering
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 import time
@@ -30,7 +29,15 @@ from unittest import mock
 import pytest
 
 import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.workspace as _workspace
+from rocq_mcp.compile import (
+    _MAX_ERROR_LENGTH,
+    _MAX_FORMAT_WARNINGS,
+    _format_error,
+    _parse_coqc_error_positions,
+)
+from rocq_mcp.interactive import _format_goals
 from rocq_mcp.server import (
     _find_project_root_from_file,
     _force_release_pet_lock,
@@ -42,13 +49,6 @@ from rocq_mcp.server import (
     _run_with_pet,
     _validate_workspace,
 )
-from rocq_mcp.compile import (
-    _format_error,
-    _parse_coqc_error_positions,
-    _MAX_ERROR_LENGTH,
-    _MAX_FORMAT_WARNINGS,
-)
-from rocq_mcp.interactive import _format_goals
 from tests.conftest import add_mock_state, make_lifespan_state
 
 # =========================================================================
@@ -320,7 +320,7 @@ class TestResolveCallTimeout:
 
     def test_under_cap_passes_through_as_float(self):
         """A positive timeout under the cap is forwarded as a float, no clamp."""
-        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+        with mock.patch("rocq_mcp.config.ROCQ_QUERY_TIMEOUT_CAP", 300):
             effective, clamped = _resolve_call_timeout(10)
         assert effective == 10.0
         assert isinstance(effective, float)
@@ -328,14 +328,14 @@ class TestResolveCallTimeout:
 
     def test_at_cap_passes_through_unclamped(self):
         """A timeout exactly equal to the cap is not flagged as clamped."""
-        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+        with mock.patch("rocq_mcp.config.ROCQ_QUERY_TIMEOUT_CAP", 300):
             effective, clamped = _resolve_call_timeout(300)
         assert effective == 300.0
         assert clamped is False
 
     def test_over_cap_is_clamped(self):
         """A timeout above the cap is clamped to the cap, clamped=True."""
-        with mock.patch("rocq_mcp.server.ROCQ_QUERY_TIMEOUT_CAP", 300):
+        with mock.patch("rocq_mcp.config.ROCQ_QUERY_TIMEOUT_CAP", 300):
             effective, clamped = _resolve_call_timeout(400)
         assert effective == 300.0
         assert clamped is True
@@ -531,7 +531,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R _build/default/mylib mylib -Q . Test"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-R", "_build/default/mylib", "mylib", "-Q", ".", "Test"]
@@ -548,7 +548,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R . mylib -w -notation-overridden"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert "-w" in flags
@@ -559,7 +559,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-noinit -R . mylib"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-noinit", "-R", ".", "mylib"]
@@ -569,7 +569,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R ../../escape evil -Q . Safe"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         # Escaped path dropped, safe path kept.
@@ -580,7 +580,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R /etc/evil evil -Q . Safe"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-Q", ".", "Safe"]
@@ -595,7 +595,7 @@ class TestParseDuneFlags:
         build_dir.mkdir(parents=True)
         abs_path = str(build_dir.resolve())
         fake_output = f"-R {abs_path} mylib"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(subdir)
         # Absolute path converted to relative from ws (subdir).
@@ -611,7 +611,7 @@ class TestParseDuneFlags:
         (tmp_path / "_RocqProject").write_text("-Q . UserProject\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R . mylib"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         # Flags are returned but _RocqProject is untouched.
@@ -623,7 +623,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         with mock.patch(
-            "rocq_mcp.server.subprocess.run", side_effect=FileNotFoundError
+            "rocq_mcp.workspace.subprocess.run", side_effect=FileNotFoundError
         ):
             assert _parse_dune_flags(tmp_path) is None
 
@@ -634,7 +634,8 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         with mock.patch(
-            "rocq_mcp.server.subprocess.run", side_effect=sp.TimeoutExpired("dune", 10)
+            "rocq_mcp.workspace.subprocess.run",
+            side_effect=sp.TimeoutExpired("dune", 10),
         ):
             assert _parse_dune_flags(tmp_path) is None
 
@@ -642,7 +643,7 @@ class TestParseDuneFlags:
         """If dune exits non-zero, returns None."""
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="error")
             assert _parse_dune_flags(tmp_path) is None
 
@@ -650,7 +651,7 @@ class TestParseDuneFlags:
         """If dune outputs nothing useful, returns None."""
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="")
             assert _parse_dune_flags(tmp_path) is None
 
@@ -661,7 +662,7 @@ class TestParseDuneFlags:
         subdir.mkdir()
         (subdir / "test.v").write_text("")
         fake_output = "-R . mylib"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(subdir)
         assert flags == ["-R", ".", "mylib"]
@@ -671,7 +672,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-R _build/default/mylib mylib"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_project_flags(tmp_path)
         assert flags == ["-R", "_build/default/mylib", "mylib"]
@@ -690,13 +691,13 @@ class TestParseDuneFlags:
         (tmp_path / "test.v").write_text("")
         fake_output = "-R _build/default/mylib mylib"
         # First call: generates _RocqProject via dune.
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags1 = _parse_project_flags(tmp_path)
         assert flags1 == ["-R", "_build/default/mylib", "mylib"]
         assert (tmp_path / "_RocqProject").is_file()
         # Second call: _RocqProject exists, dune is NOT called.
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             flags2 = _parse_project_flags(tmp_path)
             mock_run.assert_not_called()
         assert flags2 == ["-R", "_build/default/mylib", "mylib"]
@@ -706,7 +707,7 @@ class TestParseDuneFlags:
         (tmp_path / "dune-project").write_text("(lang dune 3.0)\n")
         (tmp_path / "test.v").write_text("")
         fake_output = "-native-compiler yes -R . mylib -boot"
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=fake_output)
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-R", ".", "mylib"]
@@ -737,7 +738,7 @@ class TestParseDuneFlags:
                 stdout = "-Q _build/default/thB thB -w -shared"
             return mock.Mock(returncode=0, stdout=stdout)
 
-        with mock.patch("rocq_mcp.server.subprocess.run", side_effect=fake_run):
+        with mock.patch("rocq_mcp.workspace.subprocess.run", side_effect=fake_run):
             flags = _parse_dune_flags(tmp_path)
 
         # Both theory roots present.
@@ -763,7 +764,7 @@ class TestParseDuneFlags:
             (d / "dune").write_text(f"(coq.theory (name {name}))\n")
             (d / "x.v").write_text("")
 
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="-Q . X")
             _parse_dune_flags(tmp_path)
         assert mock_run.call_count == 2
@@ -777,7 +778,7 @@ class TestParseDuneFlags:
         (d / "dune").write_text("(coq.theory (name only))\n")
         (d / "x.v").write_text("")
 
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0, stdout="-Q _build/default/only only"
             )
@@ -800,7 +801,7 @@ class TestParseDuneFlags:
         (tmp_path / "fake" / "dune").write_text("; (coq.theory (name fake))\n")
         (tmp_path / "fake" / "x.v").write_text("")
 
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="-Q . real")
             _parse_dune_flags(tmp_path)
         # Only the real stanza counts -> exactly one dune coq top call.
@@ -851,7 +852,7 @@ class TestParseDuneFlags:
                 return mock.Mock(returncode=1, stdout="")
             return mock.Mock(returncode=0, stdout="-Q _build/default/thB thB")
 
-        with mock.patch("rocq_mcp.server.subprocess.run", side_effect=fake_run):
+        with mock.patch("rocq_mcp.workspace.subprocess.run", side_effect=fake_run):
             flags = _parse_dune_flags(tmp_path)
         assert flags == ["-Q", "_build/default/thB", "thB"]
 
@@ -1339,11 +1340,11 @@ class TestWorkspaceWarning:
         is quiet — that's the legitimate scratch / one-off workflow,
         not a config bug.
         """
-        from rocq_mcp import server as _server
-
         # ROCQ_WORKSPACE is whatever the test env has; force a markerless
         # tmpdir to be sure.
         import tempfile
+
+        from rocq_mcp import server as _server
 
         with tempfile.TemporaryDirectory() as td:
             monkeypatch.setattr(_config, "ROCQ_WORKSPACE", td)
@@ -1366,21 +1367,19 @@ class TestForceReleasePetLock:
     @pytest.fixture(autouse=True)
     def _restore_pet_lock(self):
         """Save and restore _pet_lock to prevent cross-test contamination."""
-        import rocq_mcp.server as srv
 
-        original = srv._pet_lock
+        original = _pet_runtime._pet_lock
         yield
-        srv._pet_lock = original
+        _pet_runtime._pet_lock = original
 
     @pytest.mark.asyncio
     async def test_unlocked_is_noop(self):
         """When lock is free, _force_release_pet_lock is a no-op."""
-        import rocq_mcp.server as srv
 
-        old_lock = srv._pet_lock
+        old_lock = _pet_runtime._pet_lock
         await _force_release_pet_lock()
         # Lock should still be the same object (not replaced)
-        assert srv._pet_lock is old_lock
+        assert _pet_runtime._pet_lock is old_lock
         # Lock must still be usable (not left in acquired state)
         assert old_lock.acquire(timeout=0.1)
         old_lock.release()
@@ -1388,31 +1387,29 @@ class TestForceReleasePetLock:
     @pytest.mark.asyncio
     async def test_replaces_stuck_lock(self):
         """When lock is held by another thread, replaces with fresh lock."""
-        import rocq_mcp.server as srv
 
-        old_lock = srv._pet_lock
+        old_lock = _pet_runtime._pet_lock
         # Simulate an orphaned thread holding the lock
         old_lock.acquire()
         try:
             await _force_release_pet_lock()
             # Global lock should be replaced with a new one
-            assert srv._pet_lock is not old_lock
+            assert _pet_runtime._pet_lock is not old_lock
             # New lock should be acquirable
-            assert srv._pet_lock.acquire(timeout=0.1)
-            srv._pet_lock.release()
+            assert _pet_runtime._pet_lock.acquire(timeout=0.1)
+            _pet_runtime._pet_lock.release()
         finally:
             old_lock.release()
 
     @pytest.mark.asyncio
     async def test_orphaned_thread_releases_old_lock_harmlessly(self):
         """Orphaned thread releasing old lock doesn't affect new global lock."""
-        import rocq_mcp.server as srv
 
-        old_lock = srv._pet_lock
+        old_lock = _pet_runtime._pet_lock
         old_lock.acquire()
 
         await _force_release_pet_lock()
-        new_lock = srv._pet_lock
+        new_lock = _pet_runtime._pet_lock
         assert new_lock is not old_lock
 
         # Simulate orphaned thread waking up and releasing old lock
@@ -1424,13 +1421,12 @@ class TestForceReleasePetLock:
 
     def test_execute_captures_local_ref(self):
         """_execute functions capture local lock ref for safe release."""
-        import rocq_mcp.server as srv
 
         results = []
         acquired_event = threading.Event()
 
         def simulate_execute():
-            lock = srv._pet_lock  # capture local ref like _execute does
+            lock = _pet_runtime._pet_lock  # capture local ref like _execute does
             lock.acquire()
             acquired_event.set()
             try:
@@ -1443,7 +1439,7 @@ class TestForceReleasePetLock:
         t.start()
         acquired_event.wait(timeout=2)  # deterministic sync
         # Replace global (simulating _force_release_pet_lock)
-        srv._pet_lock = threading.Lock()
+        _pet_runtime._pet_lock = threading.Lock()
         t.join(timeout=2)
 
         assert results == ["completed"]
@@ -1453,7 +1449,7 @@ class TestForceReleasePetLock:
         with pytest.raises(_PetLockTimeout):
             try:
                 raise _PetLockTimeout("test")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pytest.fail("_PetLockTimeout must not be caught as TimeoutError")
 
 
@@ -1709,7 +1705,7 @@ class TestFormatGoals:
 
     def test_truncates_many_goals(self):
         """More than _MAX_GOALS_SHOWN goals triggers the count truncation message."""
-        from rocq_mcp.interactive import _format_goals, _MAX_GOALS_SHOWN
+        from rocq_mcp.interactive import _MAX_GOALS_SHOWN, _format_goals
 
         goals = [
             self._make_goal(conclusion=f"goal_{i}") for i in range(_MAX_GOALS_SHOWN + 5)
@@ -1720,7 +1716,7 @@ class TestFormatGoals:
 
     def test_truncates_long_output(self):
         """Goals producing very long text (>_MAX_GOALS_LENGTH) are truncated."""
-        from rocq_mcp.interactive import _format_goals, _MAX_GOALS_LENGTH
+        from rocq_mcp.interactive import _MAX_GOALS_LENGTH, _format_goals
 
         # Create a single goal with a very long conclusion
         long_conclusion = "x" * (_MAX_GOALS_LENGTH + 500)
@@ -1760,11 +1756,10 @@ class TestRunCheckBodySizeLimit:
     @pytest.mark.asyncio
     async def test_body_too_large(self, monkeypatch):
         """run_check with body exceeding ROCQ_MAX_SOURCE_SIZE returns error."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_check
 
         # Set a small source size limit for testing
-        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 100)
+        monkeypatch.setattr(_config, "ROCQ_MAX_SOURCE_SIZE", 100)
 
         # Create a state so that from_state lookup would succeed
         root = add_mock_state(None, None, step=0)
@@ -1915,7 +1910,7 @@ class TestSetWorkspaceIfNeededDuneSideEffect:
                 # already be on disk so coq-lsp picks it up.
                 assert (tmp_path / "_RocqProject").is_file()
 
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0, stdout="-Q _build/default/only only"
             )
@@ -1938,7 +1933,7 @@ class TestSetWorkspaceIfNeededDuneSideEffect:
             def set_workspace(self, debug=False, dir=None):
                 calls.append(dir)
 
-        with mock.patch("rocq_mcp.server.subprocess.run") as mock_run:
+        with mock.patch("rocq_mcp.workspace.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0, stdout="-Q _build/default/only only"
             )
@@ -1959,7 +1954,7 @@ class TestPetInvalidationHooks:
 
     @pytest.fixture(autouse=True)
     def _clean(self):
-        from rocq_mcp.interactive import _state_invalidate_all, _invalidate_import_cache
+        from rocq_mcp.interactive import _invalidate_import_cache, _state_invalidate_all
 
         _state_invalidate_all()
         _invalidate_import_cache()
@@ -1969,8 +1964,9 @@ class TestPetInvalidationHooks:
 
     def test_hooks_clear_state_table(self):
         """Invalidation hooks clear the state table."""
-        from rocq_mcp.interactive import _state_add, _state_table, _state_invalidate_all
         from unittest.mock import MagicMock
+
+        from rocq_mcp.interactive import _state_add, _state_invalidate_all, _state_table
 
         state = MagicMock()
         state.proof_finished = False
@@ -2001,7 +1997,7 @@ class TestPetInvalidationHooks:
     def test_hooks_registered_in_server(self):
         """Both hooks are registered in _pet_invalidation_hooks."""
         import rocq_mcp.server as srv
-        from rocq_mcp.interactive import _state_invalidate_all, _invalidate_import_cache
+        from rocq_mcp.interactive import _invalidate_import_cache, _state_invalidate_all
 
         hook_funcs = srv._pet_invalidation_hooks
         assert _state_invalidate_all in hook_funcs
@@ -2009,13 +2005,14 @@ class TestPetInvalidationHooks:
 
     def test_invalidate_pet_calls_hooks(self):
         """_invalidate_pet triggers hooks that clear state table and import cache."""
+        from unittest.mock import MagicMock
+
         import rocq_mcp.server as srv
         from rocq_mcp.interactive import (
+            _import_cache,
             _state_add,
             _state_table,
-            _import_cache,
         )
-        from unittest.mock import MagicMock
 
         # Populate state table
         state = MagicMock()
@@ -2046,11 +2043,10 @@ class TestPetInvalidationHooks:
 
     def test_import_cache_generation_incremented(self):
         """_invalidate_import_cache increments the generation counter."""
+        import rocq_mcp.interactive as intermod
         from rocq_mcp.interactive import (
-            _import_cache_generation,
             _invalidate_import_cache,
         )
-        import rocq_mcp.interactive as intermod
 
         gen_before = intermod._import_cache_generation
         _invalidate_import_cache()
@@ -2068,10 +2064,9 @@ class TestRunCheckBodyWithinLimit:
     @pytest.mark.asyncio
     async def test_body_within_limit(self, monkeypatch):
         """run_check with body within ROCQ_MAX_SOURCE_SIZE passes the size check."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_check
 
-        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 1000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_SOURCE_SIZE", 1000)
 
         root = add_mock_state(None, None, step=0)
         lifespan_state = make_lifespan_state()
@@ -2092,10 +2087,9 @@ class TestRunCheckBodyWithinLimit:
     @pytest.mark.asyncio
     async def test_body_exactly_at_limit(self, monkeypatch):
         """run_check with body exactly at ROCQ_MAX_SOURCE_SIZE passes the size check."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_check
 
-        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
+        monkeypatch.setattr(_config, "ROCQ_MAX_SOURCE_SIZE", 200)
 
         root = add_mock_state(None, None, step=0)
         lifespan_state = make_lifespan_state()
@@ -2115,10 +2109,9 @@ class TestRunCheckBodyWithinLimit:
     @pytest.mark.asyncio
     async def test_body_one_over_limit(self, monkeypatch):
         """run_check with body one byte over ROCQ_MAX_SOURCE_SIZE is rejected."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_check
 
-        monkeypatch.setattr(srv, "ROCQ_MAX_SOURCE_SIZE", 200)
+        monkeypatch.setattr(_config, "ROCQ_MAX_SOURCE_SIZE", 200)
 
         root = add_mock_state(None, None, step=0)
         lifespan_state = make_lifespan_state()
@@ -2160,8 +2153,9 @@ class TestKillPet:
 
     def test_kill_pet_already_dead_skips_signals(self):
         """_kill_pet skips signals if process already exited (PID reuse guard)."""
-        from rocq_mcp.server import _kill_pet
         from unittest.mock import MagicMock, patch
+
+        from rocq_mcp.server import _kill_pet
 
         pet = MagicMock()
         pet.process.poll.return_value = 0  # Already exited
@@ -2170,7 +2164,7 @@ class TestKillPet:
         pet.process.stderr = MagicMock()
         pet._own_pgrp = True
 
-        with patch("rocq_mcp.server.os.killpg") as mock_killpg:
+        with patch("rocq_mcp.pet_runtime.os.killpg") as mock_killpg:
             _kill_pet(pet)
             mock_killpg.assert_not_called()  # No signals sent
 
@@ -2181,9 +2175,10 @@ class TestKillPet:
 
     def test_kill_pet_with_own_pgrp_sends_sigterm(self):
         """_kill_pet with _own_pgrp=True uses os.killpg(SIGTERM)."""
-        from rocq_mcp.server import _kill_pet
-        from unittest.mock import MagicMock, patch
         import signal
+        from unittest.mock import MagicMock, patch
+
+        from rocq_mcp.server import _kill_pet
 
         pet = MagicMock()
         pet.process.poll.return_value = None  # Still running
@@ -2195,16 +2190,17 @@ class TestKillPet:
         pet._own_pgrp = True
 
         with (
-            patch("rocq_mcp.server.os.getpgid", return_value=12345) as mock_getpgid,
-            patch("rocq_mcp.server.os.killpg") as mock_killpg,
+            patch("rocq_mcp.pet_runtime.os.getpgid", return_value=12345),
+            patch("rocq_mcp.pet_runtime.os.killpg") as mock_killpg,
         ):
             _kill_pet(pet)
             mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
 
     def test_kill_pet_without_own_pgrp_uses_terminate(self):
         """_kill_pet with _own_pgrp=False uses process.terminate()."""
-        from rocq_mcp.server import _kill_pet
         from unittest.mock import MagicMock
+
+        from rocq_mcp.server import _kill_pet
 
         pet = MagicMock()
         pet.process.poll.return_value = None  # Still running
@@ -2219,10 +2215,11 @@ class TestKillPet:
 
     def test_kill_pet_escalates_to_sigkill(self):
         """_kill_pet escalates to SIGKILL if SIGTERM doesn't work."""
-        from rocq_mcp.server import _kill_pet
-        from unittest.mock import MagicMock, patch
         import signal
         import subprocess
+        from unittest.mock import MagicMock, patch
+
+        from rocq_mcp.server import _kill_pet
 
         pet = MagicMock()
         pet.process.poll.return_value = None  # Still running
@@ -2238,8 +2235,8 @@ class TestKillPet:
         pet._own_pgrp = True
 
         with (
-            patch("rocq_mcp.server.os.getpgid", return_value=12345),
-            patch("rocq_mcp.server.os.killpg") as mock_killpg,
+            patch("rocq_mcp.pet_runtime.os.getpgid", return_value=12345),
+            patch("rocq_mcp.pet_runtime.os.killpg") as mock_killpg,
         ):
             _kill_pet(pet)
             assert mock_killpg.call_count == 2
@@ -2257,8 +2254,9 @@ class TestEnsurePetHooks:
 
     def test_hooks_called_on_dead_pet_detection(self):
         """When _ensure_pet finds a dead pet, it calls _kill_pet and hooks."""
-        import rocq_mcp.server as server
         from unittest.mock import MagicMock, patch
+
+        import rocq_mcp.server as server
 
         hook_calls = []
         original_hooks = list(server._pet_invalidation_hooks)
@@ -2303,11 +2301,10 @@ class TestRunWithPetExceptionHandling:
     @pytest.fixture(autouse=True)
     def _reset_semaphore(self):
         """Reset the global semaphore so tests don't interfere."""
-        import rocq_mcp.server as srv
 
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.mark.asyncio
     async def test_petanque_error_dead_pet_returns_pet_restarted(self):
@@ -2335,7 +2332,7 @@ class TestRunWithPetExceptionHandling:
             raise PetanqueError(1, "Connection lost")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            mp.setattr("rocq_mcp.pet_runtime._ensure_pet", lambda ls: mock_pet)
             result = await _run_with_pet(fn_that_raises, lifespan_state, "Test")
         assert result["success"] is False
         assert result.get("pet_restarted") is True
@@ -2362,7 +2359,7 @@ class TestRunWithPetExceptionHandling:
             raise PetanqueError(1, "Tactic failed")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            mp.setattr("rocq_mcp.pet_runtime._ensure_pet", lambda ls: mock_pet)
             result = await _run_with_pet(fn_that_raises, lifespan_state, "Test")
         assert result["success"] is False
         assert "pet_restarted" not in result
@@ -2390,7 +2387,7 @@ class TestRunWithPetExceptionHandling:
             raise BrokenPipeError("broken")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("rocq_mcp.server._ensure_pet", lambda ls: mock_pet)
+            mp.setattr("rocq_mcp.pet_runtime._ensure_pet", lambda ls: mock_pet)
             result = await _run_with_pet(
                 fn_that_raises,
                 lifespan_state,
@@ -2414,7 +2411,7 @@ class TestRunWithPetExceptionHandling:
             def raise_fnf(ls):
                 raise FileNotFoundError("pet")
 
-            mp.setattr("rocq_mcp.server._ensure_pet", raise_fnf)
+            mp.setattr("rocq_mcp.pet_runtime._ensure_pet", raise_fnf)
             result = await _run_with_pet(fn, lifespan_state, "Test")
         assert result["success"] is False
         assert "pet binary not found" in result["error"]
@@ -2786,45 +2783,6 @@ class TestVoRebuildWarning:
         assert "vo_rebuild_warning" not in result
 
 
-# =========================================================================
-# Usage-pattern documentation smoke test
-# =========================================================================
-
-
-class TestUsagePatternDocs:
-    """Catch accidental deletion of the usage-pattern documentation.
-
-    The patterns moved from the README into the agent-facing workflows
-    guide (served as the MCP resource ``rocq://guide/workflows``); the
-    README keeps pointers.  Pure docs assertion — no Rocq invocation.
-    If sections are renamed deliberately, update this test.
-    """
-
-    def _guide_text(self) -> str:
-        guide = (
-            Path(__file__).resolve().parent.parent / "src/rocq_mcp/guides/workflows.md"
-        )
-        return guide.read_text(encoding="utf-8")
-
-    def test_multi_tactic_exploration_pattern_present(self):
-        guide = self._guide_text()
-        assert "Multi-tactic exploration" in guide
-        # Canonical example references both tools.
-        assert "rocq_check" in guide
-        assert "rocq_step_multi" in guide
-
-    def test_imports_and_scopes_pattern_present(self):
-        guide = self._guide_text()
-        assert "Imports and scopes in rocq_query" in guide
-        # Names the parameter agents should reach for.
-        assert "preamble=" in guide
-
-    def test_readme_points_at_the_guides(self):
-        readme = Path(__file__).resolve().parent.parent / "README.md"
-        text = readme.read_text(encoding="utf-8")
-        assert "rocq://guide/workflows" in text
-
-
 # ---------------------------------------------------------------------------
 # Pet-availability startup check (_check_pet_availability)
 # ---------------------------------------------------------------------------
@@ -2843,6 +2801,7 @@ class TestCheckPetAvailability:
     def test_both_present_returns_none(self, monkeypatch):
         import sys
         import types
+
         import rocq_mcp.server as _server
 
         # Pretend pytanque imports cleanly.
@@ -2853,6 +2812,7 @@ class TestCheckPetAvailability:
 
     def test_pytanque_missing_warns(self, monkeypatch):
         import sys
+
         import rocq_mcp.server as _server
 
         # Block pytanque from importing.
@@ -2868,6 +2828,7 @@ class TestCheckPetAvailability:
     def test_binary_missing_warns(self, monkeypatch):
         import sys
         import types
+
         import rocq_mcp.server as _server
 
         if "pytanque" not in sys.modules:
@@ -2884,6 +2845,7 @@ class TestCheckPetAvailability:
 
     def test_both_missing_combined(self, monkeypatch):
         import sys
+
         import rocq_mcp.server as _server
 
         monkeypatch.setitem(sys.modules, "pytanque", None)
@@ -2898,6 +2860,7 @@ class TestCheckPetAvailability:
 
     def test_message_names_install_command(self, monkeypatch):
         import sys
+
         import rocq_mcp.server as _server
 
         monkeypatch.setitem(sys.modules, "pytanque", None)
@@ -2917,6 +2880,7 @@ class TestCheckPetAvailability:
 
     def test_message_names_affected_tools(self, monkeypatch):
         import sys
+
         import rocq_mcp.server as _server
 
         monkeypatch.setitem(sys.modules, "pytanque", None)

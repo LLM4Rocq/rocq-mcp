@@ -7,6 +7,8 @@ import time
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.server as _server
 from rocq_mcp.interactive import (
     _is_timeout_eligible,
@@ -107,26 +109,26 @@ class TestTimeoutErrorHint:
 
     @pytest.fixture(autouse=True)
     def _reset_pet_state(self, monkeypatch):
-        _server._pet_semaphore = None
-        monkeypatch.setattr(_server, "_pet_lock", threading.Lock())
+        _pet_runtime._pet_semaphore = None
+        monkeypatch.setattr(_pet_runtime, "_pet_lock", threading.Lock())
         yield
-        _server._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _fast_watchdog(self, monkeypatch):
-        monkeypatch.setattr(_server, "_MEMORY_WATCHDOG_INTERVAL", 0.01)
+        monkeypatch.setattr(_config, "_MEMORY_WATCHDOG_INTERVAL", 0.01)
 
     @pytest.mark.asyncio
     async def test_timeout_error_includes_retry_hint(self, monkeypatch):
         """When _run_with_pet times out, the error string includes
         ``Retry with`` so agents see the actionable knob name."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         _patch_psutil_rss(monkeypatch, 1)
 
         pet = _mock_pet()
         ls = make_lifespan_state(pet_timeout=0.05, full=True)
         ls["pet_client"] = pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda lstate: pet)
         monkeypatch.setattr(
             _server,
             "_invalidate_pet",

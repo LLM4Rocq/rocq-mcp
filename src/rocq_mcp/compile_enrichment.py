@@ -14,8 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-import rocq_mcp.server as _server
-from rocq_mcp import taxonomy
+from rocq_mcp import config, taxonomy
+from rocq_mcp import envelope as _envelope
+from rocq_mcp import pet_runtime as _pet_runtime
 from rocq_mcp import workspace as _workspace
 from rocq_mcp.compile import (
     _PROOF_FILE_LABEL,
@@ -197,7 +198,7 @@ def _merge_compile_error_state(
 
 def _enrichment_timeout(lifespan_state: dict[str, Any]) -> float:
     """Per-call enrichment timeout, capped by ``_ENRICHMENT_TIMEOUT_CAP``."""
-    pet_timeout = lifespan_state.get("pet_timeout", _server.ROCQ_PET_TIMEOUT)
+    pet_timeout = lifespan_state.get("pet_timeout", config.ROCQ_PET_TIMEOUT)
     return min(float(pet_timeout), _ENRICHMENT_TIMEOUT_CAP)
 
 
@@ -271,7 +272,7 @@ async def run_compile_with_state(
     # (validation, compile_error, or timeout) before optional pet
     # enrichment.  Falls back to "compile_error" when the helper
     # couldn't classify (defensive — should not happen post-fix).
-    _server._record_error(
+    _envelope._record_error(
         lifespan_state,
         "rocq_compile",
         result.get("error", ""),
@@ -307,8 +308,8 @@ async def _multi_error_walk(
     except OSError:
         return None
 
-    cap = _server._COMPILE_MULTI_ERROR_CAP
-    per_call_timeout = _server._COMPILE_MULTI_ERROR_TIMEOUT
+    cap = config._COMPILE_MULTI_ERROR_CAP
+    per_call_timeout = config._COMPILE_MULTI_ERROR_TIMEOUT
 
     def _do_walk(pet: Any) -> list[Any] | None:
         return collect_file_errors(
@@ -317,7 +318,7 @@ async def _multi_error_walk(
             pet=pet,
             per_call_timeout=per_call_timeout,
             max_errors=cap,
-            progress=lambda i, n: _server._progress(
+            progress=lambda i, n: _envelope._progress(
                 lifespan_state, i, n, "multi-error walk"
             ),
         )
@@ -332,7 +333,7 @@ async def _multi_error_walk(
         _ENRICHMENT_TIMEOUT_CAP * _WALKER_BUDGET_MULTIPLIER,
     )
 
-    result = await _server._run_with_pet(
+    result = await _pet_runtime._run_with_pet(
         _do_walk,
         lifespan_state,
         "rocq_compile_file",
@@ -399,7 +400,7 @@ async def run_compile_file_with_state(
         return result
     if result.get("success"):
         return result
-    _server._record_error(
+    _envelope._record_error(
         lifespan_state,
         "rocq_compile_file",
         result.get("error", ""),
@@ -421,7 +422,7 @@ async def run_compile_file_with_state(
     # Multi-error walk: only on real compile errors and only when enabled
     # (CAP=0 disables).  Runs after state capture so existing behavior is
     # preserved.
-    if result.get("reason") == "compile_error" and _server._COMPILE_MULTI_ERROR_CAP > 0:
+    if result.get("reason") == "compile_error" and config._COMPILE_MULTI_ERROR_CAP > 0:
         proof_errors = await _multi_error_walk(resolved_file, lifespan_state)
         if proof_errors is not None:
             result["errors"] = [

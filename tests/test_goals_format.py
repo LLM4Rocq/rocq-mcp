@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+import rocq_mcp.pet_runtime as _pet_runtime
 from rocq_mcp.interactive import _goals_diff, _render_goals
 from tests.conftest import _MockPetBase
 
@@ -91,7 +92,6 @@ class TestGoalsDiff:
 class TestRunCheckGoalsFormat(_MockPetBase):
     def _run(self, goals_format, final_complete, parent_complete=None):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         def fake_run(state, cmd, timeout=None):
             return SimpleNamespace(st=99, proof_finished=False, feedback=[])
@@ -102,7 +102,7 @@ class TestRunCheckGoalsFormat(_MockPetBase):
             completes.append(parent_complete)
         mock_pet.complete_goals.side_effect = completes
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             return asyncio.run(
                 _interactive.run_check(
                     body="intros.",
@@ -137,7 +137,6 @@ class TestRunCheckGoalsFormat(_MockPetBase):
 
     def test_diff_degrades_to_pretty_when_parent_lookup_fails(self):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         def fake_run(state, cmd, timeout=None):
             return SimpleNamespace(st=99, proof_finished=False, feedback=[])
@@ -148,7 +147,7 @@ class TestRunCheckGoalsFormat(_MockPetBase):
             RuntimeError("parent lookup died"),
         ]
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 _interactive.run_check(
                     body="intros.",
@@ -183,7 +182,6 @@ class TestStepMultiDedupBound(_MockPetBase):
         """20 tactics all reaching one identical (large) goal state must
         produce ONE goals payload, not twenty."""
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         def fake_run(state, cmd, timeout=None):
             return SimpleNamespace(st=7, proof_finished=False, feedback=[])
@@ -193,7 +191,7 @@ class TestStepMultiDedupBound(_MockPetBase):
         mock_pet.complete_goals.return_value = _complete([big_goal])
 
         tactics = [f"tac{i}." for i in range(20)]
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_step_multi(
                 tactics=tactics,
                 lifespan_state=lifespan_state,
@@ -212,7 +210,6 @@ class TestStepMultiDedupBound(_MockPetBase):
     @pytest.mark.asyncio
     async def test_distinct_outcomes_stay_distinct(self):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         states = {
             "a.": _complete([G1]),
@@ -227,7 +224,7 @@ class TestStepMultiDedupBound(_MockPetBase):
         calls = iter(["a.", "b.", "c."])
         mock_pet.complete_goals.side_effect = lambda s: states[next(calls)]
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             result = await _interactive.run_step_multi(
                 tactics=["a.", "b.", "c."],
                 lifespan_state=lifespan_state,

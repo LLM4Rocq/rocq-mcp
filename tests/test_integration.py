@@ -180,7 +180,6 @@ class TestCompileVerifyWorkflow:
 
     def test_compile_rejects_forbidden_redirect(self, workspace):
         """rocq_compile must reject source containing Redirect."""
-        from rocq_mcp.server import rocq_compile
 
         result = _call_rocq_compile(
             source='Redirect "/tmp/evil" Print nat.\nTheorem t : True. Proof. exact I. Qed.',
@@ -191,7 +190,6 @@ class TestCompileVerifyWorkflow:
 
     def test_compile_rejects_forbidden_load(self, workspace):
         """rocq_compile must reject source containing Load."""
-        from rocq_mcp.server import rocq_compile
 
         result = _call_rocq_compile(
             source='Load "evil".\nTheorem t : True. Proof. exact I. Qed.',
@@ -202,7 +200,6 @@ class TestCompileVerifyWorkflow:
 
     def test_compile_rejects_forbidden_drop(self, workspace):
         """rocq_compile must reject source containing Drop."""
-        from rocq_mcp.server import rocq_compile
 
         result = _call_rocq_compile(
             source="Drop.\nTheorem t : True. Proof. exact I. Qed.",
@@ -215,7 +212,7 @@ class TestCompileVerifyWorkflow:
         """rocq_compile resolves local imports via _CoqProject flags."""
         import subprocess
 
-        from rocq_mcp.server import rocq_compile, ROCQ_COQC_BINARY
+        from rocq_mcp.config import ROCQ_COQC_BINARY
 
         # Set up a mini project with a helper module
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
@@ -241,7 +238,8 @@ class TestCompileVerifyWorkflow:
         """rocq_verify works with local imports resolved via _CoqProject."""
         import subprocess
 
-        from rocq_mcp.server import rocq_compile, rocq_verify, ROCQ_COQC_BINARY
+        from rocq_mcp.config import ROCQ_COQC_BINARY
+        from rocq_mcp.server import rocq_compile, rocq_verify
 
         # Set up a mini project
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
@@ -388,7 +386,7 @@ class TestCompileErrorStateWorkflow:
         self, lifespan_state, workspace
     ):
         """The state_id from a real compile failure is usable by rocq_check."""
-        from rocq_mcp.server import rocq_compile, rocq_check
+        from rocq_mcp.server import rocq_check, rocq_compile
 
         source = "Theorem bad : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n"
         ctx = _MockContext(lifespan_state)
@@ -698,7 +696,7 @@ class TestQueryStepWorkflow:
     @pytest.mark.asyncio
     async def test_query_then_step(self, workspace):
         """Use query to find a lemma, then start+check to prove a theorem."""
-        from rocq_mcp.interactive import run_query, run_start, run_check
+        from rocq_mcp.interactive import run_check, run_query, run_start
         from rocq_mcp.server import _invalidate_pet
 
         state = self._make_state()
@@ -755,7 +753,7 @@ class TestQueryStepWorkflow:
     @pytest.mark.asyncio
     async def test_pet_respawns_after_kill(self, workspace):
         """Kill pet via timeout, verify next query call respawns it."""
-        from rocq_mcp.interactive import run_start, run_check, run_query
+        from rocq_mcp.interactive import run_check, run_query, run_start
         from rocq_mcp.server import _invalidate_pet
 
         vfile = workspace / "respawn_test.v"
@@ -827,8 +825,6 @@ class TestMiniF2FSample:
         ws = Path(ws_path) / "test"
         if not ws.is_dir():
             pytest.skip(f"miniF2F workspace not available: {ws}")
-
-        from rocq_mcp.server import rocq_compile
 
         # Find any .v file in the workspace
         v_files = list(ws.glob("*.v"))

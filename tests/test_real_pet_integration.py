@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import rocq_mcp.config as _config
 from tests.conftest import PET_AVAILABLE, make_lifespan_state
 
 pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
@@ -44,9 +45,9 @@ class TestMemoryWatchdogRealPet:
 
         # Cap pet RSS at 1 MB.  A real pet uses tens of MB even idle, so
         # the watchdog must fire on the first sample.
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1)
         # Speed up watchdog poll so it samples within the call budget.
-        monkeypatch.setattr(_server, "_MEMORY_WATCHDOG_INTERVAL", 0.05)
+        monkeypatch.setattr(_config, "_MEMORY_WATCHDOG_INTERVAL", 0.05)
 
         ls = make_lifespan_state(pet_timeout=10.0)
         ls["recent_errors"] = deque(maxlen=10)
@@ -81,9 +82,10 @@ class TestRocqDiagRealPet:
 
     @pytest.mark.asyncio
     async def test_diag_reports_live_pet_after_real_call(self, workspace):
+        from rocq_mcp.config import ROCQ_MAX_PET_RSS_MB
         from rocq_mcp.diag import _build_diag_snapshot
         from rocq_mcp.interactive import run_query
-        from rocq_mcp.server import _invalidate_pet, ROCQ_MAX_PET_RSS_MB
+        from rocq_mcp.server import _invalidate_pet
 
         ls = make_lifespan_state(pet_timeout=30.0)
         ls["recent_errors"] = deque(maxlen=10)

@@ -13,27 +13,33 @@ import asyncio
 import collections
 import os
 import shutil
-import signal
-import subprocess
-import threading
-import time
 import warnings
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-import psutil
-from fastmcp import FastMCP, Context
+from fastmcp import Context, FastMCP
 from fastmcp.server.lifespan import lifespan
 from mcp.types import ToolAnnotations
 
 import rocq_mcp
 from rocq_mcp import config
+from rocq_mcp import pet_runtime as _pet_runtime
 from rocq_mcp import workspace as _workspace
 from rocq_mcp.schemas import (
     CHECK_OUTPUT_SCHEMA,
     COMPILE_FILE_OUTPUT_SCHEMA,
     SEARCH_OUTPUT_SCHEMA,
     STEP_MULTI_OUTPUT_SCHEMA,
+)
+
+# Implementation functions from the domain modules (the old circular
+# import is gone — these are ordinary top-level imports now).
+from rocq_mcp.compile import (
+    run_verify,
+)
+from rocq_mcp.compile_enrichment import (
+    run_compile_file_with_state,
+    run_compile_with_state,
 )
 
 # ---------------------------------------------------------------------------
@@ -44,25 +50,84 @@ from rocq_mcp.schemas import (
 # ``_server.<NAME>`` and tests monkeypatch them on this module — both
 # work against these bindings, since server code reads its own globals.
 from rocq_mcp.config import (
-    _COMPILE_MULTI_ERROR_CAP,
-    _COMPILE_MULTI_ERROR_TIMEOUT,
-    _MEMORY_WATCHDOG_INTERVAL,
+    _COMPILE_MULTI_ERROR_CAP,  # noqa: F401
+    _COMPILE_MULTI_ERROR_TIMEOUT,  # noqa: F401
     _RECENT_ERRORS_MAX,
-    ROCQ_COQC_BINARY,
-    ROCQ_COQC_TIMEOUT,
-    ROCQ_MAX_PET_RSS_MB,
-    ROCQ_MAX_SOURCE_SIZE,
-    ROCQ_PET_TIMEOUT,
-    ROCQ_QUERY_TIMEOUT_CAP,
-    ROCQ_VERIFY_TIMEOUT,
+    ROCQ_MAX_SOURCE_SIZE,  # noqa: F401
     ROCQ_WORKSPACE,  # noqa: F401  (import-compat; internal reads use config.ROCQ_WORKSPACE)
     _default_max_pet_rss_mb,  # noqa: F401
+)
+from rocq_mcp.diag import (
+    _DIAG_LIVE_STATES_CAP,  # noqa: F401  (accessed as _server._DIAG_LIVE_STATES_CAP in tests)
+    _build_diag_snapshot,
+    _sample_pet_rss_mb,  # noqa: F401  (accessed as _server._sample_pet_rss_mb in tests)
+)
+
+# The failure-reason taxonomy and the envelope/degradation helpers moved
+# to leaf modules (single source of truth; no import cycle).  The names
+# below stay bound on this module because submodules and tests access
+# them as ``_server.<name>`` — see rocq_mcp/taxonomy.py and
+# rocq_mcp/envelope.py for the definitions.
+from rocq_mcp.envelope import (
+    _RECENT_ERROR_MESSAGE_LIMIT,  # noqa: F401  (re-export for tests)
+    _fail,
+    _no_ctx_fail,
+    _notify,  # noqa: F401  (import-compat)
+    _progress,  # noqa: F401  (import-compat)
+    _record_error,
+)
+from rocq_mcp.health import (
+    _SWITCH_ENV_KEYS,
+    _detect_switch,
+    _resolve_binary,
+    build_health_snapshot,
+    compute_switch_env,
+    list_switches,
+)
+from rocq_mcp.interactive import (
+    run_assumptions,
+    run_check,
+    run_goal,
+    run_notations,
+    run_query,
+    run_search,
+    run_start,
+    run_step_multi,
+    run_toc,
+)
+
+# Façade re-exports for import-and-call compatibility (tests do
+# ``from rocq_mcp.server import _kill_pet`` etc.).  The two REBOUND
+# mutable globals (_pet_lock, _pet_semaphore) are deliberately NOT
+# re-exported — a from-import copy goes stale the moment
+# _force_release_pet_lock replaces the lock; access them as
+# ``pet_runtime._pet_lock`` / ``pet_runtime._pet_semaphore`` only.
+from rocq_mcp.pet_runtime import (  # noqa: F401
+    _PYTANQUE_NOT_INSTALLED_HINT,
+    _build_memory_abort_response,
+    _ensure_pet,
+    _force_release_pet_lock,
+    _get_pet_semaphore,
+    _handle_pet_failure,
+    _invalidate_pet,
+    _kill_pet,
+    _memory_watchdog,
+    _merge_partial_state,
+    _pet_alive,
+    _pet_invalidation_hooks,
+    _PetLockTimeout,
+    _run_with_pet,
+    _set_workspace_if_needed,
+    _try_close_pet,
 )
 from rocq_mcp.schemas import (
     CHECK_OUTPUT_SCHEMA,
     COMPILE_FILE_OUTPUT_SCHEMA,
     SEARCH_OUTPUT_SCHEMA,
     STEP_MULTI_OUTPUT_SCHEMA,
+)
+from rocq_mcp.taxonomy import (
+    RECENT_ERROR_REASONS as _RECENT_ERROR_REASONS,  # noqa: F401
 )
 
 # Façade re-exports: tests import-and-call these via rocq_mcp.server, and
@@ -92,40 +157,31 @@ from rocq_mcp.workspace import (  # noqa: F401
 
 
 def _check_timeout_config(pet_timeout: float, cap: int) -> str | None:
-    """Return a warning if ROCQ_PET_TIMEOUT exceeds ROCQ_QUERY_TIMEOUT_CAP.
+    """Return a warning if config.ROCQ_PET_TIMEOUT exceeds config.ROCQ_QUERY_TIMEOUT_CAP.
 
     The cap is documented in the README as the upper bound for the
-    per-call timeout, but ROCQ_PET_TIMEOUT is the fallback when no
+    per-call timeout, but config.ROCQ_PET_TIMEOUT is the fallback when no
     per-call timeout is given.  If an operator misconfigures the pair
     so the fallback exceeds the cap, the lock can park longer than the
     cap promise — silently violating the documented invariant.
     """
     if pet_timeout > cap:
         return (
-            f"ROCQ_PET_TIMEOUT={pet_timeout} exceeds ROCQ_QUERY_TIMEOUT_CAP={cap}; "
+            f"ROCQ_PET_TIMEOUT={pet_timeout} exceeds config.ROCQ_QUERY_TIMEOUT_CAP={cap}; "
             f"calls without a per-call timeout= will park the pet lock longer "
-            f"than ROCQ_QUERY_TIMEOUT_CAP claims."
+            f"than config.ROCQ_QUERY_TIMEOUT_CAP claims."
         )
     return None
 
 
-_timeout_config_msg = _check_timeout_config(ROCQ_PET_TIMEOUT, ROCQ_QUERY_TIMEOUT_CAP)
+_timeout_config_msg = _check_timeout_config(
+    config.ROCQ_PET_TIMEOUT, config.ROCQ_QUERY_TIMEOUT_CAP
+)
 if _timeout_config_msg:
     warnings.warn(_timeout_config_msg, RuntimeWarning, stacklevel=2)
 
 
-# Single source of truth for the per-call "pytanque ImportError" envelope hint.
-# Used by _ensure_pet, _run_with_pet, run_check, and run_step_multi — all of
-# which surface this string in the ``error`` field of their {success:false,
-# reason:"unavailable"} envelope.  Centralized so future copy churn cannot
-# resurrect a phantom ``pip install 'rocq-mcp[interactive]'`` recipe (no
-# ``[interactive]`` extra exists; petanque ships with coq-lsp).
-_PYTANQUE_NOT_INSTALLED_HINT = (
-    "pytanque is not installed. Petanque (the `pet` binary and the matching "
-    "pytanque Python binding) ships with coq-lsp — see "
-    "https://github.com/ejgallego/coq-lsp for install instructions "
-    "appropriate to your environment."
-)
+# _PYTANQUE_NOT_INSTALLED_HINT moved to rocq_mcp.pet_runtime.
 
 
 def _check_pet_availability() -> str | None:
@@ -186,7 +242,7 @@ async def app_lifespan(server: Any) -> Any:
         # notifications (progress / log) via run_coroutine_threadsafe.
         "event_loop": asyncio.get_running_loop(),
         "workspace": config.ROCQ_WORKSPACE,
-        "pet_timeout": ROCQ_PET_TIMEOUT,
+        "pet_timeout": config.ROCQ_PET_TIMEOUT,
         "current_workspace": None,
         # Diagnostics (rocq_diag tool, see _build_diag_snapshot).
         "pet_started_at": None,
@@ -210,7 +266,7 @@ async def app_lifespan(server: Any) -> Any:
     finally:
         client = state.get("pet_client")
         if client:
-            _kill_pet(client)
+            _pet_runtime._kill_pet(client)
         # Clean up cache file
         ws = state.get("workspace")
         if ws:
@@ -280,12 +336,12 @@ mcp = FastMCP(
 def _resolve_call_timeout(
     timeout: int | float | None,
 ) -> tuple[float | None, bool]:
-    """Resolve a per-call timeout against ``ROCQ_QUERY_TIMEOUT_CAP``.
+    """Resolve a per-call timeout against ``config.ROCQ_QUERY_TIMEOUT_CAP``.
 
     Returns ``(effective_timeout, clamped)``:
 
     - When *timeout* is ``None``, 0, or negative: ``(None, False)`` —
-      caller falls back to ``ROCQ_PET_TIMEOUT``.
+      caller falls back to ``config.ROCQ_PET_TIMEOUT``.
     - Otherwise: ``(float(min(timeout, cap)), timeout > cap)``.
 
     Shared by every pet-routed wrapper so the clamp behaviour and
@@ -293,264 +349,13 @@ def _resolve_call_timeout(
     """
     if timeout is None or timeout <= 0:
         return None, False
-    clamped = timeout > ROCQ_QUERY_TIMEOUT_CAP
-    return float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP)), clamped
+    clamped = timeout > config.ROCQ_QUERY_TIMEOUT_CAP
+    return float(min(timeout, config.ROCQ_QUERY_TIMEOUT_CAP)), clamped
 
 
 # ---------------------------------------------------------------------------
-# Pet subprocess management
+# Pet subprocess management -> rocq_mcp.pet_runtime (decomposition cluster B)
 # ---------------------------------------------------------------------------
-
-# Global lock for ALL pytanque operations. Pytanque's stdio pipe is
-# single-duplex -- concurrent reads/writes corrupt JSON-RPC framing.
-# NOTE: _pet_lock may be replaced after a timeout (see _force_release_pet_lock).
-# All _execute functions must capture a local reference before acquiring.
-_pet_lock = threading.Lock()
-
-# Callbacks invoked when pet is invalidated (crash, timeout).
-# interactive.py registers _invalidate_import_cache and _state_invalidate_all
-# here to break the circular dependency (server -> interactive -> server).
-_pet_invalidation_hooks: list[Callable[[], None]] = []
-
-
-class _PetLockTimeout(Exception):
-    """Lock acquisition timed out (distinct from asyncio.TimeoutError).
-
-    On Python 3.11+, TimeoutError *is* asyncio.TimeoutError. Using a
-    private class prevents lock contention from being caught by the
-    asyncio.wait_for timeout handler, which would incorrectly kill pet
-    and destroy the proof session.
-    """
-
-
-async def _force_release_pet_lock() -> None:
-    """Recover from a deadlocked _pet_lock after timeout.
-
-    After _invalidate_pet kills the pet process, the orphaned thread's
-    blocking pet.run() should fail and release the lock.  We wait briefly
-    for this natural release.  If the lock is still held after a grace
-    period, replace the global lock with a fresh one so subsequent
-    operations can proceed.
-
-    This is safe because every _execute function captures a local
-    reference to the lock before acquiring it, so the orphaned thread
-    releases its own (now-discarded) lock object.
-
-    Runs the blocking acquire in a thread to avoid stalling the event loop.
-    """
-
-    def _try_reacquire() -> bool:
-        lock = _pet_lock  # capture local ref
-        if lock.acquire(timeout=2):
-            lock.release()
-            return True
-        return False
-
-    global _pet_lock
-    if await asyncio.to_thread(_try_reacquire):
-        return
-    # Orphaned thread still holds the lock -- replace with fresh lock
-    _pet_lock = threading.Lock()
-
-
-def _ensure_pet(lifespan_state: dict[str, Any]) -> Any:
-    """Lazy-initialize pet subprocess. Must be called with _pet_lock held."""
-    try:
-        from pytanque import Pytanque, PytanqueMode
-    except ImportError:
-        raise ImportError(_PYTANQUE_NOT_INSTALLED_HINT)
-
-    pet = lifespan_state.get("pet_client")
-    if pet is None or not _pet_alive(pet):
-        if pet is not None:
-            _kill_pet(pet)  # Full cleanup: kill + wait + close FDs
-            for hook in _pet_invalidation_hooks:
-                hook()
-        pet = Pytanque(mode=PytanqueMode.STDIO)
-        pet.connect()
-        # Attempt process group setup for clean kill.
-        # May fail on macOS if child already exec'd -- that's OK,
-        # os.getpgid at kill time handles it.
-        if pet.process:
-            try:
-                os.setpgid(pet.process.pid, pet.process.pid)
-                pet._own_pgrp = True
-            except OSError:
-                pet._own_pgrp = False
-        else:
-            pet._own_pgrp = False
-        # Count *only* successful spawns so a fresh server reports
-        # pet_restarts=0 even if a previous spawn raised before reaching
-        # this point.  The bookkeeping below is the canonical "spawn
-        # succeeded" point.
-        prev_spawns: int = int(lifespan_state.get("total_spawns", 0))
-        if prev_spawns > 0:
-            # Reset peak RSS so "headroom before vm_compute" reflects the
-            # live pet, not a long-dead predecessor that may have pushed
-            # the peak high.  Reset *before* assigning ``pet_client`` so
-            # the watchdog cannot sample the new pet's RSS, write it to
-            # ``peak_pet_rss_mb``, and then have us wipe it.
-            lifespan_state["peak_pet_rss_mb"] = 0.0
-        lifespan_state["pet_client"] = pet
-        lifespan_state["pet_started_at"] = time.time()
-        lifespan_state["total_spawns"] = prev_spawns + 1
-        _log_info(
-            lifespan_state,
-            f"pet spawned (pid={getattr(pet.process, 'pid', None)}, "
-            f"spawn #{prev_spawns + 1}, "
-            f"generation {int(lifespan_state.get('pet_generation', 0))})",
-        )
-    return pet
-
-
-def _pet_alive(pet: Any) -> bool:
-    """Check if the pet subprocess is still running."""
-    return pet is not None and pet.process is not None and pet.process.poll() is None
-
-
-def _kill_pet(pet: Any) -> None:
-    """Kill pet and its entire process group.
-
-    If the pet has its own process group (_own_pgrp=True), uses os.killpg
-    to kill the whole group (pet + coq-lsp). Otherwise falls back to
-    process.terminate()/kill() to avoid killing our own process group.
-    """
-    if pet is None or pet.process is None:
-        return
-    # If process already exited, just close FDs — no signals needed.
-    # This avoids PID-reuse races where os.killpg could kill an unrelated process.
-    if pet.process.poll() is not None:
-        _try_close_pet(pet)
-        return
-    try:
-        if getattr(pet, "_own_pgrp", False):
-            # Safe: pet has its own process group
-            pgid = os.getpgid(pet.process.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            # Fallback: only kill the direct child
-            pet.process.terminate()
-        try:
-            pet.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            if getattr(pet, "_own_pgrp", False):
-                pgid = os.getpgid(pet.process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                pet.process.kill()
-            pet.process.wait(timeout=3)
-    except (OSError, ChildProcessError, subprocess.TimeoutExpired):
-        # Process already dead, group doesn't exist, or refused to die
-        pass
-    # Close pipe file descriptors
-    _try_close_pet(pet)
-
-
-def _try_close_pet(pet: Any) -> None:
-    """Close pytanque's pipe file descriptors without killing."""
-    if pet is None or pet.process is None:
-        return
-    for stream in [pet.process.stdin, pet.process.stdout, pet.process.stderr]:
-        try:
-            if stream:
-                stream.close()
-        except Exception:
-            # Best-effort FD cleanup -- the pipe may already be closed,
-            # the peer may be dead, or the buffer may be in any state.
-            # Any further error here is uninteresting; we only care that
-            # we tried to close every FD we hold.
-            pass
-
-
-def _invalidate_pet(lifespan_state: dict[str, Any]) -> None:
-    """Kill pet and set to None so next call respawns.
-
-    Does NOT acquire _pet_lock — this is intentional. After a timeout,
-    an orphaned thread may still hold the lock. The OS-level kill is safe
-    to call without the lock (it's a signal, not a protocol operation).
-    The next _ensure_pet call (under _pet_lock) will see the dead process
-    and respawn.
-
-    Note: there is a brief race window where a concurrent _ensure_pet
-    call may have already read pet_client before this function sets it
-    to None.  The stale pet object will fail with a broken-pipe error,
-    which is caught by the caller's broad exception handler and triggers
-    a respawn on the next call.
-    """
-    pet = lifespan_state.get("pet_client")
-    if pet:
-        _kill_pet(pet)
-    lifespan_state["pet_client"] = None
-    lifespan_state["current_workspace"] = None
-    lifespan_state["pet_generation"] = lifespan_state.get("pet_generation", 0) + 1
-    for hook in _pet_invalidation_hooks:
-        hook()
-
-
-def _set_workspace_if_needed(
-    pet: Any, workspace: str, lifespan_state: dict[str, Any]
-) -> None:
-    """Set pet workspace, skipping if already set to the same directory.
-
-    Side-effect: invokes :func:`_workspace._parse_project_flags` before
-    ``pet.set_workspace`` so that any dune-derived ``_RocqProject`` is
-    materialised on disk *before* coq-lsp indexes the workspace.
-    Without this, pet-based tools on a fresh dune workspace would see a
-    workspace with no project file, falling back to single-theory load
-    paths and breaking cross-theory imports (pytanque issue #17).
-    """
-    ws = str(Path(workspace).resolve())
-    if lifespan_state.get("current_workspace") != ws:
-        _workspace._parse_project_flags(Path(ws))
-        pet.set_workspace(debug=False, dir=ws)
-        lifespan_state["current_workspace"] = ws
-
-
-# ---------------------------------------------------------------------------
-# Semaphore (shared by interactive tools)
-# ---------------------------------------------------------------------------
-
-# Async-level serialization to prevent deadlock on timeout.
-# Unlike threading.Lock, asyncio.Semaphore is released even when the
-# thread is orphaned by asyncio.wait_for timeout.
-# Shared across ALL pet operations (step + query) because pytanque's
-# stdio pipe is single-duplex.
-_pet_semaphore: asyncio.Semaphore | None = None
-
-
-def _get_pet_semaphore() -> asyncio.Semaphore:
-    """Lazy-init the semaphore (must be created inside a running event loop)."""
-    global _pet_semaphore
-    if _pet_semaphore is None:
-        _pet_semaphore = asyncio.Semaphore(1)
-    return _pet_semaphore
-
-
-def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
-    """Merge *partial* into *resp* without overwriting control keys.
-
-    Keys like ``"success"``, ``"error"``, and ``"pet_restarted"`` are set by
-    the error handler and must not be clobbered by user-provided partial state.
-    """
-    for k, v in partial.items():
-        if k not in resp:
-            resp[k] = v
-
-
-# The failure-reason taxonomy and the envelope/degradation helpers moved
-# to leaf modules (single source of truth; no import cycle).  The names
-# below stay bound on this module because submodules and tests access
-# them as ``_server.<name>`` — see rocq_mcp/taxonomy.py and
-# rocq_mcp/envelope.py for the definitions.
-from rocq_mcp.envelope import (  # noqa: E402
-    _RECENT_ERROR_MESSAGE_LIMIT,  # noqa: F401  (re-export for tests)
-    _fail,
-    _no_ctx_fail,
-    _record_error,
-)
-from rocq_mcp.taxonomy import (  # noqa: E402
-    RECENT_ERROR_REASONS as _RECENT_ERROR_REASONS,  # noqa: F401
-)
 
 
 def _resolve_tool_envelope(
@@ -650,458 +455,11 @@ def _finalize_tool_envelope(
     if not isinstance(result, dict):
         return result
     if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+        result["clamped_timeout"] = config.ROCQ_QUERY_TIMEOUT_CAP
     if ws_warning:
         result["workspace_warning"] = ws_warning
     return result
 
-
-async def _build_memory_abort_response(
-    lifespan_state: dict[str, Any],
-    tool: str,
-    on_timeout: Callable[[], None] | None,
-    partial_state: dict[str, Any] | None,
-    *,
-    auto_record: bool = True,
-) -> dict[str, Any]:
-    """Run the memory-abort recovery path and return the response dict.
-
-    Thin wrapper around :func:`_handle_pet_failure` that supplies the
-    memory-specific error message; the recovery scaffold (invalidate
-    pet, release lock, fire on_timeout, merge partial, record error)
-    is shared with every other killed-pet path.  When *auto_record* is
-    False, the ``recent_errors`` push is suppressed so the caller can
-    classify the failure at its own layer.
-    """
-    return await _handle_pet_failure(
-        lifespan_state,
-        tool,
-        reason="memory_exhausted",
-        error=(
-            f"{tool} aborted: pet RSS exceeded "
-            f"{ROCQ_MAX_PET_RSS_MB} MB. The proof state was lost; "
-            "pet has been restarted. Retry with a smaller term, "
-            "avoid vm_compute on large inputs, or split the work."
-        ),
-        killed_pet=True,
-        on_timeout=on_timeout,
-        auto_record=auto_record,
-        partial_state=partial_state,
-    )
-
-
-async def _memory_watchdog(
-    lifespan_state: dict[str, Any],
-    max_rss_mb: int,
-    main_task: asyncio.Task,
-    event: asyncio.Event,
-    interval: float | None = None,
-) -> None:
-    """Sample pet RSS; on threshold breach, set *event* and cancel *main_task*.
-
-    Runs concurrently with ``_run_with_pet``'s main thread.  When the pet
-    subprocess RSS exceeds ``max_rss_mb`` MB, signals memory exhaustion via
-    *event* and cancels the main task so the existing timeout-class recovery
-    path can reclaim the lock and respawn pet.
-
-    Tolerates:
-    - ``psutil`` not installed -- exits silently (no monitoring).
-    - pet not yet spawned (``lifespan_state["pet_client"] is None``) --
-      keeps polling.
-    - pet exits between samples (``psutil.NoSuchProcess``) -- treated as
-      transient; keeps polling.
-    """
-    if interval is None:
-        interval = _MEMORY_WATCHDOG_INTERVAL
-
-    try:
-        while not main_task.done():
-            await asyncio.sleep(interval)
-            if main_task.done():
-                return
-            client = lifespan_state.get("pet_client")
-            if client is None or client.process is None:
-                continue
-            try:
-                pid = client.process.pid
-                rss_bytes = psutil.Process(pid).memory_info().rss
-            except (psutil.Error, AttributeError, OSError):
-                # psutil.Error covers NoSuchProcess / AccessDenied / ZombieProcess;
-                # OSError catches raw ProcessLookupError if pet died between
-                # Process() construction and memory_info().
-                continue
-            rss_mb = rss_bytes // (1024 * 1024)
-            if rss_mb > lifespan_state.get("peak_pet_rss_mb", 0):
-                lifespan_state["peak_pet_rss_mb"] = float(rss_mb)
-            if rss_mb > max_rss_mb:
-                event.set()
-                main_task.cancel()
-                return
-    except asyncio.CancelledError:
-        return
-
-
-def _notify(
-    lifespan_state: dict[str, Any] | None, coro_factory: Callable[[Any], Any]
-) -> None:
-    """Best-effort MCP notification from sync code or worker threads.
-
-    Resolves the ambient request context (fastmcp dependency injection),
-    builds the notification coroutine via *coro_factory(ctx)*, and
-    schedules it on the current loop (async context) or on the server
-    loop captured in lifespan_state (worker thread).  Never raises —
-    a notification failure must not break an envelope.
-    """
-    try:
-        from fastmcp.server.dependencies import get_context
-
-        ctx = get_context()
-    except Exception:
-        return
-    try:
-        coro = coro_factory(ctx)
-    except Exception:
-        return
-    try:
-        asyncio.get_running_loop().create_task(coro)
-        return
-    except RuntimeError:
-        pass
-    loop = (lifespan_state or {}).get("event_loop")
-    if loop is None:
-        coro.close()
-        return
-    try:
-        asyncio.run_coroutine_threadsafe(coro, loop)
-    except Exception:
-        coro.close()
-
-
-def _progress(
-    lifespan_state: dict[str, Any] | None,
-    progress: float,
-    total: float | None = None,
-    message: str | None = None,
-) -> None:
-    """Best-effort progress notification (no-op without a progressToken)."""
-    _notify(
-        lifespan_state,
-        lambda ctx: ctx.report_progress(
-            progress=progress, total=total, message=message
-        ),
-    )
-
-
-def _log_info(lifespan_state: dict[str, Any] | None, message: str) -> None:
-    _notify(lifespan_state, lambda ctx: ctx.info(message))
-
-
-def _log_warning(lifespan_state: dict[str, Any] | None, message: str) -> None:
-    _notify(lifespan_state, lambda ctx: ctx.warning(message))
-
-
-async def _handle_pet_failure(
-    lifespan_state: dict[str, Any],
-    tool: str,
-    *,
-    reason: str,
-    error: str,
-    killed_pet: bool = False,
-    on_timeout: Callable[[], None] | None = None,
-    partial_state: dict[str, Any] | None = None,
-    auto_record: bool = True,
-) -> dict[str, Any]:
-    """Build a unified failure response for ``_run_with_pet``'s except arms.
-
-    When *killed_pet* is True (timeout / dead PetanqueError / BrokenPipe /
-    ConnectionError), invalidates the pet client, force-releases the
-    pet lock, optionally invokes the caller's *on_timeout* hook, and
-    tags the response with ``pet_restarted: True``.  When False
-    (lock contention / live PetanqueError / FileNotFoundError /
-    unexpected OSError-class exception), leaves the pet alone.
-
-    Both paths merge *partial_state* (if any) into the response and
-    record the failure into ``recent_errors`` so ``rocq_diag`` surfaces
-    it.  When *auto_record* is False, the ``_record_error`` call is
-    skipped; the recovery side-effects (invalidate / lock release /
-    on_timeout) still fire so the pet stays healthy.  Used by callers
-    that need to classify the failure at their own layer (e.g.
-    ``run_assumptions`` distinguishing ``not_found`` from generic crash).
-    """
-    if killed_pet:
-        _log_warning(
-            lifespan_state,
-            f"pet killed ({reason} in {tool}); held state_ids are gone — "
-            "the next pet call respawns fresh",
-        )
-        _invalidate_pet(lifespan_state)
-        await _force_release_pet_lock()
-        if on_timeout is not None:
-            on_timeout()
-    resp: dict[str, Any] = {"success": False, "error": error, "reason": reason}
-    if killed_pet:
-        resp["pet_restarted"] = True
-    if partial_state:
-        _merge_partial_state(resp, partial_state)
-    if auto_record:
-        _record_error(lifespan_state, tool, error, reason=reason)
-    return resp
-
-
-async def _run_with_pet(
-    fn: Callable[[Any], Any],
-    lifespan_state: dict[str, Any],
-    tool: str,
-    on_timeout: Callable[[], None] | None = None,
-    timeout: float | None = None,
-    partial_state: dict[str, Any] | None = None,
-    *,
-    auto_record: bool = True,
-) -> Any:
-    """Run *fn(pet)* with the pet client, handling lock/semaphore/timeout/errors.
-
-    The helper encapsulates the full boilerplate shared by every pytanque
-    operation that follows the simple "acquire lock, ensure pet, do work"
-    pattern:
-
-    1. PetanqueError import check
-    2. _pet_lock acquisition with timeout
-    3. _ensure_pet (lazy-init the pet subprocess)
-    4. asyncio.Semaphore + asyncio.wait_for (async-level timeout)
-    5. All standard exception handlers
-
-    *fn* receives the live pet client and must return the desired result.
-    It runs inside a background thread with _pet_lock held; the lock is
-    released automatically when *fn* returns or raises.
-
-    *tool* is the canonical MCP tool name (e.g. ``"rocq_check"``) and is
-    used both as the prefix in user-facing error messages
-    (``"rocq_check timed out after 30s."``) and as the ``tool`` field on
-    ``recent_errors`` entries.  Pass exactly the public tool name, not a
-    human phrase.
-
-    When pet crashes (timeout, broken pipe), the return dict includes
-    ``"pet_restarted": True`` so callers can decide whether to retry.
-
-    If *partial_state* is given (a mutable dict), *fn* can populate it
-    with intermediate results.  On timeout or error the dict contents
-    are merged into the error response so partial work is not lost.
-
-    When *auto_record* is False (default True), failure paths still
-    return the same failure-envelope dict but skip the ``_record_error``
-    push into ``recent_errors``.  Callers that need to classify the
-    failure at their own layer (e.g. ``run_assumptions`` distinguishing
-    ``not_found`` from a generic ``rocq_query/crashed``) pass
-    ``auto_record=False`` to avoid the double-record / compensating-pop
-    dance.
-
-    The return type is left as ``Any`` because the dict shape varies by
-    failure mode (success path, ``pet_restarted``-tagged crashes,
-    ``partial_state`` merges, etc.) and a TypedDict would be unwieldy.
-    The ``"reason"`` key, when present on a failure, is a
-    :data:`compile_enrichment._StateCaptureStatus` (one of ``"timeout"``, ``"crashed"``,
-    ``"memory_exhausted"``, ``"lock_contended"``, ``"unavailable"``).
-    """
-    try:
-        from pytanque import PetanqueError
-    except ImportError:
-        return _fail(
-            lifespan_state if auto_record else None,
-            tool,
-            _PYTANQUE_NOT_INSTALLED_HINT,
-            "unavailable",
-        )
-
-    _timeout: float = timeout if timeout is not None else lifespan_state["pet_timeout"]
-    # Lock acquire uses a shorter timeout than wait_for so that
-    # _PetLockTimeout fires before asyncio.TimeoutError on contention.
-    # This avoids unnecessarily killing pet when the issue is just
-    # lock contention, not a pet hang.
-    lock_timeout = _timeout * 0.8
-
-    def _execute() -> Any:
-        lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
-        wait_started = time.monotonic()
-        if not lock.acquire(timeout=lock_timeout):
-            raise _PetLockTimeout("Could not acquire pet lock")
-        # Contention telemetry for rocq_diag: how long this call parked
-        # on the (globally serializing) pet lock.  Dict writes are
-        # GIL-atomic; last-writer-wins races are fine for diagnostics.
-        wait_ms = (time.monotonic() - wait_started) * 1000.0
-        lifespan_state["lock_wait_ms_last"] = wait_ms
-        if wait_ms > lifespan_state.get("lock_wait_ms_max", 0.0):
-            lifespan_state["lock_wait_ms_max"] = wait_ms
-        try:
-            pet = _ensure_pet(lifespan_state)
-            return fn(pet)
-        finally:
-            lock.release()
-
-    sem = _get_pet_semaphore()
-    async with sem:
-        main_task = asyncio.create_task(asyncio.to_thread(_execute))
-        mem_event = asyncio.Event()
-        monitor_task = asyncio.create_task(
-            _memory_watchdog(lifespan_state, ROCQ_MAX_PET_RSS_MB, main_task, mem_event)
-        )
-        try:
-            try:
-                result = await asyncio.wait_for(main_task, timeout=_timeout)
-                return result
-            finally:
-                if not monitor_task.done():
-                    monitor_task.cancel()
-                    try:
-                        await monitor_task
-                    except asyncio.CancelledError:
-                        pass
-        except asyncio.CancelledError:
-            # If mem_event is set, the watchdog cancelled main_task because
-            # pet RSS exceeded the threshold; otherwise this is an external
-            # cancel that should propagate.
-            if mem_event.is_set():
-                return await _build_memory_abort_response(
-                    lifespan_state,
-                    tool,
-                    on_timeout,
-                    partial_state,
-                    auto_record=auto_record,
-                )
-            raise
-        except asyncio.TimeoutError:
-            # If the wait_for timer and the watchdog raced, mem_event may
-            # already be set; prefer the more specific memory_exhausted label.
-            if mem_event.is_set():
-                return await _build_memory_abort_response(
-                    lifespan_state,
-                    tool,
-                    on_timeout,
-                    partial_state,
-                    auto_record=auto_record,
-                )
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="timeout",
-                error=(
-                    f"{tool} timed out after {_timeout}s. "
-                    f"Retry with `{tool}(..., timeout=<seconds>)` "
-                    f"(e.g. `timeout=180` for files with heavy library imports). "
-                    f"Server-side defaults: ROCQ_PET_TIMEOUT (base, default 30s), "
-                    f"ROCQ_QUERY_TIMEOUT_CAP (cap, default 300s). "
-                    f"If the response also includes `clamped_timeout`, you have "
-                    f"hit `ROCQ_QUERY_TIMEOUT_CAP`; call `rocq_diag` for memory "
-                    f"headroom and consider `rocq_start(..., force_restart=True)` "
-                    f"instead of bumping further."
-                ),
-                killed_pet=True,
-                on_timeout=on_timeout,
-                partial_state=partial_state,
-                auto_record=auto_record,
-            )
-        except _PetLockTimeout:
-            lifespan_state["lock_contended_total"] = (
-                int(lifespan_state.get("lock_contended_total", 0)) + 1
-            )
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="lock_contended",
-                error=f"{tool}: pet is busy (lock contention). Try again.",
-                auto_record=auto_record,
-            )
-        except PetanqueError as e:
-            if not _pet_alive(lifespan_state.get("pet_client")):
-                return await _handle_pet_failure(
-                    lifespan_state,
-                    tool,
-                    reason="crashed",
-                    error=f"Pet process died: {e.message}",
-                    killed_pet=True,
-                    partial_state=partial_state,
-                    auto_record=auto_record,
-                )
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="crashed",
-                error=e.message,
-                auto_record=auto_record,
-            )
-        except (BrokenPipeError, ConnectionError) as e:
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="crashed",
-                error=f"Pet process died: {e}",
-                killed_pet=True,
-                on_timeout=on_timeout,
-                partial_state=partial_state,
-                auto_record=auto_record,
-            )
-        except FileNotFoundError:
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="unavailable",
-                error="pet binary not found on PATH. Install coq-lsp.",
-                auto_record=auto_record,
-            )
-        except (OSError, RuntimeError, ValueError, TypeError) as e:
-            return await _handle_pet_failure(
-                lifespan_state,
-                tool,
-                reason="crashed",
-                error=f"Unexpected error: {e}",
-                partial_state=partial_state,
-                auto_record=auto_record,
-            )
-
-
-# ---------------------------------------------------------------------------
-# Import implementation functions from submodules
-# ---------------------------------------------------------------------------
-# These imports MUST come at the bottom of this module: ``compile`` /
-# ``interactive`` / ``diag`` / ``compile_enrichment`` all import server
-# at module load time (for shared infrastructure: locks, _record_error,
-# config), so server cannot in turn import them at the top without a
-# cycle.  Only re-export symbols that are actually accessed via
-# ``rocq_mcp.server`` from tests or from sibling modules — every dead
-# re-export is a test-monkeypatch trap waiting to happen.
-
-from rocq_mcp.compile import (  # noqa: E402
-    run_compile,
-    run_compile_file,
-    run_verify,
-)
-from rocq_mcp.interactive import (  # noqa: E402
-    run_assumptions,
-    run_query,
-    run_start,
-    run_check,
-    run_step_multi,
-    run_toc,
-    run_notations,
-    run_goal,
-    run_search,
-)
-from rocq_mcp.diag import (  # noqa: E402
-    _DIAG_LIVE_STATES_CAP,
-    _build_diag_snapshot,
-    _sample_pet_rss_mb,
-)
-from rocq_mcp.health import (  # noqa: E402
-    build_health_snapshot,
-    compute_switch_env,
-    list_switches,
-    _detect_switch,
-    _resolve_binary,
-    _SWITCH_ENV_KEYS,
-)
-from rocq_mcp.compile_enrichment import (  # noqa: E402
-    run_compile_file_with_state,
-    run_compile_with_state,
-)
 
 # ---------------------------------------------------------------------------
 # Tool: rocq_compile
@@ -1140,7 +498,7 @@ async def rocq_compile(
         source: Complete .v file content, including imports.
         workspace: Workspace directory; default config.ROCQ_WORKSPACE env var
             (see rocq://guide/responses for workspace resolution).
-        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
+        timeout: Seconds; 0 = config.ROCQ_COQC_TIMEOUT default.
         include_warnings: False drops warning-severity output.
     """
     resolved = _resolve_tool_envelope(
@@ -1148,7 +506,7 @@ async def rocq_compile(
         ctx=ctx,
         workspace=workspace,
         timeout=timeout,
-        timeout_default=ROCQ_COQC_TIMEOUT,
+        timeout_default=config.ROCQ_COQC_TIMEOUT,
         ctx_optional=True,
     )
     if not isinstance(resolved, tuple):
@@ -1212,7 +570,7 @@ async def rocq_compile_file(
         file: Path to the .v file (relative to workspace).
         workspace: Auto-detected from project markers when omitted
             (rocq://guide/responses).
-        timeout: Seconds; 0 = ROCQ_COQC_TIMEOUT default.
+        timeout: Seconds; 0 = config.ROCQ_COQC_TIMEOUT default.
         include_warnings: False drops warning-severity output.
         keep_vo: Keep .vo/.vok/.vos after the compile (for sibling
             Require Import).  Footgun: with mode="vos" only a .vos is
@@ -1231,7 +589,7 @@ async def rocq_compile_file(
         workspace=workspace,
         file=file,
         timeout=timeout,
-        timeout_default=ROCQ_COQC_TIMEOUT,
+        timeout_default=config.ROCQ_COQC_TIMEOUT,
         ctx_optional=True,
     )
     if not isinstance(resolved, tuple):
@@ -1297,7 +655,7 @@ async def rocq_verify(
         problem_statement: The original problem file content (with
             Admitted/Abort).
         workspace: Workspace directory; default config.ROCQ_WORKSPACE.
-        timeout: Seconds; 0 = ROCQ_VERIFY_TIMEOUT default (budget spans
+        timeout: Seconds; 0 = config.ROCQ_VERIFY_TIMEOUT default (budget spans
             all verification phases).
         include_warnings: False drops warning-severity output.
     """
@@ -1306,7 +664,7 @@ async def rocq_verify(
         ctx=ctx,
         workspace=workspace,
         timeout=timeout,
-        timeout_default=ROCQ_VERIFY_TIMEOUT,
+        timeout_default=config.ROCQ_VERIFY_TIMEOUT,
         ctx_optional=True,
     )
     if not isinstance(resolved, tuple):
@@ -1327,11 +685,11 @@ async def rocq_verify(
     )
     # Record verification failures (success=False with an error message)
     # so rocq_diag surfaces them.  Pet-level crashes routed through
-    # run_verify -> _run_with_pet (Phase 2 toc lookup) are already
+    # run_verify -> _pet_runtime._run_with_pet (Phase 2 toc lookup) are already
     # recorded inside that helper, so skip when ``pet_restarted=True``
     # to avoid the double-record bug — the prior entry already carries
     # tool="rocq_verify" with the right reason because _extract_problem_structure
-    # passes that tool name to _run_with_pet.
+    # passes that tool name to _pet_runtime._run_with_pet.
     if (
         isinstance(result, dict)
         and result.get("success") is False
@@ -1393,8 +751,8 @@ async def rocq_query(
         workspace: Auto-detected from project markers when omitted.
         max_results: Cap Search hits (recommended for broad patterns).
         include_warnings: False drops warning-severity feedback.
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
-            ROCQ_QUERY_TIMEOUT_CAP.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; clamped to
+            config.ROCQ_QUERY_TIMEOUT_CAP.
         from_state: Live state_id to query against (mutually exclusive
             with file).
     """
@@ -1460,7 +818,7 @@ async def rocq_assumptions(
         file: .v file where the theorem is defined (relative to
             workspace).
         workspace: Auto-detected from project markers when omitted.
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; set 180+ up front on
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; set 180+ up front on
             heavy imports.
         include_raw: True additionally returns raw_output (the verbatim
             Print Assumptions text; redundant with the parsed list).
@@ -1516,7 +874,7 @@ async def rocq_toc(
     Args:
         file: Path to the .v file (relative to workspace).
         workspace: Auto-detected from project markers when omitted.
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for heavy imports.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_toc", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -1565,7 +923,7 @@ async def rocq_notations(
             "forall n, n + 0 = n".
         preamble: Import lines for context (e.g. "Require Import QArith.").
         workspace: Workspace directory; default config.ROCQ_WORKSPACE.
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_notations", ctx=ctx, workspace=workspace, timeout=timeout
@@ -1639,7 +997,7 @@ async def rocq_start(
         force_restart: DESTRUCTIVE — kills pet and clears every caller's
             states before starting.  Recovery-only (repeated state expiry,
             RAM bloat); never routine (rocq://guide/concurrency).
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for heavy imports.
         goals_format: Goals representation — "pretty" (default),
             "structured", or "names_only".
     """
@@ -1706,7 +1064,7 @@ async def rocq_step_multi(
             rocq_check).  Required; there is no implicit current state.
         include_warnings: False drops warning-severity feedback.
         timeout: Whole-batch seconds; each tactic gets
-            timeout/len(tactics).  0 = ROCQ_PET_TIMEOUT.
+            timeout/len(tactics).  0 = config.ROCQ_PET_TIMEOUT.
         goals_format: Goals representation for full entries — "pretty"
             (default), "structured", or "names_only".  Identical
             outcomes are deduplicated: repeats carry same_outcome_as
@@ -1735,7 +1093,7 @@ async def rocq_step_multi(
         preset=preset,
     )
     if clamped:
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+        result["clamped_timeout"] = config.ROCQ_QUERY_TIMEOUT_CAP
     return result
 
 
@@ -1787,7 +1145,7 @@ async def rocq_check(
             a previous rocq_check).  Required; no implicit current state.
         workspace: Accepted for compatibility; unused (the workspace
             comes from the state entry).
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; raise for
             vm_compute/native_compute.
         include_warnings: False drops warning-severity feedback.
         goals_format: Goals representation — "pretty" (default string),
@@ -1811,7 +1169,7 @@ async def rocq_check(
         goals_format=goals_format,
     )
     if clamped and isinstance(result, dict):
-        result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
+        result["clamped_timeout"] = config.ROCQ_QUERY_TIMEOUT_CAP
     return result
 
 
@@ -1925,7 +1283,7 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
         )
     name = name.strip()
 
-    previous = _detect_switch(_resolve_binary(ROCQ_COQC_BINARY))["switch"]
+    previous = _detect_switch(_resolve_binary(config.ROCQ_COQC_BINARY))["switch"]
 
     env, error = await asyncio.to_thread(compute_switch_env, name)
     if env is None:
@@ -1946,16 +1304,18 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
             **extra,
         )
 
-    # Apply the new environment + kill pet under _pet_lock so the mutation
-    # cannot interleave with a concurrent _ensure_pet spawn (which holds the
+    # Apply the new environment + kill pet under _pet_runtime._pet_lock so the mutation
+    # cannot interleave with a concurrent _pet_runtime._ensure_pet spawn (which holds the
     # same lock and would otherwise adopt a pet started on the OLD env, then
-    # survive our _invalidate_pet on a live process — no broken pipe, no
+    # survive our _pet_runtime._invalidate_pet on a live process — no broken pipe, no
     # respawn).  Serializing here guarantees the next spawn sees the new env.
     # The semaphore matches every other pet-mutating path's `async with sem`.
-    lock_timeout = (lifespan_state.get("pet_timeout") or ROCQ_PET_TIMEOUT) * 0.8
+    lock_timeout = (lifespan_state.get("pet_timeout") or config.ROCQ_PET_TIMEOUT) * 0.8
 
     def _apply_switch() -> bool:
-        lock = _pet_lock  # local ref survives a _force_release_pet_lock swap
+        lock = (
+            _pet_runtime._pet_lock
+        )  # local ref survives a _pet_runtime._force_release_pet_lock swap
         if not lock.acquire(timeout=lock_timeout):
             return False
         try:
@@ -1972,14 +1332,14 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
             for key in stale:
                 del os.environ[key]
             # Kill pet + clear the state table + invalidate the import cache
-            # (via _pet_invalidation_hooks).  The next pet-routed call lazily
+            # (via _pet_runtime._pet_invalidation_hooks).  The next pet-routed call lazily
             # respawns pet under the new environment.
-            _invalidate_pet(lifespan_state)
+            _pet_runtime._invalidate_pet(lifespan_state)
             return True
         finally:
             lock.release()
 
-    async with _get_pet_semaphore():
+    async with _pet_runtime._get_pet_semaphore():
         applied = await asyncio.to_thread(_apply_switch)
     if not applied:
         return _fail(
@@ -2063,8 +1423,8 @@ async def rocq_search(
         include_types: False returns names only (token-lean for broad
             queries).
         include_warnings: False drops warning-severity feedback.
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; clamped to
-            ROCQ_QUERY_TIMEOUT_CAP.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT; clamped to
+            config.ROCQ_QUERY_TIMEOUT_CAP.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_search", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -2138,7 +1498,7 @@ async def rocq_goal(
             "names_only".
         diff_from: Another live state_id to diff against (requires
             from_state).
-        timeout: Seconds; 0 = ROCQ_PET_TIMEOUT.
+        timeout: Seconds; 0 = config.ROCQ_PET_TIMEOUT.
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_goal",

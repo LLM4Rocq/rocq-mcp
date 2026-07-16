@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import _MockPetBase, make_lifespan_state
 
 # ---------------------------------------------------------------------------
@@ -66,14 +67,13 @@ class TestFeedbackCollection:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):
@@ -533,14 +533,13 @@ class TestStepMultiFeedback:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):

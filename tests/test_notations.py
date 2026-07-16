@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.workspace as _workspace
 
 # ---------------------------------------------------------------------------
@@ -102,12 +104,11 @@ class TestRunNotationsReal:
     @pytest.fixture(autouse=True)
     def reset_semaphore(self):
         """Reset the module-level _pet_semaphore so it is recreated for each test's event loop."""
-        import rocq_mcp.server as srv
 
-        old = srv._pet_semaphore
-        srv._pet_semaphore = None
+        old = _pet_runtime._pet_semaphore
+        _pet_runtime._pet_semaphore = None
         yield
-        srv._pet_semaphore = old
+        _pet_runtime._pet_semaphore = old
 
     @pytest.mark.asyncio
     async def test_basic_notations(self, mock_pet, lifespan_state, tmp_path):
@@ -120,7 +121,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="n + 0 = n",
                 preamble="",
@@ -141,7 +142,7 @@ class TestRunNotationsReal:
 
         mock_pet.list_notations_in_statement = MagicMock(return_value=[])
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="True",
                 preamble="",
@@ -162,7 +163,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="n = n",
                 preamble="",
@@ -189,7 +190,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="x ++ y",
                 preamble="",
@@ -212,7 +213,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="x ++ y",
                 preamble="",
@@ -265,7 +266,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="x + y",
                 preamble="From Coq Require Import Reals.\nOpen Scope R_scope.",
@@ -297,7 +298,7 @@ class TestRunNotationsReal:
         ]
         mock_pet.list_notations_in_statement = MagicMock(return_value=notations)
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = await run_notations(
                 statement="n + m * 2 = 0",
                 preamble="",
@@ -348,5 +349,5 @@ class TestRocqNotationsTimeout:
             ctx=_MockContext({"pet_client": None}),
         )
 
-        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
-        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)
+        assert result["clamped_timeout"] == _config.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_config.ROCQ_QUERY_TIMEOUT_CAP)

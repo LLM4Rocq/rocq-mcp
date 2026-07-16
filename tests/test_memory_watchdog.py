@@ -20,6 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.server as _server
 from rocq_mcp.server import _run_with_pet
 
@@ -48,20 +50,20 @@ def _patch_psutil_raises(monkeypatch, exc_cls) -> None:
 @pytest.fixture(autouse=True)
 def _reset_pet_state(monkeypatch):
     """Reset the global pet semaphore + lock between tests."""
-    _server._pet_semaphore = None
+    _pet_runtime._pet_semaphore = None
     # Ensure tests run with a fresh threading.Lock so prior force-release
     # mutations don't leak.
     import threading
 
-    monkeypatch.setattr(_server, "_pet_lock", threading.Lock())
+    monkeypatch.setattr(_pet_runtime, "_pet_lock", threading.Lock())
     yield
-    _server._pet_semaphore = None
+    _pet_runtime._pet_semaphore = None
 
 
 @pytest.fixture(autouse=True)
 def _fast_watchdog(monkeypatch):
     """Speed up the watchdog poll cadence so tests run in <1s."""
-    monkeypatch.setattr(_server, "_MEMORY_WATCHDOG_INTERVAL", 0.01)
+    monkeypatch.setattr(_config, "_MEMORY_WATCHDOG_INTERVAL", 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +77,14 @@ class TestMemoryWatchdogBreach:
     @pytest.mark.asyncio
     async def test_high_rss_triggers_abort(self, monkeypatch):
         """RSS above threshold -> memory_exhausted response + pet_restarted."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 100)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 100)
         # 500 MB > 100 MB threshold
         _patch_psutil_rss(monkeypatch, 500)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         invalidated: list[bool] = []
         lock_released: list[bool] = []
@@ -94,8 +96,10 @@ class TestMemoryWatchdogBreach:
         async def _track_release_lock():
             lock_released.append(True)
 
-        monkeypatch.setattr(_server, "_invalidate_pet", _track_invalidate)
-        monkeypatch.setattr(_server, "_force_release_pet_lock", _track_release_lock)
+        monkeypatch.setattr(_pet_runtime, "_invalidate_pet", _track_invalidate)
+        monkeypatch.setattr(
+            _pet_runtime, "_force_release_pet_lock", _track_release_lock
+        )
 
         def fn_long_running(pet):
             # Block long enough for the watchdog to fire (interval ~0.01s).
@@ -117,13 +121,13 @@ class TestMemoryWatchdogBreach:
     @pytest.mark.asyncio
     async def test_partial_state_merged_on_memory_abort(self, monkeypatch):
         """``partial_state`` merges into the memory-abort response."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 50)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 50)
         _patch_psutil_rss(monkeypatch, 300)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
         )
@@ -145,13 +149,13 @@ class TestMemoryWatchdogBreach:
     async def test_on_timeout_callback_fires_on_memory_abort(self, monkeypatch):
         """The ``on_timeout`` callback (used for staleness invalidation) fires
         on memory abort, mirroring the timeout path."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 50)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 50)
         _patch_psutil_rss(monkeypatch, 300)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
         )
@@ -178,13 +182,13 @@ class TestMemoryWatchdogNoBreach:
     @pytest.mark.asyncio
     async def test_low_rss_lets_main_succeed(self, monkeypatch):
         """RSS far below threshold -> normal success result."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 100_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 100_000)
         _patch_psutil_rss(monkeypatch, 50)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_quick(pet):
             return {"success": True, "answer": 42}
@@ -195,14 +199,14 @@ class TestMemoryWatchdogNoBreach:
     @pytest.mark.asyncio
     async def test_main_completion_cancels_watchdog_cleanly(self, monkeypatch):
         """A fast-completing main task cancels the watchdog without raising."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 100_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 100_000)
         # Sample value irrelevant — main returns immediately.
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_immediate(pet):
             return "ok"
@@ -219,7 +223,7 @@ class TestMemoryWatchdogResilience:
     @pytest.mark.asyncio
     async def test_pet_not_yet_spawned_keeps_polling(self, monkeypatch):
         """``lifespan_state["pet_client"] is None`` -> watchdog skips, keeps polling."""
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 100_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 100_000)
 
         # If psutil.Process is called we'd raise; the watchdog must NOT call
         # it when pet_client is None.
@@ -244,7 +248,7 @@ class TestMemoryWatchdogResilience:
         mock_pet = _mock_pet()
         # Make _ensure_pet return mock_pet but DO NOT set lifespan_state
         # (simulating "fn returns before _ensure_pet has updated state" race).
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_quick(pet):
             return {"ok": True}
@@ -259,13 +263,13 @@ class TestMemoryWatchdogResilience:
         """``psutil.NoSuchProcess`` mid-call doesn't tank the watchdog."""
         import psutil
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 100_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 100_000)
         _patch_psutil_raises(monkeypatch, psutil.NoSuchProcess)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_quick(pet):
             return {"success": True}
@@ -282,13 +286,13 @@ class TestExistingPathsUnaffected:
     async def test_timeout_path_unaffected(self, monkeypatch):
         """asyncio.TimeoutError still produces a timeout response (not memory_exhausted)."""
         # High threshold so the watchdog never fires.
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         _patch_psutil_rss(monkeypatch, 50)
 
         mock_pet = _mock_pet()
         lifespan_state = make_lifespan_state(pet_timeout=0.1)  # very short timeout
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda ls: ls.update(pet_client=None)
         )
@@ -313,13 +317,13 @@ class TestExistingPathsUnaffected:
         except ImportError:
             pytest.skip("pytanque not installed")
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         _patch_psutil_rss(monkeypatch, 1)
 
         mock_pet = _mock_pet(alive=True)
         lifespan_state = make_lifespan_state()
         lifespan_state["pet_client"] = mock_pet
-        monkeypatch.setattr(_server, "_ensure_pet", lambda ls: mock_pet)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda ls: mock_pet)
 
         def fn_raises(pet):
             raise PetanqueError(1, "Tactic failed")

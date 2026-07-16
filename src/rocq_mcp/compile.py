@@ -35,11 +35,9 @@ from rocq_mcp.verify import (
     _validate_rocq_identifier,
 )
 
-# Access server attributes through the module reference so that
-# monkeypatching ``rocq_mcp.server.ROCQ_COQC_BINARY`` (or _run_coqc,
-# etc.) in tests is visible here.  A bare ``from server import X``
-# would capture the value at import time, defeating monkeypatch.
-import rocq_mcp.server as _server
+from rocq_mcp import config
+from rocq_mcp import envelope as _envelope
+from rocq_mcp import pet_runtime as _pet_runtime
 from rocq_mcp import workspace as _workspace
 
 # ---------------------------------------------------------------------------
@@ -85,7 +83,7 @@ def _run_coqc_process(
         timed_out: bool
     """
     coqc_args: list[str] = [
-        _server.ROCQ_COQC_BINARY,
+        config.ROCQ_COQC_BINARY,
         *_workspace._parse_project_flags(workspace),
     ]
     if mode == "vos":
@@ -140,7 +138,7 @@ def _run_coqc_process(
                 "timed_out": True,
             }
     except (FileNotFoundError, OSError) as e:
-        coqc_bin = _server.ROCQ_COQC_BINARY
+        coqc_bin = config.ROCQ_COQC_BINARY
         return {
             "returncode": -1,
             "stdout": "",
@@ -669,11 +667,11 @@ def run_compile(
 
     Receives already-validated workspace and timeout.
     """
-    if len(source) > _server.ROCQ_MAX_SOURCE_SIZE:
+    if len(source) > config.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
             "reason": "validation",
-            "error": f"Source exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
+            "error": f"Source exceeds maximum size ({config.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     forbidden = _check_forbidden_commands(source)
@@ -742,11 +740,11 @@ def run_compile_file(
             "error": f"Cannot read file: {e}",
         }
 
-    if len(source) > _server.ROCQ_MAX_SOURCE_SIZE:
+    if len(source) > config.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
             "reason": "validation",
-            "error": f"File exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
+            "error": f"File exceeds maximum size ({config.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     forbidden = _check_forbidden_commands(source)
@@ -990,7 +988,7 @@ async def _extract_problem_structure(
 
     def _do_toc(pet: Any) -> Any:
         ws = str(Path(workspace).resolve())
-        _server._set_workspace_if_needed(pet, workspace, lifespan_state)
+        _pet_runtime._set_workspace_if_needed(pet, workspace, lifespan_state)
         with tempfile.NamedTemporaryFile(
             suffix=".v", mode="w", delete=False, dir=ws
         ) as f:
@@ -1013,7 +1011,7 @@ async def _extract_problem_structure(
         for p in _temp_files:
             _workspace._cleanup_coqc_artifacts(p)
 
-    toc_result = await _server._run_with_pet(
+    toc_result = await _pet_runtime._run_with_pet(
         _do_toc,
         lifespan_state,
         "rocq_verify",
@@ -1411,24 +1409,24 @@ async def run_verify(
     except ValueError as exc:
         return {"success": False, "reason": "validation", "error": str(exc)}
 
-    if len(proof) > _server.ROCQ_MAX_SOURCE_SIZE:
+    if len(proof) > config.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
             "reason": "validation",
-            "error": f"Proof exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
+            "error": f"Proof exceeds maximum size ({config.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
-    if len(problem_statement) > _server.ROCQ_MAX_SOURCE_SIZE:
+    if len(problem_statement) > config.ROCQ_MAX_SOURCE_SIZE:
         return {
             "success": False,
             "reason": "validation",
-            "error": f"Problem statement exceeds maximum size ({_server.ROCQ_MAX_SOURCE_SIZE} bytes).",
+            "error": f"Problem statement exceeds maximum size ({config.ROCQ_MAX_SOURCE_SIZE} bytes).",
         }
 
     t0 = time.monotonic()
 
     # Phase 1: Standard Module M
-    _server._progress(lifespan_state, 1, 3, "verify: Module M sandbox")
+    _envelope._progress(lifespan_state, 1, 3, "verify: Module M sandbox")
     phase1_result, phase1_failure = _run_phase1_module_m(
         proof,
         problem_name,
@@ -1441,7 +1439,7 @@ async def run_verify(
         return phase1_result
 
     # Phase 2: Shared-defs Module M (includes Phase 3 fallback)
-    _server._progress(
+    _envelope._progress(
         lifespan_state, 2, 3, "verify: shared-defs sandbox (phase 3 may follow)"
     )
     return await _run_phase2_shared_defs(

@@ -30,7 +30,7 @@ import subprocess
 from typing import Any
 
 import rocq_mcp as _rocq_mcp  # for __version__
-import rocq_mcp.server as _server
+from rocq_mcp import config
 
 # Short per-probe budget for the ``coqc --print-version`` / ``pet --version``
 # subprocess.  These are fast (tens of ms); the cap is pure insurance against
@@ -210,7 +210,7 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     verdict and human-readable ``warnings``.  See ``rocq_health`` for the
     output schema.
     """
-    coqc_path = _resolve_binary(_server.ROCQ_COQC_BINARY)
+    coqc_path = _resolve_binary(config.ROCQ_COQC_BINARY)
     pet_path = _resolve_binary("pet")
 
     try:
@@ -229,7 +229,7 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     if coqc_path is None:
         warnings.append(
-            f"coqc binary {_server.ROCQ_COQC_BINARY!r} not found on PATH — "
+            f"coqc binary {config.ROCQ_COQC_BINARY!r} not found on PATH — "
             "compilation tools will fail. Check the switch / ROCQ_COQC_BINARY."
         )
     if pet_path is None:

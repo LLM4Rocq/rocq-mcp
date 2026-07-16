@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rocq_mcp.pet_runtime as _pet_runtime
 from rocq_mcp.interactive import _check_staleness, _StateEntry
 from tests.conftest import make_lifespan_state
 
@@ -138,11 +139,10 @@ class TestStalenessInRunCheck:
     def _setup_mock_state(self, tmp_path):
         """Set up a state entry with a stale file, mock pet."""
         import rocq_mcp.interactive as _int
-        import rocq_mcp.server as _srv
 
         # Reset state table
         _int._state_invalidate_all()
-        _srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
         # Create a file and record its mtime
         f = tmp_path / "test.v"
@@ -170,7 +170,7 @@ class TestStalenessInRunCheck:
 
         yield
         _int._state_invalidate_all()
-        _srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):

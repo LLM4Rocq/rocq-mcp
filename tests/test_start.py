@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 import rocq_mcp.workspace as _workspace
 from tests.conftest import PET_AVAILABLE, _MockPetBase
 
@@ -1184,7 +1186,6 @@ class TestStartTimeoutForwarding:
     @pytest.mark.asyncio
     async def test_run_start_forwards_timeout(self, monkeypatch, tmp_path):
         """run_start(timeout=X) forwards X to _run_with_pet."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_start
 
         vfile = tmp_path / "t.v"
@@ -1196,7 +1197,7 @@ class TestStartTimeoutForwarding:
             captured["tool"] = tool
             return {"success": True, "state_id": 1}
 
-        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+        monkeypatch.setattr(_pet_runtime, "_run_with_pet", fake_run_with_pet)
 
         lifespan_state = _make_lifespan_state()
         await run_start(
@@ -1212,7 +1213,6 @@ class TestStartTimeoutForwarding:
     @pytest.mark.asyncio
     async def test_run_start_default_timeout_is_none(self, monkeypatch, tmp_path):
         """Without explicit timeout, run_start forwards None (server default)."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import run_start
 
         vfile = tmp_path / "t.v"
@@ -1223,7 +1223,7 @@ class TestStartTimeoutForwarding:
             captured.update(kw)
             return {"success": True, "state_id": 1}
 
-        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+        monkeypatch.setattr(_pet_runtime, "_run_with_pet", fake_run_with_pet)
 
         lifespan_state = _make_lifespan_state()
         await run_start(
@@ -1241,7 +1241,7 @@ class TestStartTimeoutForwarding:
 
         import rocq_mcp.server as srv
 
-        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 60)
+        monkeypatch.setattr(_config, "ROCQ_QUERY_TIMEOUT_CAP", 60)
         monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         captured: dict = {}
@@ -1270,7 +1270,7 @@ class TestStartTimeoutForwarding:
 
         import rocq_mcp.server as srv
 
-        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+        monkeypatch.setattr(_config, "ROCQ_QUERY_TIMEOUT_CAP", 300)
         monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         captured: dict = {}

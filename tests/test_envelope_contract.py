@@ -29,6 +29,8 @@ from collections import deque
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 from rocq_mcp.interactive import (
     run_assumptions,
     run_check,
@@ -233,17 +235,18 @@ class TestPetSideEnvelope:
     async def test_live_petanque_error_envelope(self, monkeypatch):
         """A PetanqueError with pet still alive: ``reason=crashed``,
         no ``pet_restarted``."""
-        import rocq_mcp.server as _server
+        from pytanque import PetanqueError
+
         from rocq_mcp.server import _run_with_pet
         from pytanque import PetanqueError
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         patch_psutil_rss(monkeypatch, 1)
         m = mock_pet()
         ls = make_lifespan_state()
         ls["pet_client"] = m
         ls["recent_errors"] = deque(maxlen=10)
-        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: m)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda lstate: m)
 
         def fn(pet):
             raise PetanqueError(99, "Reference foo not found.")
@@ -261,13 +264,13 @@ class TestPetSideEnvelope:
         from rocq_mcp.server import _run_with_pet
         from pytanque import PetanqueError
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         patch_psutil_rss(monkeypatch, 1)
         m = mock_pet(alive=False)
         ls = make_lifespan_state()
         ls["pet_client"] = m
         ls["recent_errors"] = deque(maxlen=10)
-        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: m)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda lstate: m)
         monkeypatch.setattr(
             _server, "_invalidate_pet", lambda lstate: lstate.update(pet_client=None)
         )
@@ -282,16 +285,15 @@ class TestPetSideEnvelope:
     @pytest.mark.asyncio
     async def test_oserror_envelope(self, monkeypatch):
         """An OSError-class exception: ``reason=crashed``, no pet kill."""
-        import rocq_mcp.server as _server
         from rocq_mcp.server import _run_with_pet
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         patch_psutil_rss(monkeypatch, 1)
         m = mock_pet()
         ls = make_lifespan_state()
         ls["pet_client"] = m
         ls["recent_errors"] = deque(maxlen=10)
-        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: m)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda lstate: m)
 
         def fn(pet):
             raise OSError("disk full")
@@ -304,16 +306,15 @@ class TestPetSideEnvelope:
     @pytest.mark.asyncio
     async def test_file_not_found_envelope(self, monkeypatch):
         """FileNotFoundError (pet binary missing): ``reason=unavailable``."""
-        import rocq_mcp.server as _server
         from rocq_mcp.server import _run_with_pet
 
-        monkeypatch.setattr(_server, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
+        monkeypatch.setattr(_config, "ROCQ_MAX_PET_RSS_MB", 1_000_000)
         patch_psutil_rss(monkeypatch, 1)
         m = mock_pet()
         ls = make_lifespan_state()
         ls["pet_client"] = m
         ls["recent_errors"] = deque(maxlen=10)
-        monkeypatch.setattr(_server, "_ensure_pet", lambda lstate: m)
+        monkeypatch.setattr(_pet_runtime, "_ensure_pet", lambda lstate: m)
 
         def fn(pet):
             raise FileNotFoundError("pet binary missing")

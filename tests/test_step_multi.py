@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import PET_AVAILABLE, add_mock_state, make_lifespan_state
 
 # ---------------------------------------------------------------------------
@@ -137,14 +139,15 @@ class TestStepMultiReal:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None  # reset so each asyncio.run() gets a fresh one
+        _pet_runtime._pet_semaphore = (
+            None  # reset so each asyncio.run() gets a fresh one
+        )
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):
@@ -218,7 +221,7 @@ class TestStepMultiReal:
         lifespan_state = make_lifespan_state()
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto", "lia", "ring"],
@@ -287,7 +290,7 @@ class TestStepMultiReal:
         lifespan_state = make_lifespan_state()
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["reflexivity"],
@@ -311,7 +314,7 @@ class TestStepMultiReal:
         lifespan_state = make_lifespan_state()
 
         mock_pet = MagicMock()
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto"],
@@ -347,7 +350,7 @@ class TestStepMultiReal:
         lifespan_state = make_lifespan_state()
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto."],
@@ -384,7 +387,7 @@ class TestStepMultiReal:
         lifespan_state = make_lifespan_state()
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto."],
@@ -433,7 +436,7 @@ class TestStepMultiReal:
         lifespan_state["pet_client"] = mock_dead_pet
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", side_effect=err):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", side_effect=err):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto."],
@@ -483,7 +486,7 @@ class TestStepMultiReal:
         lifespan_state["pet_client"] = mock_alive_pet
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", side_effect=err):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", side_effect=err):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto."],
@@ -528,7 +531,7 @@ class TestStepMultiReal:
         lifespan_state["pet_client"] = mock_alive_pet
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_alive_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_alive_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["omega_bad_tactic.", "lia."],
@@ -654,14 +657,13 @@ class TestStepMultiTimeoutBudget:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):
@@ -705,8 +707,8 @@ class TestStepMultiTimeoutBudget:
         lifespan_state["current_workspace"] = "/tmp"
 
         with (
-            patch("rocq_mcp.server._ensure_pet", return_value=mock_pet),
-            patch("rocq_mcp.server._set_workspace_if_needed"),
+            patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet),
+            patch("rocq_mcp.pet_runtime._set_workspace_if_needed"),
         ):
             result = asyncio.run(
                 run_step_multi(
@@ -770,8 +772,8 @@ class TestStepMultiTimeoutBudget:
         tactics_list = [f"tac{i}." for i in range(20)]
 
         with (
-            patch("rocq_mcp.server._ensure_pet", return_value=mock_pet),
-            patch("rocq_mcp.server._set_workspace_if_needed"),
+            patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet),
+            patch("rocq_mcp.pet_runtime._set_workspace_if_needed"),
         ):
             result = asyncio.run(
                 run_step_multi(
@@ -821,8 +823,8 @@ class TestStepMultiTimeoutBudget:
         # Bullet markers (-/+/*) are not timeout-eligible
         # { and } are not timeout-eligible (no dot ending)
         with (
-            patch("rocq_mcp.server._ensure_pet", return_value=mock_pet),
-            patch("rocq_mcp.server._set_workspace_if_needed"),
+            patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet),
+            patch("rocq_mcp.pet_runtime._set_workspace_if_needed"),
         ):
             result = asyncio.run(
                 run_step_multi(
@@ -855,14 +857,13 @@ class TestStepMultiDeadPetDetection:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):
@@ -913,7 +914,7 @@ class TestStepMultiDeadPetDetection:
         lifespan_state["pet_client"] = mock_pet
         lifespan_state["current_workspace"] = "/tmp"
 
-        with patch("rocq_mcp.server._ensure_pet", return_value=mock_pet):
+        with patch("rocq_mcp.pet_runtime._ensure_pet", return_value=mock_pet):
             result = asyncio.run(
                 run_step_multi(
                     tactics=["auto."],
@@ -941,7 +942,6 @@ class TestStepMultiTimeoutForwarding:
     @pytest.mark.asyncio
     async def test_forwards_per_call_timeout(self, monkeypatch):
         """run_step_multi(timeout=120) → _run_with_pet sees 120 + grace."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _PET_TIMEOUT_GRACE, run_step_multi
 
         captured: dict = {}
@@ -951,7 +951,7 @@ class TestStepMultiTimeoutForwarding:
             captured["tool"] = tool
             return {"success": True, "results": []}
 
-        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+        monkeypatch.setattr(_pet_runtime, "_run_with_pet", fake_run_with_pet)
 
         sid = add_mock_state(parent_id=None, tactic=None)
 
@@ -968,7 +968,6 @@ class TestStepMultiTimeoutForwarding:
     @pytest.mark.asyncio
     async def test_default_uses_session_timeout(self, monkeypatch):
         """Without timeout, falls back to lifespan_state['pet_timeout']."""
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _PET_TIMEOUT_GRACE, run_step_multi
 
         captured: dict = {}
@@ -977,7 +976,7 @@ class TestStepMultiTimeoutForwarding:
             captured.update(kw)
             return {"success": True, "results": []}
 
-        monkeypatch.setattr(srv, "_run_with_pet", fake_run_with_pet)
+        monkeypatch.setattr(_pet_runtime, "_run_with_pet", fake_run_with_pet)
 
         sid = add_mock_state(parent_id=None, tactic=None)
 
@@ -994,7 +993,7 @@ class TestStepMultiTimeoutForwarding:
         """rocq_step_multi clamps timeout to ROCQ_QUERY_TIMEOUT_CAP and echoes it."""
         import rocq_mcp.server as srv
 
-        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 60)
+        monkeypatch.setattr(_config, "ROCQ_QUERY_TIMEOUT_CAP", 60)
 
         captured: dict = {}
 
@@ -1019,7 +1018,7 @@ class TestStepMultiTimeoutForwarding:
         """A timeout under the cap is forwarded unchanged with no clamped_timeout."""
         import rocq_mcp.server as srv
 
-        monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 300)
+        monkeypatch.setattr(_config, "ROCQ_QUERY_TIMEOUT_CAP", 300)
 
         captured: dict = {}
 

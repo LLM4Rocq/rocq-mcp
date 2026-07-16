@@ -23,9 +23,11 @@ only on :mod:`rocq_mcp.taxonomy`).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import os
 import time
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
@@ -207,3 +209,67 @@ def collects_degraded(fn: Any) -> Any:
             _degraded.reset(token)
 
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+# MCP notifications (progress / log) — best-effort, thread-safe
+# ---------------------------------------------------------------------------
+
+
+def _notify(
+    lifespan_state: dict[str, Any] | None, coro_factory: Callable[[Any], Any]
+) -> None:
+    """Best-effort MCP notification from sync code or worker threads.
+
+    Resolves the ambient request context (fastmcp dependency injection),
+    builds the notification coroutine via *coro_factory(ctx)*, and
+    schedules it on the current loop (async context) or on the server
+    loop captured in lifespan_state (worker thread).  Never raises —
+    a notification failure must not break an envelope.
+    """
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        ctx = get_context()
+    except Exception:
+        return
+    try:
+        coro = coro_factory(ctx)
+    except Exception:
+        return
+    try:
+        asyncio.get_running_loop().create_task(coro)
+        return
+    except RuntimeError:
+        pass
+    loop = (lifespan_state or {}).get("event_loop")
+    if loop is None:
+        coro.close()
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:
+        coro.close()
+
+
+def _progress(
+    lifespan_state: dict[str, Any] | None,
+    progress: float,
+    total: float | None = None,
+    message: str | None = None,
+) -> None:
+    """Best-effort progress notification (no-op without a progressToken)."""
+    _notify(
+        lifespan_state,
+        lambda ctx: ctx.report_progress(
+            progress=progress, total=total, message=message
+        ),
+    )
+
+
+def _log_info(lifespan_state: dict[str, Any] | None, message: str) -> None:
+    _notify(lifespan_state, lambda ctx: ctx.info(message))
+
+
+def _log_warning(lifespan_state: dict[str, Any] | None, message: str) -> None:
+    _notify(lifespan_state, lambda ctx: ctx.warning(message))

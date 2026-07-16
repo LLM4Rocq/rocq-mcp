@@ -15,7 +15,7 @@ from typing import Any, Literal
 import psutil
 
 import rocq_mcp as _rocq_mcp  # for __version__
-import rocq_mcp.server as _server
+from rocq_mcp import config
 from rocq_mcp.interactive import _state_table
 
 # Maximum number of ``live_states`` entries returned by ``rocq_diag``.
@@ -138,7 +138,7 @@ def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
         "memory": {
             "pet_rss_mb": pet_rss_mb,
             "peak_pet_rss_mb": peak,
-            "max_rss_mb_threshold": float(_server.ROCQ_MAX_PET_RSS_MB),
+            "max_rss_mb_threshold": float(config.ROCQ_MAX_PET_RSS_MB),
             "sample_status": sample_status,
         },
         "load_average": _sample_load_average(),

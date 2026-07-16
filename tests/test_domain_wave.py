@@ -6,6 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import _MockPetBase
 
 
@@ -47,9 +48,8 @@ class TestBuildSearchCommand:
 class TestRunSearch(_MockPetBase):
     def _search(self, mock_pet, lifespan_state, **kwargs):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             return asyncio.run(
                 _interactive.run_search(
                     workspace="/tmp", lifespan_state=lifespan_state, **kwargs
@@ -141,13 +141,12 @@ class TestRunSearch(_MockPetBase):
 class TestRunGoal(_MockPetBase):
     def test_from_state_mode_registers_nothing(self):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         sid, pet, ls = self._setup_state_and_pet(lambda *a, **k: None)
         pet.complete_goals.return_value = _complete([_goal([_hyp(["n"], "nat")], "G")])
         table_size = len(_interactive._state_table)
 
-        with patch.object(srv, "_ensure_pet", return_value=pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=pet):
             result = asyncio.run(
                 _interactive.run_goal(lifespan_state=ls, from_state=sid)
             )
@@ -159,7 +158,6 @@ class TestRunGoal(_MockPetBase):
 
     def test_diff_from(self):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         sid, pet, ls = self._setup_state_and_pet(lambda *a, **k: None)
         other = _interactive._state_add(
@@ -175,7 +173,7 @@ class TestRunGoal(_MockPetBase):
         g2 = _goal([], "B")
         pet.complete_goals.side_effect = [_complete([g1, g2]), _complete([g1])]
 
-        with patch.object(srv, "_ensure_pet", return_value=pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=pet):
             result = asyncio.run(
                 _interactive.run_goal(
                     lifespan_state=ls, from_state=sid, diff_from=other
@@ -207,9 +205,8 @@ class TestRunGoal(_MockPetBase):
 class TestStepMultiUpgrades(_MockPetBase):
     def _run(self, lifespan_state, mock_pet, **kwargs):
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
-        with patch.object(srv, "_ensure_pet", return_value=mock_pet):
+        with patch.object(_pet_runtime, "_ensure_pet", return_value=mock_pet):
             return asyncio.run(
                 _interactive.run_step_multi(lifespan_state=lifespan_state, **kwargs)
             )
@@ -371,7 +368,6 @@ class TestProofScript:
         """Through run_check with a mock pet: proof_finished responses now
         carry the assembled script."""
         import rocq_mcp.interactive as _interactive
-        import rocq_mcp.server as srv
 
         source = "Theorem t_ok : True.\nAdmitted.\n"
         vfile = tmp_path / "T.v"
@@ -410,17 +406,17 @@ class TestProofScript:
         pet.complete_goals.return_value = _complete([])
 
         ls = {"pet_client": pet, "pet_timeout": 5.0, "current_workspace": str(tmp_path)}
-        srv_sem = srv._pet_semaphore
-        srv._pet_semaphore = None
+        srv_sem = _pet_runtime._pet_semaphore
+        _pet_runtime._pet_semaphore = None
         try:
-            with patch.object(srv, "_ensure_pet", return_value=pet):
+            with patch.object(_pet_runtime, "_ensure_pet", return_value=pet):
                 result = asyncio.run(
                     _interactive.run_check(
                         body="exact I.", lifespan_state=ls, from_state=sid
                     )
                 )
         finally:
-            srv._pet_semaphore = srv_sem
+            _pet_runtime._pet_semaphore = srv_sem
 
         assert result["proof_finished"] is True
         assert result["proof_tactics"] == ["exact I."]

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import rocq_mcp.config as _config
 import rocq_mcp.workspace as _workspace
 from rocq_mcp.interactive import _format_toc_elements, run_toc
 from tests.conftest import make_lifespan_state
@@ -222,5 +223,5 @@ class TestRocqTocTimeout:
             ctx=_MockContext({"pet_client": None}),
         )
 
-        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
-        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)
+        assert result["clamped_timeout"] == _config.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_config.ROCQ_QUERY_TIMEOUT_CAP)

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.pet_runtime as _pet_runtime
 from tests.conftest import PET_AVAILABLE
 
 pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
@@ -821,14 +823,13 @@ class TestCheckMultiCommandTimeout:
 
     @pytest.fixture(autouse=True)
     def _reset_state_and_semaphore(self):
-        import rocq_mcp.server as srv
         from rocq_mcp.interactive import _state_invalidate_all
 
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
         yield
         _state_invalidate_all()
-        srv._pet_semaphore = None
+        _pet_runtime._pet_semaphore = None
 
     @pytest.fixture(autouse=True)
     def _mock_pytanque(self):
@@ -945,5 +946,5 @@ class TestCheckClamp:
             ctx=mock_ctx,
         )
 
-        assert result["clamped_timeout"] == _server.ROCQ_QUERY_TIMEOUT_CAP
-        assert captured["timeout"] == float(_server.ROCQ_QUERY_TIMEOUT_CAP)
+        assert result["clamped_timeout"] == _config.ROCQ_QUERY_TIMEOUT_CAP
+        assert captured["timeout"] == float(_config.ROCQ_QUERY_TIMEOUT_CAP)

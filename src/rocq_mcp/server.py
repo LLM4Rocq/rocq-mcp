@@ -25,6 +25,8 @@ from typing import Any, Callable
 import psutil
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
+from mcp.types import ToolAnnotations
+
 import rocq_mcp
 
 # ---------------------------------------------------------------------------
@@ -176,7 +178,45 @@ async def app_lifespan(server: Any) -> Any:
             _cleanup_coqc_artifacts(str(cache_file))
 
 
-mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
+# Always-visible server guidance.  With deferred tool loading (the default
+# in Claude Code) tool descriptions may not be in context until a tool is
+# looked up — these instructions are the one place cross-tool knowledge is
+# guaranteed to be visible.  Budget: keep under ~2,200 characters (enforced
+# by tests/test_mcp_surface.py).
+_SERVER_INSTRUCTIONS = """\
+Rocq/Coq proof tools: coqc-based batch compile/verify plus a held \
+interactive session (pet/coq-lsp) that keeps imports warm across calls.
+
+Core proof loop: rocq_start (returns a state_id) -> rocq_step_multi to \
+explore candidate tactics (read-only) -> rocq_check to commit the winner \
+(returns a new state_id) -> write the finished proof into the .v file -> \
+rocq_compile_file + rocq_verify (and rocq_assumptions for an axiom audit) \
+to finish. Never iterate by re-running coqc on a scratch file: coqc \
+reloads every import per call; the interactive session does not.
+
+State rules: rocq_check and rocq_step_multi require an explicit \
+from_state (a state_id from rocq_start or a previous rocq_check). States \
+live in a process-global LRU table; states you keep using stay alive. If \
+a state_id goes missing, restart the session with rocq_start.
+
+Failures: every failure response is {success: false, error, reason}. \
+Dispatch on reason, not on message text; reason is one of: validation, \
+not_found, timeout, crashed, memory_exhausted, lock_contended, \
+unavailable, tactic_failed, compile_error, axiom_dependency, \
+type_mismatch. When a response carries pet_restarted: true, call \
+rocq_diag to see what happened.
+
+Timeouts: timeout=0 means "use the server default"; larger per-call \
+values are clamped to a server cap and the response then carries \
+clamped_timeout.
+"""
+
+mcp = FastMCP(
+    "rocq-mcp",
+    instructions=_SERVER_INSTRUCTIONS,
+    version=rocq_mcp.__version__,
+    lifespan=app_lifespan,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -1598,7 +1638,15 @@ from rocq_mcp.compile_enrichment import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Compile Rocq source (coqc)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_compile(
     source: str,
     workspace: str = "",
@@ -1678,7 +1726,15 @@ async def rocq_compile(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Compile a .v file (coqc)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_compile_file(
     file: str,
     workspace: str = "",
@@ -1850,7 +1906,15 @@ async def rocq_compile_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Verify a proof matches its statement",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_verify(
     proof: str,
     problem_name: str,
@@ -1946,7 +2010,14 @@ async def rocq_verify(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Query the Rocq environment",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_query(
     command: str,
     preamble: str = "",
@@ -2049,7 +2120,14 @@ async def rocq_query(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Audit a theorem's axioms",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_assumptions(
     name: str,
     file: str,
@@ -2144,7 +2222,14 @@ async def rocq_assumptions(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Outline a .v file",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_toc(
     file: str,
     workspace: str = "",
@@ -2197,7 +2282,14 @@ async def rocq_toc(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Explain notations in a statement",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_notations(
     statement: str,
     preamble: str = "",
@@ -2253,7 +2345,17 @@ async def rocq_notations(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        # destructiveHint covers the force_restart=True path, which kills
+        # pet and clears the state table for every caller of this server.
+        title="Start or resume a proof session",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 async def rocq_start(
     file: str = "",
     theorem: str = "",
@@ -2388,7 +2490,14 @@ async def rocq_start(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Try tactics without committing",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_step_multi(
     tactics: list[str],
     from_state: int,
@@ -2472,7 +2581,18 @@ async def rocq_step_multi(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        # Additive, never destructive: allocates a fresh state_id and
+        # leaves existing states untouched.  Not idempotent (each call
+        # creates a new state).
+        title="Run proof commands from a state",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 async def rocq_check(
     body: str,
     from_state: int,
@@ -2562,7 +2682,14 @@ async def rocq_check(
     return result
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Server runtime diagnostics",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
     """Operational diagnostics: pet health, memory headroom, recent errors.
 
@@ -2628,7 +2755,14 @@ async def rocq_diag(ctx: Context = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Toolchain health check",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def rocq_health(ctx: Context = None) -> dict[str, Any]:
     """Health check: is the server OK, and which Rocq/opam switch is it on?
 
@@ -2681,7 +2815,18 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool
+@mcp.tool(
+    annotations=ToolAnnotations(
+        # Process-global: kills pet, clears every caller's state table,
+        # and may leave .vo artifacts ABI-incompatible.
+        title="Change opam switch (process-global)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+    meta={"anthropic/requiresUserInteraction": True},
+)
 async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
     """Switch the running server to a different opam switch, in-session.
 

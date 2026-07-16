@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rocq_mcp.workspace as _workspace
+
 # ---------------------------------------------------------------------------
 # Helpers to build mock NotationInfo-like objects
 # ---------------------------------------------------------------------------
@@ -336,7 +338,7 @@ class TestRocqNotationsTimeout:
             return {"success": True, "output": "mock"}
 
         monkeypatch.setattr(_server, "run_notations", mock_run_notations)
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         result = await rocq_notations(
             statement="n + 0 = n",

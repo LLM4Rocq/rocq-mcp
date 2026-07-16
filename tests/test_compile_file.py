@@ -6,6 +6,7 @@ import asyncio
 import glob as glob_mod
 import pytest
 
+import rocq_mcp.workspace as _workspace
 from tests.conftest import (
     COQC_AVAILABLE,
     _MockContext,
@@ -370,7 +371,7 @@ class TestRocqCompileFileWrapper:
             )
             return {"success": True, "output": "mock"}
 
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
         monkeypatch.setattr(
             _server,
             "run_compile_file_with_state",
@@ -543,7 +544,7 @@ class TestKeepVo:
             )
             return {"success": True, "output": "mock"}
 
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
         monkeypatch.setattr(
             _server,
             "run_compile_file_with_state",
@@ -995,7 +996,7 @@ class TestTiming:
             captured["timing"] = timing
             return {"success": True, "output": "mock"}
 
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
         monkeypatch.setattr(_server, "run_compile_file_with_state", mock_rcfws)
 
         mock_ctx = _MockContext({"pet_client": None})
@@ -1152,7 +1153,7 @@ class TestVosMode:
             )
             return {"success": True, "output": "mock"}
 
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
         monkeypatch.setattr(
             _server,
             "run_compile_file_with_state",

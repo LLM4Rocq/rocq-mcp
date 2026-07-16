@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import rocq_mcp.workspace as _workspace
 from rocq_mcp.interactive import run_assumptions
 from tests.conftest import PET_AVAILABLE
 
@@ -545,7 +546,7 @@ class TestRocqAssumptionsWrapper:
             return {"success": True, "theorem": "my_thm", "assumptions": []}
 
         monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         mock_ctx = _MockContext({"pet_client": None})
 
@@ -574,7 +575,7 @@ class TestRocqAssumptionsWrapper:
             return {"success": True, "theorem": "my_thm", "assumptions": []}
 
         monkeypatch.setattr(_server, "run_assumptions", mock_run_assumptions)
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         mock_ctx = _MockContext({"pet_client": None})
 

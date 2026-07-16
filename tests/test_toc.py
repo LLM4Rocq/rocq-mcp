@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import rocq_mcp.workspace as _workspace
 from rocq_mcp.interactive import _format_toc_elements, run_toc
 from tests.conftest import make_lifespan_state
 
@@ -212,7 +213,7 @@ class TestRocqTocTimeout:
             return {"success": True, "output": "mock"}
 
         monkeypatch.setattr(_server, "run_toc", mock_run_toc)
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         result = await rocq_toc(
             file="proof.v",

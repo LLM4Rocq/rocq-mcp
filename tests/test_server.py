@@ -29,6 +29,8 @@ from unittest import mock
 
 import pytest
 
+import rocq_mcp.config as _config
+import rocq_mcp.workspace as _workspace
 from rocq_mcp.server import (
     _find_project_root_from_file,
     _force_release_pet_lock,
@@ -271,8 +273,8 @@ class TestValidateWorkspace:
         outside.mkdir()
 
         with (
-            mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", True),
-            mock.patch("rocq_mcp.server.ROCQ_WORKSPACE", str(root)),
+            mock.patch("rocq_mcp.config._ROCQ_WORKSPACE_EXPLICIT", True),
+            mock.patch("rocq_mcp.config.ROCQ_WORKSPACE", str(root)),
         ):
             # Inside root: OK
             assert _validate_workspace(str(root)) is None
@@ -289,7 +291,7 @@ class TestValidateWorkspace:
 
     def test_containment_not_enforced_when_not_explicit(self, tmp_path):
         """When ROCQ_WORKSPACE is not explicitly set, containment is not checked."""
-        with mock.patch("rocq_mcp.server._ROCQ_WORKSPACE_EXPLICIT", False):
+        with mock.patch("rocq_mcp.config._ROCQ_WORKSPACE_EXPLICIT", False):
             assert _validate_workspace(str(tmp_path)) is None
 
 
@@ -977,7 +979,7 @@ class TestFindProjectRootFromFile:
         sub.mkdir()
         _make_v(sub)
         # Point ROCQ_WORKSPACE at tmp_path; pass the file as relative.
-        monkeypatch.setattr("rocq_mcp.server.ROCQ_WORKSPACE", str(tmp_path))
+        monkeypatch.setattr("rocq_mcp.config.ROCQ_WORKSPACE", str(tmp_path))
         assert _find_project_root_from_file("src/foo.v") == str(tmp_path.resolve())
 
     def test_resolve_oserror_returns_none(self, monkeypatch):
@@ -1036,7 +1038,7 @@ class TestWrapperWorkspaceAutoDetect:
         async def stub(*_args, **_kwargs):
             return {"success": True, "output": ""}
 
-        monkeypatch.setattr(_server, "_validate_workspace", spy_validate)
+        monkeypatch.setattr(_workspace, "_validate_workspace", spy_validate)
         for impl in (
             "run_compile_file_with_state",
             "run_query",
@@ -1161,7 +1163,7 @@ class TestWorkspaceWarning:
             return {"success": True, "output": ""}
 
         # Validation always passes; we're testing the warning branch.
-        monkeypatch.setattr(_server, "_validate_workspace", lambda _ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda _ws: None)
         for impl in (
             "run_compile_with_state",
             "run_compile_file_with_state",
@@ -1303,7 +1305,7 @@ class TestWorkspaceWarning:
         f.write_text("")
         # Point ROCQ_WORKSPACE at the markerless dir so the fall-through
         # chain (auto-detect None -> ROCQ_WORKSPACE) lands on it.
-        monkeypatch.setattr(_server, "ROCQ_WORKSPACE", str(markerless_dir))
+        monkeypatch.setattr(_config, "ROCQ_WORKSPACE", str(markerless_dir))
 
         self._setup_spies(monkeypatch)
         result = await _server.rocq_toc(file=str(f), ctx=_ctx)
@@ -1344,7 +1346,7 @@ class TestWorkspaceWarning:
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
-            monkeypatch.setattr(_server, "ROCQ_WORKSPACE", td)
+            monkeypatch.setattr(_config, "ROCQ_WORKSPACE", td)
             self._setup_spies(monkeypatch)
             result = await _server.rocq_compile(
                 source="Theorem t : True. Proof. exact I. Qed.", ctx=_ctx
@@ -2580,7 +2582,7 @@ class TestVoRebuildHelpers:
     def test_snapshot_vo_mtimes_returns_none_over_cap(self, tmp_path, monkeypatch):
         from rocq_mcp import server as _server
 
-        monkeypatch.setattr(_server, "_VO_SCAN_FILE_CAP", 2)
+        monkeypatch.setattr(_workspace, "_VO_SCAN_FILE_CAP", 2)
         for i in range(5):
             (tmp_path / f"f{i}.vo").write_text("x")
 
@@ -2718,7 +2720,7 @@ class TestVoRebuildWarning:
         def _fake_snapshot(_ws):
             return snapshots.pop(0)
 
-        monkeypatch.setattr(_server, "_snapshot_vo_mtimes", _fake_snapshot)
+        monkeypatch.setattr(_workspace, "_snapshot_vo_mtimes", _fake_snapshot)
         self._stub_run_compile_file(monkeypatch)
 
         result = await _server.rocq_compile_file(
@@ -2746,7 +2748,7 @@ class TestVoRebuildWarning:
         def _fake_snapshot(_ws):
             return snapshots.pop(0)
 
-        monkeypatch.setattr(_server, "_snapshot_vo_mtimes", _fake_snapshot)
+        monkeypatch.setattr(_workspace, "_snapshot_vo_mtimes", _fake_snapshot)
         self._stub_run_compile_file(monkeypatch)
         self._add_session(tmp_path, f)
 
@@ -2771,7 +2773,7 @@ class TestVoRebuildWarning:
         f.write_text("Theorem t : True. Proof. exact I. Qed.\n")
 
         # Cap to 2 .vo paths; create 5 to blow past it.
-        monkeypatch.setattr(_server, "_VO_SCAN_FILE_CAP", 2)
+        monkeypatch.setattr(_workspace, "_VO_SCAN_FILE_CAP", 2)
         for i in range(5):
             (tmp_path / f"f{i}.vo").write_text("x")
 

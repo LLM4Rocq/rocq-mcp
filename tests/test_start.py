@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import rocq_mcp.workspace as _workspace
 from tests.conftest import PET_AVAILABLE, _MockPetBase
 
 pytestmark = pytest.mark.skipif(not PET_AVAILABLE, reason="pet not available")
@@ -1241,7 +1242,7 @@ class TestStartTimeoutForwarding:
         import rocq_mcp.server as srv
 
         monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 60)
-        monkeypatch.setattr(srv, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         captured: dict = {}
 
@@ -1270,7 +1271,7 @@ class TestStartTimeoutForwarding:
         import rocq_mcp.server as srv
 
         monkeypatch.setattr(srv, "ROCQ_QUERY_TIMEOUT_CAP", 300)
-        monkeypatch.setattr(srv, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         captured: dict = {}
 

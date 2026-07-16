@@ -36,6 +36,7 @@ import glob as glob_mod
 
 import pytest
 
+import rocq_mcp.workspace as _workspace
 from tests.conftest import COQC_AVAILABLE
 from rocq_mcp.verify import (
     _check_forbidden_commands,
@@ -2733,7 +2734,7 @@ class TestVerifyEnvelopeContract:
             }
 
         monkeypatch.setattr(_server, "run_verify", fake_run_verify)
-        monkeypatch.setattr(_server, "_validate_workspace", lambda ws: None)
+        monkeypatch.setattr(_workspace, "_validate_workspace", lambda ws: None)
 
         await rocq_verify(
             proof="x",

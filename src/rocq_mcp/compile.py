@@ -40,6 +40,7 @@ from rocq_mcp.verify import (
 # etc.) in tests is visible here.  A bare ``from server import X``
 # would capture the value at import time, defeating monkeypatch.
 import rocq_mcp.server as _server
+from rocq_mcp import workspace as _workspace
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -85,7 +86,7 @@ def _run_coqc_process(
     """
     coqc_args: list[str] = [
         _server.ROCQ_COQC_BINARY,
-        *_server._parse_project_flags(workspace),
+        *_workspace._parse_project_flags(workspace),
     ]
     if mode == "vos":
         coqc_args.append("-vos")
@@ -165,7 +166,7 @@ def _run_coqc(source: str, workspace: str, timeout: int) -> dict[str, Any]:
     try:
         return _run_coqc_process(tmp_path, ws, timeout)
     finally:
-        _server._cleanup_coqc_artifacts(tmp_path)
+        _workspace._cleanup_coqc_artifacts(tmp_path)
 
 
 _VO_FAMILY: tuple[str, ...] = (".vo", ".vok", ".vos")
@@ -202,7 +203,7 @@ def _run_coqc_file(
         return _run_coqc_process(file_path, ws, timeout, mode=mode, timing=timing)
     finally:
         base = Path(file_path).with_suffix("")
-        for ext in _server._CLEANUP_EXTENSIONS:
+        for ext in _workspace._CLEANUP_EXTENSIONS:
             if ext == ".v":
                 continue
             if keep_vo and ext in _VO_FAMILY:
@@ -728,7 +729,7 @@ def run_compile_file(
             "error": f"Invalid mode {mode!r}: expected 'full' or 'vos'.",
         }
     try:
-        file_path = _server._resolve_file_in_workspace(file, workspace)
+        file_path = _workspace._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError) as e:
         return {"success": False, "reason": "validation", "error": str(e)}
 
@@ -1006,11 +1007,11 @@ async def _extract_problem_structure(
         except (PetanqueError, OSError):
             return None
         finally:
-            _server._cleanup_coqc_artifacts(tmp_path)
+            _workspace._cleanup_coqc_artifacts(tmp_path)
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            _server._cleanup_coqc_artifacts(p)
+            _workspace._cleanup_coqc_artifacts(p)
 
     toc_result = await _server._run_with_pet(
         _do_toc,

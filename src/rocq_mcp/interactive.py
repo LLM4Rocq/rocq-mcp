@@ -45,6 +45,7 @@ from rocq_mcp.verify import _check_forbidden_commands
 # ``from server import _pet_lock`` would capture a stale reference.
 import rocq_mcp.server as _server
 from rocq_mcp import taxonomy
+from rocq_mcp import workspace as _workspace
 
 # _split_rocq_sentences is in compile — import directly (no cycle).
 from rocq_mcp.compile import _split_rocq_sentences, _is_focus_token
@@ -396,7 +397,7 @@ def _get_file_end_state(
         ValueError: If the file path is outside the workspace.
         FileNotFoundError: If the file does not exist or is not readable.
     """
-    resolved = _server._resolve_file_in_workspace(file, workspace)
+    resolved = _workspace._resolve_file_in_workspace(file, workspace)
 
     try:
         content = Path(resolved).read_text()
@@ -1183,7 +1184,7 @@ async def run_goal(
                 f"line and character must be in range [0, {_MAX_LINE_CHAR_RANGE}].",
             )
         try:
-            resolved_file = _server._resolve_file_in_workspace(file, workspace)
+            resolved_file = _workspace._resolve_file_in_workspace(file, workspace)
         except (ValueError, FileNotFoundError) as e:
             return _server._fail(lifespan_state, "rocq_goal", str(e))
 
@@ -1706,7 +1707,7 @@ async def _fetch_available_in_file(
     failure to ``rocq_assumptions`` would be a bug.
     """
     try:
-        resolved = _server._resolve_file_in_workspace(file, workspace)
+        resolved = _workspace._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError, OSError):
         return _AvailableInFile([], False, 0)
 
@@ -1750,7 +1751,7 @@ async def run_toc(
     """
     # Path traversal + existence check (before entering thread)
     try:
-        file_path = _server._resolve_file_in_workspace(file, workspace)
+        file_path = _workspace._resolve_file_in_workspace(file, workspace)
     except (ValueError, FileNotFoundError) as e:
         return _server._fail(lifespan_state, "rocq_toc", str(e))
 
@@ -1856,11 +1857,11 @@ async def run_notations(
                 )
             return {"success": True, "output": output}
         finally:
-            _server._cleanup_coqc_artifacts(str(dummy_path))
+            _workspace._cleanup_coqc_artifacts(str(dummy_path))
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            _server._cleanup_coqc_artifacts(p)
+            _workspace._cleanup_coqc_artifacts(p)
 
     return await _server._run_with_pet(
         _do_notations,
@@ -2168,7 +2169,7 @@ async def run_start(
     resolved_file: str = ""
     if _start_by_theorem or _start_by_pos:
         try:
-            resolved_file = _server._resolve_file_in_workspace(file, workspace)
+            resolved_file = _workspace._resolve_file_in_workspace(file, workspace)
         except (ValueError, FileNotFoundError) as e:
             return _server._fail(lifespan_state, "rocq_start", str(e))
 

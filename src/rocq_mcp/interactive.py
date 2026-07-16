@@ -138,6 +138,101 @@ def _focus_depth(complete: Any) -> int | None:
     return len(complete.stack)
 
 
+_GOAL_TYPE_CAP: int = 2000  # per-hypothesis/conclusion char cap in structured modes
+
+#: goals_format values accepted everywhere goals are rendered.
+#: ``diff`` / ``none`` are additionally accepted by run_check only.
+GOALS_RENDER_FORMATS: frozenset[str] = frozenset({"pretty", "structured", "names_only"})
+
+
+def _cap_type(text: str) -> str:
+    if len(text) > _GOAL_TYPE_CAP:
+        return text[:_GOAL_TYPE_CAP] + f"... (truncated, {len(text)} chars total)"
+    return text
+
+
+def _render_goals(goals_list: list[Any], goals_format: str = "pretty") -> Any:
+    """Render goals per *goals_format*.
+
+    - ``"pretty"`` -> the classic human-readable string (see
+      :func:`_format_goals`).
+    - ``"structured"`` -> ``[{hyps: [{names, type, body?}], conclusion}]``
+      straight from pytanque's structured Goal objects.
+    - ``"names_only"`` -> ``[{hyp_names: [...], conclusion}]`` — the
+      token-lean variant for hypothesis-heavy proofs.
+
+    List modes cap at ``_MAX_GOALS_SHOWN`` goals (a trailing
+    ``{"omitted_goals": N}`` marker reports the overflow) and truncate
+    individual type strings at ``_GOAL_TYPE_CAP`` chars.
+    """
+    if goals_format == "pretty":
+        return _format_goals(goals_list)
+    total = len(goals_list)
+    shown = min(total, _MAX_GOALS_SHOWN)
+    rendered: list[dict[str, Any]] = []
+    for g in goals_list[:shown]:
+        if goals_format == "structured":
+            hyps = []
+            for h in g.hyps:
+                entry: dict[str, Any] = {
+                    "names": list(h.names),
+                    "type": _cap_type(h.ty),
+                }
+                if h.def_:
+                    entry["body"] = _cap_type(h.def_)
+                hyps.append(entry)
+            rendered.append({"hyps": hyps, "conclusion": _cap_type(g.ty)})
+        else:  # names_only
+            rendered.append(
+                {
+                    "hyp_names": [n for h in g.hyps for n in h.names],
+                    "conclusion": _cap_type(g.ty),
+                }
+            )
+    if total > shown:
+        rendered.append({"omitted_goals": total - shown})
+    return rendered
+
+
+def _goal_text(g: Any) -> str:
+    """One goal's pretty text (hypotheses + turnstile + conclusion)."""
+    hyps = "\n".join(
+        f"{', '.join(h.names)}" f"{' := ' + h.def_ if h.def_ else ''}" f" : {h.ty}"
+        for h in g.hyps
+    )
+    return f"{hyps}\n|-{g.ty}"
+
+
+def _goals_diff(old_list: list[Any], new_list: list[Any]) -> dict[str, Any]:
+    """Delta between two goal lists, by rendered per-goal text.
+
+    Returns ``{unchanged: true, count}`` when nothing changed; otherwise
+    ``{before_count, after_count, added: [goal texts new since parent],
+    removed_count}``.  ``added`` is capped like pretty goals.
+    """
+    old_texts = [_goal_text(g) for g in old_list]
+    new_texts = [_goal_text(g) for g in new_list]
+    if old_texts == new_texts:
+        return {"unchanged": True, "count": len(new_texts)}
+    remaining = list(old_texts)
+    added: list[str] = []
+    for text in new_texts:
+        if text in remaining:
+            remaining.remove(text)
+        else:
+            added.append(text)
+    added_shown = [_cap_type(t) for t in added[:_MAX_GOALS_SHOWN]]
+    diff: dict[str, Any] = {
+        "before_count": len(old_texts),
+        "after_count": len(new_texts),
+        "added": added_shown,
+        "removed_count": len(remaining),
+    }
+    if len(added) > len(added_shown):
+        diff["added_omitted"] = len(added) - len(added_shown)
+    return diff
+
+
 def _try_get_goals_with_depth(pet: Any, state: Any) -> tuple[str | None, int | None]:
     """Best-effort ``(goals_text, focus_depth)`` from one ``complete_goals`` call.
 
@@ -156,6 +251,25 @@ def _try_get_goals(pet: Any, state: Any) -> str | None:
     """Best-effort goal retrieval.  Returns formatted text or None."""
     text, _ = _try_get_goals_with_depth(pet, state)
     return text
+
+
+def _try_render_goals_with_depth(
+    pet: Any, state: Any, goals_format: str = "pretty"
+) -> tuple[Any, int | None]:
+    """Best-effort ``(goals_payload, focus_depth)`` in the requested format.
+
+    ``payload`` is ``None`` when goal retrieval fails (recorded as a
+    degraded note); callers substitute their existing empty value.
+    """
+    try:
+        complete = pet.complete_goals(state)
+        goals_list = complete.goals if complete else []
+        if goals_format == "pretty":
+            return _format_goals(goals_list) or None, _focus_depth(complete)
+        return _render_goals(goals_list, goals_format), _focus_depth(complete)
+    except Exception as e:
+        note_degraded("goals:pet_call_failed", repr(e))
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +829,7 @@ async def run_assumptions(
     lifespan_state: dict[str, Any],
     *,
     timeout: float | None = None,
+    include_raw: bool = False,
 ) -> dict[str, Any]:
     """Core implementation of rocq_assumptions (testable without FastMCP Context).
 
@@ -858,12 +973,17 @@ async def run_assumptions(
             "error": msg,
             "raw_output": raw_output,
         }
-    return {
+    result = {
         "success": True,
         "theorem": clean_name,
         "assumptions": [f"{name} : {ty}" for name, ty in pairs],
-        "raw_output": raw_output,
     }
+    # The parsed list and the raw output are ~1:1 redundant on success;
+    # the raw text is opt-in.  (Parse failures above keep raw_output
+    # unconditionally — there it IS the payload.)
+    if include_raw:
+        result["raw_output"] = raw_output
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1326,6 +1446,7 @@ def _build_position_start_result(
     line: int,
     character: int,
     track_staleness: bool = True,
+    goals_format: str = "pretty",
 ) -> dict[str, Any]:
     """Return the rocq_start-style payload for a position-based state.
 
@@ -1360,11 +1481,11 @@ def _build_position_start_result(
         file_mtime=file_mtime,
         resolved_file=tracked_file,
     )
-    goals, focus_depth = _try_get_goals_with_depth(pet, state)
+    goals, focus_depth = _try_render_goals_with_depth(pet, state, goals_format)
     result: dict[str, Any] = {
         "success": True,
         "state_id": state_id,
-        "goals": goals or "",
+        "goals": goals if goals is not None else "",
         "file": file,
         "theorem": theorem,
         "proof_finished": getattr(state, "proof_finished", False),
@@ -1382,6 +1503,7 @@ def _build_theorem_start_result(
     theorem: str,
     workspace: str,
     lifespan_state: dict[str, Any],
+    goals_format: str = "pretty",
 ) -> dict[str, Any]:
     """Return the rocq_start-style payload for a theorem-based state."""
     _server._set_workspace_if_needed(pet, workspace, lifespan_state)
@@ -1429,11 +1551,11 @@ def _build_theorem_start_result(
         file_mtime=file_mtime,
         resolved_file=resolved_file,
     )
-    goals, focus_depth = _try_get_goals_with_depth(pet, state)
+    goals, focus_depth = _try_render_goals_with_depth(pet, state, goals_format)
     result: dict[str, Any] = {
         "success": True,
         "state_id": state_id,
-        "goals": goals or "",
+        "goals": goals if goals is not None else "",
         "file": file,
         "theorem": theorem,
         "proof_finished": getattr(state, "proof_finished", False),
@@ -1529,6 +1651,7 @@ async def run_start(
     preamble: str = "",
     force_restart: bool = False,
     timeout: float | None = None,
+    goals_format: str = "pretty",
 ) -> dict[str, Any]:
     """Open a proof context and return a state_id.
 
@@ -1540,6 +1663,13 @@ async def run_start(
     If force_restart is True, kill the current PET process and clear
     all cached state before starting the new session.
     """
+    if goals_format not in GOALS_RENDER_FORMATS:
+        return _server._fail(
+            lifespan_state,
+            "rocq_start",
+            f"Invalid goals_format {goals_format!r}; expected one of "
+            "pretty | structured | names_only.",
+        )
     # Mode detection
     _start_by_theorem = bool(file and theorem)
     _start_by_pos = bool(
@@ -1592,6 +1722,7 @@ async def run_start(
                 theorem=theorem,
                 workspace=workspace,
                 lifespan_state=lifespan_state,
+                goals_format=goals_format,
             )
         if _start_by_pos:
             return _build_position_start_result(
@@ -1600,6 +1731,7 @@ async def run_start(
                 resolved_file=resolved_file,
                 workspace=workspace,
                 lifespan_state=lifespan_state,
+                goals_format=goals_format,
                 line=line,
                 character=character,
             )
@@ -1756,17 +1888,36 @@ def _build_check_success_dict(
     feedback_pairs: list[list[str]],
     stale_warning: str | None,
     complete: Any,
+    goals_format: str = "pretty",
+    goals_list: list[Any] | None = None,
+    goals_diff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the result dict for a successful ``run_check`` batch."""
+    """Assemble the result dict for a successful ``run_check`` batch.
+
+    ``goals_format`` selects the goals representation: ``"pretty"``
+    (string, default), ``"structured"`` / ``"names_only"`` (lists —
+    require *goals_list*; fall back to the pretty text when goal
+    retrieval degraded), ``"diff"`` (emits ``goals_diff`` instead of
+    ``goals``; falls back to pretty when the parent lookup degraded),
+    or ``"none"`` (omits goals entirely).
+    """
     result: dict[str, Any] = {
         "success": True,
-        "goals": goals_text or "No goals remaining.",
         "proof_finished": proof_finished,
         "commands_run": commands_run,
         "check_time_ms": check_time_ms,
         "state_id": state_id,
         "from_state_id": from_state_id,
     }
+    if goals_format == "none":
+        pass
+    elif goals_format == "diff" and goals_diff is not None:
+        result["goals_diff"] = goals_diff
+    elif goals_format in ("structured", "names_only") and goals_list is not None:
+        result["goals"] = _render_goals(goals_list, goals_format)
+    else:
+        # pretty, or any degraded non-pretty mode falls back to the text.
+        result["goals"] = goals_text or "No goals remaining."
     if feedback_pairs:
         result["feedback"] = feedback_pairs
     if stale_warning:
@@ -1784,9 +1935,9 @@ def _build_check_success_dict(
             if path.tactics:
                 result["proof_tactics"] = path.tactics
             result["proof_hint"] = (
-                "Proof complete! Assemble imports + theorem statement "
-                "+ Proof. + tactics + Qed. then validate with "
-                "rocq_compile and rocq_verify."
+                "Proof complete. Assemble the .v (imports + statement + "
+                "Proof. + proof_tactics + Qed.), then validate with "
+                "rocq_compile_file and rocq_verify."
             )
         else:
             result["proof_tactics_status"] = path.status
@@ -1808,6 +1959,7 @@ async def run_check(
     *,
     timeout: float | None = None,
     include_warnings: bool = True,
+    goals_format: str = "pretty",
 ) -> dict[str, Any]:
     """Execute commands sequentially from a state.
 
@@ -1818,7 +1970,18 @@ async def run_check(
     When ``include_warnings=False``, per-step feedback drops entries at
     LSP Warning severity (level 2) so warning noise does not crowd out
     tool output (Print / Search / vm_compute traces).
+
+    ``goals_format`` selects the goals representation: ``pretty``
+    (default), ``structured``, ``names_only``, ``diff`` (delta vs the
+    ``from_state`` parent — one extra pet round-trip), or ``none``.
     """
+    if goals_format not in ("pretty", "structured", "names_only", "diff", "none"):
+        return _server._fail(
+            lifespan_state,
+            "rocq_check",
+            f"Invalid goals_format {goals_format!r}; expected one of "
+            "pretty | structured | names_only | diff | none.",
+        )
     if len(body) > _server.ROCQ_MAX_SOURCE_SIZE:
         return _server._fail(
             lifespan_state,
@@ -1886,6 +2049,7 @@ async def run_check(
         _server._set_workspace_if_needed(pet, entry_to_use.workspace, lifespan_state)
 
         state = entry_to_use.state
+        parent_state = entry_to_use.state  # kept for goals_format="diff"
         prev_state_id = base_state_id
         feedback_pairs: list[list[str]] = []
         total_feedback_size = 0
@@ -1919,6 +2083,7 @@ async def run_check(
 
         elapsed = time.monotonic() - start_time
 
+        goals_list: list[Any] | None
         try:
             complete = pet.complete_goals(state)
             goals_list = complete.goals if complete else []
@@ -1927,6 +2092,17 @@ async def run_check(
             note_degraded("goals:pet_call_failed", repr(e))
             goals_text = "(goals unavailable)"
             complete = None
+            goals_list = None
+
+        goals_diff: dict[str, Any] | None = None
+        if goals_format == "diff" and goals_list is not None:
+            try:
+                parent_complete = pet.complete_goals(parent_state)
+                parent_goals = parent_complete.goals if parent_complete else []
+                goals_diff = _goals_diff(parent_goals, goals_list)
+            except Exception as e:
+                # Fall back to full pretty goals (builder handles it).
+                note_degraded("goals_diff:pet_call_failed", repr(e))
 
         return _build_check_success_dict(
             goals_text=goals_text,
@@ -1938,6 +2114,9 @@ async def run_check(
             feedback_pairs=feedback_pairs,
             stale_warning=stale_warning,
             complete=complete,
+            goals_format=goals_format,
+            goals_list=goals_list,
+            goals_diff=goals_diff,
         )
 
     # Timeout strategy: both single and multi-command use two-tier when eligible
@@ -1968,6 +2147,7 @@ async def run_step_multi(
     *,
     include_warnings: bool = True,
     timeout: float | None = None,
+    goals_format: str = "pretty",
 ) -> dict[str, Any]:
     """Core implementation of rocq_step_multi (testable without FastMCP Context).
 
@@ -1975,8 +2155,21 @@ async def run_step_multi(
     Results are ephemeral — commit with ``rocq_check(body=..., from_state=...)``.
 
     When ``include_warnings=False``, per-tactic feedback drops entries at
-    LSP Warning severity (level 2).
+    LSP Severity (level 2).
+
+    Identical outcomes are deduplicated: the first tactic reaching a
+    proof state carries the full payload; subsequent tactics reaching
+    the *same* state carry ``same_outcome_as: <index into results>``
+    instead of repeating goals.  The response carries
+    ``distinct_outcomes`` (count of unique successful outcomes).
     """
+    if goals_format not in GOALS_RENDER_FORMATS:
+        return _server._fail(
+            lifespan_state,
+            "rocq_step_multi",
+            f"Invalid goals_format {goals_format!r}; expected one of "
+            "pretty | structured | names_only.",
+        )
     # Validate each tactic up front
     if len(tactics) > _MAX_STEP_MULTI_TACTICS:
         return _server._fail(
@@ -2038,6 +2231,9 @@ async def run_step_multi(
         stale_warning = _check_staleness(entry_to_use)
 
         total_feedback_size = 0
+        # Outcome dedup: fingerprint -> index of the first results entry
+        # that reached this proof state.
+        outcome_index: dict[tuple[Any, ...], int] = {}
 
         for tactic in tactics:
             tac = tactic.strip()
@@ -2070,16 +2266,38 @@ async def run_step_multi(
                 goals_list = complete.goals if complete else []
 
                 goals_text = _format_goals(goals_list)
-                entry_dict["success"] = True
-                entry_dict["goals"] = goals_text or "No goals remaining."
-                entry_dict["proof_finished"] = new_state.proof_finished
-                if complete and complete.shelf:
-                    entry_dict["shelved_goals"] = len(complete.shelf)
-                if complete and complete.given_up:
-                    entry_dict["given_up_goals"] = len(complete.given_up)
                 depth = _focus_depth(complete)
-                if depth is not None:
-                    entry_dict["focus_depth"] = depth
+                shelved = len(complete.shelf) if complete and complete.shelf else 0
+                given_up = (
+                    len(complete.given_up) if complete and complete.given_up else 0
+                )
+                entry_dict["success"] = True
+                entry_dict["proof_finished"] = new_state.proof_finished
+
+                fingerprint = (
+                    goals_text,
+                    new_state.proof_finished,
+                    depth,
+                    shelved,
+                    given_up,
+                )
+                first_idx = outcome_index.get(fingerprint)
+                if first_idx is not None:
+                    # Same proof state as an earlier tactic: reference it
+                    # instead of repeating up to 8KB of goals.
+                    entry_dict["same_outcome_as"] = first_idx
+                else:
+                    outcome_index[fingerprint] = len(partial_state["partial_results"])
+                    if goals_format == "pretty":
+                        entry_dict["goals"] = goals_text or "No goals remaining."
+                    else:
+                        entry_dict["goals"] = _render_goals(goals_list, goals_format)
+                    if shelved:
+                        entry_dict["shelved_goals"] = shelved
+                    if given_up:
+                        entry_dict["given_up_goals"] = given_up
+                    if depth is not None:
+                        entry_dict["focus_depth"] = depth
             except PetanqueError as e:
                 # If pet died, re-raise so outer handler detects it.
                 if not _server._pet_alive(lifespan_state.get("pet_client")):
@@ -2099,6 +2317,7 @@ async def run_step_multi(
         resp: dict[str, Any] = {
             "success": True,
             "results": list(partial_state["partial_results"]),
+            "distinct_outcomes": len(outcome_index),
         }
         if base_state_id is not None:
             resp["from_state_id"] = base_state_id

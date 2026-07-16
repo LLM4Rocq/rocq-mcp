@@ -20,7 +20,7 @@ import threading
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import psutil
 from fastmcp import FastMCP, Context
@@ -1970,6 +1970,7 @@ async def rocq_assumptions(
     file: str,
     workspace: str = "",
     timeout: int = 0,
+    include_raw: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """List the axioms a theorem depends on (Print Assumptions), parsed.
@@ -1994,6 +1995,8 @@ async def rocq_assumptions(
         workspace: Auto-detected from project markers when omitted.
         timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; set 180+ up front on
             heavy imports.
+        include_raw: True additionally returns raw_output (the verbatim
+            Print Assumptions text; redundant with the parsed list).
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_assumptions",
@@ -2012,6 +2015,7 @@ async def rocq_assumptions(
         workspace=workspace,
         lifespan_state=lifespan_state,
         timeout=effective_timeout,
+        include_raw=include_raw,
     )
     return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
@@ -2138,6 +2142,7 @@ async def rocq_start(
     preamble: str = "",
     force_restart: bool = False,
     timeout: int = 0,
+    goals_format: Literal["pretty", "structured", "names_only"] = "pretty",
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Open an interactive proof session; returns a state_id plus the goals there.
@@ -2168,6 +2173,8 @@ async def rocq_start(
             states before starting.  Recovery-only (repeated state expiry,
             RAM bloat); never routine (rocq://guide/concurrency).
         timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for heavy imports.
+        goals_format: Goals representation — "pretty" (default),
+            "structured", or "names_only".
     """
     resolved = _resolve_tool_envelope(
         tool="rocq_start", ctx=ctx, workspace=workspace, file=file, timeout=timeout
@@ -2186,6 +2193,7 @@ async def rocq_start(
         preamble=preamble,
         force_restart=force_restart,
         timeout=effective_timeout,
+        goals_format=goals_format,
     )
     return _finalize_tool_envelope(result, clamped=clamped, ws_warning=ws_warning)
 
@@ -2208,6 +2216,7 @@ async def rocq_step_multi(
     from_state: int,
     include_warnings: bool = True,
     timeout: int = 0,
+    goals_format: Literal["pretty", "structured", "names_only"] = "pretty",
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Try up to 20 tactics against one state; report each outcome without committing.
@@ -2228,6 +2237,10 @@ async def rocq_step_multi(
         include_warnings: False drops warning-severity feedback.
         timeout: Whole-batch seconds; each tactic gets
             timeout/len(tactics).  0 = ROCQ_PET_TIMEOUT.
+        goals_format: Goals representation for full entries — "pretty"
+            (default), "structured", or "names_only".  Identical
+            outcomes are deduplicated: repeats carry same_outcome_as
+            instead of goals; the response carries distinct_outcomes.
     """
     if ctx is None:
         return _no_ctx_fail("rocq_step_multi")
@@ -2240,6 +2253,7 @@ async def rocq_step_multi(
         from_state=from_state,
         include_warnings=include_warnings,
         timeout=effective_timeout,
+        goals_format=goals_format,
     )
     if clamped:
         result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP
@@ -2269,6 +2283,9 @@ async def rocq_check(
     workspace: str = "",
     timeout: int = 0,
     include_warnings: bool = True,
+    goals_format: Literal[
+        "pretty", "structured", "names_only", "diff", "none"
+    ] = "pretty",
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Run proof commands from a held state; returns a new state_id — the commit step.
@@ -2293,6 +2310,10 @@ async def rocq_check(
         timeout: Seconds; 0 = ROCQ_PET_TIMEOUT; raise for
             vm_compute/native_compute.
         include_warnings: False drops warning-severity feedback.
+        goals_format: Goals representation — "pretty" (default string),
+            "structured" (hyps as {names, type} + conclusion),
+            "names_only", "diff" (delta vs the from_state parent;
+            returns goals_diff instead of goals), or "none" (omit).
     """
     # Note: workspace param is accepted for API compatibility but unused;
     # the active workspace comes from the state entry set by rocq_start.
@@ -2307,6 +2328,7 @@ async def rocq_check(
         from_state=from_state,
         timeout=effective_timeout,
         include_warnings=include_warnings,
+        goals_format=goals_format,
     )
     if clamped and isinstance(result, dict):
         result["clamped_timeout"] = ROCQ_QUERY_TIMEOUT_CAP

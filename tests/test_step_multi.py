@@ -231,13 +231,21 @@ class TestStepMultiReal:
         assert "results" in result
         assert len(result["results"]) == 3
 
-        # Each result should have the expected structure
-        for entry in result["results"]:
+        # Each result should have the expected structure.  All three
+        # tactics reach the identical mocked state, so only the first
+        # entry carries the full goals payload; the rest are outcome-dedup
+        # references back to it.
+        for i, entry in enumerate(result["results"]):
             assert "tactic" in entry
             assert "success" in entry
             assert entry["success"] is True
-            assert "goals" in entry
             assert "proof_finished" in entry
+            if i == 0:
+                assert "goals" in entry
+            else:
+                assert entry["same_outcome_as"] == 0
+                assert "goals" not in entry
+        assert result["distinct_outcomes"] == 1
 
         # step_multi is read-only — the injected state must still be in the
         # table, not consumed/replaced by the exploration.

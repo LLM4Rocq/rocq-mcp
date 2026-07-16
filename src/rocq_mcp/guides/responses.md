@@ -26,8 +26,19 @@ covers what shows up conditionally and how output size is bounded.
 
 - `state_id` / `from_state_id` — the new state and its parent. Pass
   `state_id` as the next call's `from_state`.
-- `goals` — pretty-printed goals, capped at 8,000 chars and 10 goals
-  shown.
+- `goals` — representation controlled by `goals_format`:
+  - `"pretty"` (default): the classic string, capped at 8,000 chars and
+    10 goals shown.
+  - `"structured"`: `[{hyps: [{names, type, body?}], conclusion}]` —
+    pytanque's structured hypotheses; per-string cap 2,000 chars, 10
+    goals + `{omitted_goals: N}` marker.
+  - `"names_only"`: `[{hyp_names, conclusion}]` — the token-lean variant.
+  - `"diff"`: the `goals` key is replaced by `goals_diff` — either
+    `{unchanged: true, count}` or `{before_count, after_count,
+    added: [goal texts new since the from_state parent],
+    removed_count}`. Costs one extra pet round-trip; degrades to
+    pretty `goals` (with a `degraded` note) if the parent lookup fails.
+  - `"none"`: goals omitted entirely (commit-only calls).
 - `feedback: [[command, output], ...]` — only when commands produce
   visible output (`Print`, `Check`, `vm_compute`...). Truncated at 50K
   chars per step, 200K total per call, with a
@@ -42,12 +53,17 @@ covers what shows up conditionally and how output size is bounded.
 
 ## rocq_step_multi response
 
-- `results: [entry, ...]` in input order. Successful entry:
-  `{tactic, success: true, goals, proof_finished, focus_depth?,
-  shelved_goals?, given_up_goals?, feedback?}`. Failed entry:
+- `results: [entry, ...]` in input order. First tactic reaching a proof
+  state: `{tactic, success: true, goals, proof_finished, focus_depth?,
+  shelved_goals?, given_up_goals?, feedback?}`. Later tactics reaching
+  the SAME state are deduplicated: `{tactic, success: true,
+  proof_finished, same_outcome_as: <index into results>, feedback?}` —
+  look up the referenced entry for the goals. Failed entry:
   `{tactic, success: false, reason: "tactic_failed", error}`.
-- Per-entry `goals` capped at 8,000 chars; per-entry `feedback` capped at
-  50K chars with a 200K total cap across the batch.
+- `distinct_outcomes` — count of unique successful proof states reached.
+- Per-entry `goals` respects `goals_format` (pretty/structured/
+  names_only); pretty capped at 8,000 chars. Per-entry `feedback` capped
+  at 50K chars with a 200K total cap across the batch.
 - Max 20 tactics per call; the per-tactic time budget is
   `timeout / len(tactics)` for Timeout-eligible tactics.
 - `from_state_id` echoes the base state.
@@ -69,9 +85,9 @@ covers what shows up conditionally and how output size is bounded.
   theorem is closed under the global context. `Print Assumptions` does
   NOT distinguish `Admitted` from `Axiom`/`Parameter`/`Conjecture` — they
   all appear here.
-- `raw_output: str` — the verbatim `Print Assumptions` output (the
-  parsed list is derived from it). Opaque-proof loader notices are
-  stripped.
+- `raw_output: str` — opt-in via `include_raw=true` (redundant with the
+  parsed list on success; opaque-proof loader notices are stripped).
+  On a parse failure it is always present — there it IS the payload.
 
 ## rocq_compile / rocq_compile_file failure fields
 
@@ -139,6 +155,8 @@ pet {path, version, pytanque_importable}}`, `pet {running, pid}`,
 
 | Control | Tools | Effect |
 |---|---|---|
+| `goals_format` | check (5 modes), start, step_multi (3 modes) | Goals representation: `pretty` / `structured` / `names_only`, plus check-only `diff` / `none` |
+| `include_raw` | rocq_assumptions | Opt back into the verbatim `raw_output` |
 | `max_results` | rocq_query | Cap Search hits before char truncation |
 | `include_warnings=False` | compile, compile_file, verify, query, check, step_multi | Drop warning-severity feedback |
 | `timeout=<s>` | all pet-routed + compile tools | Per-call budget (clamped to `ROCQ_QUERY_TIMEOUT_CAP`) |

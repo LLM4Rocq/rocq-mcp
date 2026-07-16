@@ -124,6 +124,13 @@ class TestFocusDepthStepMulti(_MockPetBase):
 
         assert result["success"] is True
         assert len(result["results"]) == 2
-        for entry in result["results"]:
-            assert entry["success"] is True
-            assert entry["focus_depth"] == 1
+        first, second = result["results"]
+        assert first["success"] is True
+        assert first["focus_depth"] == 1
+        # Both tactics reach the identical mocked state: the second entry
+        # is an outcome-dedup reference back to the first (which carries
+        # the full payload, including focus_depth).
+        assert second["success"] is True
+        assert second["same_outcome_as"] == 0
+        assert "focus_depth" not in second
+        assert result["distinct_outcomes"] == 1

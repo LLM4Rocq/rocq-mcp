@@ -146,7 +146,10 @@ class TestRunAssumptions:
         assert "bogus" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_result_includes_raw_output(self):
+    async def test_raw_output_is_opt_in(self):
+        """The parsed list and raw text are redundant on success —
+        ``raw_output`` is omitted by default and returned with
+        ``include_raw=True``."""
         self._query_result = {
             "success": True,
             "output": "Closed under the global context",
@@ -158,7 +161,16 @@ class TestRunAssumptions:
             lifespan_state={},
         )
         assert result["success"] is True
-        assert "raw_output" in result
+        assert "raw_output" not in result
+
+        result = await run_assumptions(
+            name="thm",
+            file="test.v",
+            workspace="/tmp",
+            lifespan_state={},
+            include_raw=True,
+        )
+        assert result["success"] is True
         assert "Closed" in result["raw_output"]
 
     @pytest.mark.asyncio
@@ -182,6 +194,7 @@ class TestRunAssumptions:
             file="test.v",
             workspace="/tmp",
             lifespan_state={},
+            include_raw=True,
         )
         assert result["success"] is True
         assert "Fetching opaque proofs" not in result["raw_output"]
@@ -217,6 +230,7 @@ class TestRunAssumptions:
             file="test.v",
             workspace="/tmp",
             lifespan_state={},
+            include_raw=True,
         )
         assert result["success"] is True
         assert "Fetching opaque proofs" not in result["raw_output"]

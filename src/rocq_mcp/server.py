@@ -25,19 +25,31 @@ from typing import Any, Callable
 import psutil
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
+import rocq_mcp
 
 # ---------------------------------------------------------------------------
 # Configuration (env vars with defaults)
 # ---------------------------------------------------------------------------
-
-ROCQ_WORKSPACE: str = os.environ.get("ROCQ_WORKSPACE", os.getcwd())
-_ROCQ_WORKSPACE_EXPLICIT: bool = "ROCQ_WORKSPACE" in os.environ
-ROCQ_COQC_TIMEOUT: int = int(os.environ.get("ROCQ_COQC_TIMEOUT", "60"))
-ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
-ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
-ROCQ_QUERY_TIMEOUT_CAP: int = int(os.environ.get("ROCQ_QUERY_TIMEOUT_CAP", "300"))
-ROCQ_COQC_BINARY: str = os.environ.get("ROCQ_COQC_BINARY", "coqc")
-ROCQ_MAX_SOURCE_SIZE: int = int(os.environ.get("ROCQ_MAX_SOURCE_SIZE", "1000000"))
+# Env-derived configuration lives in rocq_mcp.config (single definition
+# site).  The names are re-bound here because submodules read them as
+# ``_server.<NAME>`` and tests monkeypatch them on this module — both
+# work against these bindings, since server code reads its own globals.
+from rocq_mcp.config import (
+    _COMPILE_MULTI_ERROR_CAP,
+    _COMPILE_MULTI_ERROR_TIMEOUT,
+    _MEMORY_WATCHDOG_INTERVAL,
+    _RECENT_ERRORS_MAX,
+    _ROCQ_WORKSPACE_EXPLICIT,
+    ROCQ_COQC_BINARY,
+    ROCQ_COQC_TIMEOUT,
+    ROCQ_MAX_PET_RSS_MB,
+    ROCQ_MAX_SOURCE_SIZE,
+    ROCQ_PET_TIMEOUT,
+    ROCQ_QUERY_TIMEOUT_CAP,
+    ROCQ_VERIFY_TIMEOUT,
+    ROCQ_WORKSPACE,
+    _default_max_pet_rss_mb,
+)
 
 
 def _check_timeout_config(pet_timeout: float, cap: int) -> str | None:
@@ -120,34 +132,6 @@ _pet_availability_msg = _check_pet_availability()
 if _pet_availability_msg:
     warnings.warn(_pet_availability_msg, RuntimeWarning, stacklevel=2)
 
-
-def _default_max_pet_rss_mb() -> int:
-    """Default pet RSS cap: 50% of system RAM, hard-capped at 16 GB.
-
-    Tuned to fire well above legitimate ``vm_compute`` ceilings (~2-4 GB)
-    but well below the OOM-killer / swap-thrash zone.  On a 32 GB Mac
-    this resolves to 16 GB; on a 16 GB host, 8 GB; on a 64 GB+ host the
-    16 GB cap kicks in.
-    """
-    total_mb = psutil.virtual_memory().total // (1024 * 1024)
-    return min(int(0.50 * total_mb), 16_384)
-
-
-ROCQ_MAX_PET_RSS_MB: int = int(
-    os.environ.get("ROCQ_MAX_PET_RSS_MB", str(_default_max_pet_rss_mb()))
-)
-_MEMORY_WATCHDOG_INTERVAL: float = 0.5
-_RECENT_ERRORS_MAX: int = 20
-
-# Multi-error walker tunables for ``rocq_compile_file``.  When CAP is 0
-# the feature is disabled and no ``errors`` field is added to the
-# response.  TIMEOUT is the per-``pet.run`` budget inside the walker.
-_COMPILE_MULTI_ERROR_CAP: int = int(
-    os.environ.get("ROCQ_COMPILE_MULTI_ERROR_CAP", "20")
-)
-_COMPILE_MULTI_ERROR_TIMEOUT: float = float(
-    os.environ.get("ROCQ_COMPILE_MULTI_ERROR_TIMEOUT", "5.0")
-)
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -1286,6 +1270,7 @@ def _resolve_tool_envelope(
     else:
         workspace = workspace or ROCQ_WORKSPACE
 
+    effective_timeout: float | None
     if timeout_default is not None:
         effective_timeout = (
             float(timeout)
@@ -1768,6 +1753,9 @@ async def rocq_compile(
         return resolved
     workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
 
+    # timeout_default was passed to _resolve_tool_envelope,
+    # so effective_timeout is non-None here.
+    assert effective_timeout is not None
     result = await run_compile_with_state(
         source=source,
         workspace=workspace,
@@ -1934,6 +1922,9 @@ async def rocq_compile_file(
         return resolved
     workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
 
+    # timeout_default was passed to _resolve_tool_envelope,
+    # so effective_timeout is non-None here.
+    assert effective_timeout is not None
     result = await run_compile_file_with_state(
         file=file,
         workspace=workspace,
@@ -2009,6 +2000,9 @@ async def rocq_verify(
         return resolved
     workspace, lifespan_state, ws_warning, clamped, effective_timeout = resolved
 
+    # timeout_default was passed to _resolve_tool_envelope,
+    # so effective_timeout is non-None here.
+    assert effective_timeout is not None
     result = await run_verify(
         proof=proof,
         problem_name=problem_name,

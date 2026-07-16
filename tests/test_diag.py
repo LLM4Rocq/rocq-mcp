@@ -69,11 +69,19 @@ class TestDiagSchema:
             "pet",
             "memory",
             "load_average",
+            "lock",
+            "enrichment_failures",
             "live_states",
             "live_states_total",
             "recent_errors",
         }
         assert snap["success"] is True
+        assert set(snap["lock"].keys()) == {
+            "wait_ms_last",
+            "wait_ms_max",
+            "contended_total",
+        }
+        assert snap["enrichment_failures"] == {}
         assert set(snap["pet"].keys()) == {
             "pid",
             "uptime_seconds",

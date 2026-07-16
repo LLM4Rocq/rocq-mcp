@@ -44,9 +44,11 @@ from rocq_mcp.verify import _check_forbidden_commands
 # because _force_release_pet_lock can replace the global.  A bare
 # ``from server import _pet_lock`` would capture a stale reference.
 import rocq_mcp.server as _server
+from rocq_mcp import taxonomy
 
 # _split_rocq_sentences is in compile — import directly (no cycle).
 from rocq_mcp.compile import _split_rocq_sentences, _is_focus_token
+from rocq_mcp.envelope import collects_degraded, note_degraded
 
 # ---------------------------------------------------------------------------
 # Goal formatting helper (shared by run_check, run_step_multi)
@@ -145,7 +147,8 @@ def _try_get_goals_with_depth(pet: Any, state: Any) -> tuple[str | None, int | N
         complete = pet.complete_goals(state)
         goals_list = complete.goals if complete else []
         return _format_goals(goals_list) or None, _focus_depth(complete)
-    except Exception:
+    except Exception as e:
+        note_degraded("goals:pet_call_failed", repr(e))
         return None, None
 
 
@@ -533,6 +536,7 @@ _server._pet_invalidation_hooks.append(_state_invalidate_all)
 _MAX_QUERY_OUTPUT = 8000
 
 
+@collects_degraded
 async def run_query(
     command: str,
     preamble: str,
@@ -703,6 +707,7 @@ _OPAQUE_FETCH_NOTICE_RE = re.compile(
 )
 
 
+@collects_degraded
 async def run_assumptions(
     name: str,
     file: str,
@@ -1030,8 +1035,9 @@ def _toc_names_cached(pet: Any, resolved_file: str) -> list[str]:
         except OSError:
             source = ""
         names = sorted(_collect_toc_names(toc_result, source=source))
-    except Exception:
+    except Exception as e:
         # Do not cache failures: caller will retry next time.
+        note_degraded("available_in_file:toc_failed", repr(e))
         return []
     if len(_TOC_CACHE) >= _TOC_CACHE_MAX:
         # Evict the oldest (insertion-order).
@@ -1055,22 +1061,13 @@ _DEFAULT_TOC_LIMIT: int = 500
 # enrichment IS useful.  The runtime gate (in ``run_assumptions``)
 # treats those two cases differently using ``pet_restarted``.
 #
-# This set is a strict subset of :data:`server._RECENT_ERROR_REASONS`
+# This set is a strict subset of :data:`taxonomy.RECENT_ERROR_REASONS`
 # (the larger set also includes validation-only and tool-specific
 # values like ``"not_found"`` / ``"tactic_failed"``).  Derived from the
-# shared :data:`server._PET_SIDE_FAILURE_REASONS` so the intersection
-# invariant across the three reason-sets in the codebase cannot drift
-# silently — the assertion below catches a new pet-side failure mode
-# added on one side without a matching update on the other at import,
-# not on the next operational incident.
-_TRANSPORT_FAILURE_REASONS: frozenset[str] = _server._PET_SIDE_FAILURE_REASONS
-
-assert _TRANSPORT_FAILURE_REASONS <= _server._RECENT_ERROR_REASONS, (
-    f"_TRANSPORT_FAILURE_REASONS must be a subset of "
-    f"_RECENT_ERROR_REASONS; new pet-side reasons added to one must be "
-    f"added to the other. Offenders: "
-    f"{_TRANSPORT_FAILURE_REASONS - _server._RECENT_ERROR_REASONS}"
-)
+# shared :data:`taxonomy.PET_SIDE_FAILURE_REASONS` — the canonical set,
+# derived from taxonomy.FailureReason, so the subset invariant across
+# the reason-sets holds by construction (no import-time assert needed).
+_TRANSPORT_FAILURE_REASONS: frozenset[str] = taxonomy.PET_SIDE_FAILURE_REASONS
 
 
 def _truncate_names(
@@ -1160,16 +1157,22 @@ async def _fetch_available_in_file(
             lifespan_state,
             tool,
         )
-    except Exception:
+    except Exception as e:
+        note_degraded("available_in_file:pet_failed", repr(e))
         return _AvailableInFile([], False, 0)
     if not isinstance(names, list):
         # _run_with_pet returns a failure dict on errors; treat as empty.
+        note_degraded(
+            "available_in_file:pet_failed",
+            str(names.get("reason")) if isinstance(names, dict) else None,
+        )
         return _AvailableInFile([], False, 0)
     total = len(names)
     capped, truncated = _truncate_names(names)
     return _AvailableInFile(capped, truncated, total)
 
 
+@collects_degraded
 async def run_toc(
     file: str,
     workspace: str,
@@ -1220,6 +1223,7 @@ async def run_toc(
 # ---------------------------------------------------------------------------
 
 
+@collects_degraded
 async def run_notations(
     statement: str,
     preamble: str,
@@ -1514,6 +1518,7 @@ async def capture_position_state(
     )
 
 
+@collects_degraded
 async def run_start(
     file: str,
     theorem: str,
@@ -1795,6 +1800,7 @@ def _build_check_success_dict(
     return result
 
 
+@collects_degraded
 async def run_check(
     body: str,
     lifespan_state: dict[str, Any],
@@ -1917,7 +1923,8 @@ async def run_check(
             complete = pet.complete_goals(state)
             goals_list = complete.goals if complete else []
             goals_text = _format_goals(goals_list)
-        except Exception:
+        except Exception as e:
+            note_degraded("goals:pet_call_failed", repr(e))
             goals_text = "(goals unavailable)"
             complete = None
 
@@ -1953,6 +1960,7 @@ async def run_check(
 # ---------------------------------------------------------------------------
 
 
+@collects_degraded
 async def run_step_multi(
     tactics: list[str],
     lifespan_state: dict[str, Any],

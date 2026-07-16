@@ -142,6 +142,18 @@ def _build_diag_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
             "sample_status": sample_status,
         },
         "load_average": _sample_load_average(),
+        # Pet-lock contention telemetry: how long calls park on the
+        # globally serializing pet lock.  Sustained contention here is
+        # the documented trigger for revisiting the one-pet posture.
+        "lock": {
+            "wait_ms_last": float(lifespan_state.get("lock_wait_ms_last", 0.0)),
+            "wait_ms_max": float(lifespan_state.get("lock_wait_ms_max", 0.0)),
+            "contended_total": int(lifespan_state.get("lock_contended_total", 0)),
+        },
+        # Per-code counters of best-effort enrichment failures (the
+        # ``degraded`` response field) — silent-degradation *rates*
+        # without turning on ROCQ_DEBUG_ENRICHMENT.
+        "enrichment_failures": dict(lifespan_state.get("enrichment_failures") or {}),
         "live_states": live_states,
         "live_states_total": live_states_total,
         "recent_errors": recent_errors,

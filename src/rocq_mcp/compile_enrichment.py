@@ -12,9 +12,10 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Literal, TypedDict, get_args
+from typing import Any, Literal, TypedDict
 
 import rocq_mcp.server as _server
+from rocq_mcp import taxonomy
 from rocq_mcp.compile import (
     _PROOF_FILE_LABEL,
     _first_error_from_positions,
@@ -49,7 +50,7 @@ _WALKER_BUDGET_MULTIPLIER: int = 4
 #
 # Note: ``"not_found"`` is an error *reason* used by tools like
 # ``rocq_start`` and ``rocq_assumptions`` (see
-# :data:`rocq_mcp.server._RECENT_ERROR_REASONS`), but it is never
+# :data:`rocq_mcp.taxonomy.RECENT_ERROR_REASONS`), but it is never
 # produced as a state-capture status — the orchestrator never reaches
 # a state-capture step on a name-not-found error — so it does not
 # appear here.
@@ -64,26 +65,12 @@ _StateCaptureStatus = Literal[
     "no_position",
 ]
 
-_VALID_STATE_CAPTURE_STATUSES: frozenset[str] = frozenset(get_args(_StateCaptureStatus))
-
-# Non-failure members of ``_StateCaptureStatus``: the orchestrator-derived
-# values produced after a *successful* enrichment lookup (or a structurally
-# absent position).  Their complement inside :data:`_VALID_STATE_CAPTURE_STATUSES`
-# is the set of pet-side failure modes that must stay aligned with
-# :data:`rocq_mcp.server._PET_SIDE_FAILURE_REASONS`.
-_NON_FAILURE_STATUSES: frozenset[str] = frozenset(
-    {
-        "ok",
-        "outside_proof",
-        "no_position",
-    }
-)
-
-assert _server._PET_SIDE_FAILURE_REASONS <= _VALID_STATE_CAPTURE_STATUSES
-assert (
-    _VALID_STATE_CAPTURE_STATUSES - _NON_FAILURE_STATUSES
-    == _server._PET_SIDE_FAILURE_REASONS
-)
+# The canonical sets live in rocq_mcp.taxonomy (derived from one enum,
+# so the pet-side/failure alignment holds by construction).  The Literal
+# above stays for static typing; tests/test_taxonomy.py pins that its
+# args equal taxonomy.STATE_CAPTURE_STATUSES.
+_VALID_STATE_CAPTURE_STATUSES: frozenset[str] = taxonomy.STATE_CAPTURE_STATUSES
+_NON_FAILURE_STATUSES: frozenset[str] = taxonomy.NON_FAILURE_CAPTURE_STATUSES
 
 
 class _CaptureResult(TypedDict):

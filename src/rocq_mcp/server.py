@@ -156,6 +156,12 @@ async def app_lifespan(server: Any) -> Any:
         "peak_pet_rss_mb": 0.0,
         "pet_generation": 0,
         "recent_errors": collections.deque(maxlen=_RECENT_ERRORS_MAX),
+        # Degraded-enrichment counters (rocq_mcp.envelope.attach_degraded)
+        # and pet-lock contention telemetry — surfaced by rocq_diag.
+        "enrichment_failures": {},
+        "lock_wait_ms_last": 0.0,
+        "lock_wait_ms_max": 0.0,
+        "lock_contended_total": 0,
     }
     try:
         yield state
@@ -1091,130 +1097,20 @@ def _merge_partial_state(resp: dict[str, Any], partial: dict[str, Any]) -> None:
             resp[k] = v
 
 
-_RECENT_ERROR_MESSAGE_LIMIT: int = 500
-
-# Failure reasons emitted by ``_run_with_pet``'s except arms — the
-# intersection of :data:`rocq_mcp.interactive._TRANSPORT_FAILURE_REASONS`
-# and the failure subset of
-# :data:`rocq_mcp.compile_enrichment._StateCaptureStatus`.  Single source
-# of truth so the three reason-sets cannot drift apart silently.
-_PET_SIDE_FAILURE_REASONS: frozenset[str] = frozenset(
-    {
-        "timeout",
-        "crashed",
-        "memory_exhausted",
-        "lock_contended",
-        "unavailable",
-    }
+# The failure-reason taxonomy and the envelope/degradation helpers moved
+# to leaf modules (single source of truth; no import cycle).  The names
+# below stay bound on this module because submodules and tests access
+# them as ``_server.<name>`` — see rocq_mcp/taxonomy.py and
+# rocq_mcp/envelope.py for the definitions.
+from rocq_mcp.envelope import (  # noqa: E402
+    _RECENT_ERROR_MESSAGE_LIMIT,  # noqa: F401  (re-export for tests)
+    _fail,
+    _no_ctx_fail,
+    _record_error,
 )
-
-# Allowed values for the ``reason`` field on ``recent_errors`` entries.
-# A superset of :data:`compile_enrichment._StateCaptureStatus`'s failure modes plus
-# ``"validation"`` for early-return validation failures, ``"not_found"``
-# for name-resolution failures (rocq_start / rocq_assumptions typos),
-# and the rocq_verify-specific reasons.
-_RECENT_ERROR_REASONS: frozenset[str] = _PET_SIDE_FAILURE_REASONS | frozenset(
-    {
-        "validation",
-        "not_found",
-        # rocq_check mid-batch failure (a tactic was rejected by Coq).
-        "tactic_failed",
-        # rocq_verify-specific reasons (see compile.run_verify).
-        "compile_error",
-        "axiom_dependency",
-        "type_mismatch",
-    }
+from rocq_mcp.taxonomy import (  # noqa: E402
+    RECENT_ERROR_REASONS as _RECENT_ERROR_REASONS,  # noqa: F401
 )
-
-assert _PET_SIDE_FAILURE_REASONS <= _RECENT_ERROR_REASONS
-
-
-def _record_error(
-    lifespan_state: dict[str, Any] | None,
-    tool: str,
-    message: str,
-    reason: str,
-) -> None:
-    """Append an entry to the ``recent_errors`` ring buffer.
-
-    Stores absolute ``occurred_at`` timestamps; ``ago_seconds`` is computed
-    lazily by ``_build_diag_snapshot`` so values stay fresh when the buffer
-    is read.
-
-    *tool* is the canonical MCP tool name (e.g. ``"rocq_check"``) and
-    matches the output schema key in ``_build_diag_snapshot``.
-
-    *reason* is one of :data:`_RECENT_ERROR_REASONS` — typically a
-    :data:`compile_enrichment._StateCaptureStatus` value for pet-level failures, or
-    ``"validation"`` for early-return validation failures.
-
-    Long *message* strings are truncated to
-    ``_RECENT_ERROR_MESSAGE_LIMIT`` chars + ``"..."`` to keep the
-    ``rocq_diag`` payload bounded; the full message is preserved in the
-    immediate response of the failing tool call.
-
-    Tolerates ``lifespan_state is None`` (no recording) and missing
-    ``recent_errors`` key (no recording) — both happen when the failing
-    tool call has no MCP context.
-
-    Asserts that *reason* is in :data:`_RECENT_ERROR_REASONS`.  Without
-    this guard a typo'd reason would silently appear in ``rocq_diag``
-    output and break agent dispatch logic — mirrors
-    :data:`compile_enrichment._VALID_STATE_CAPTURE_STATUSES` which is used the same way
-    in ``compile_enrichment``.
-    """
-    assert (
-        reason in _RECENT_ERROR_REASONS
-    ), f"unknown error reason {reason!r}; add it to _RECENT_ERROR_REASONS"
-    if lifespan_state is None:
-        return
-    buf = lifespan_state.get("recent_errors")
-    if buf is None:
-        return
-    if message is not None and len(message) > _RECENT_ERROR_MESSAGE_LIMIT:
-        message = message[:_RECENT_ERROR_MESSAGE_LIMIT] + "..."
-    buf.append(
-        {
-            "tool": tool,
-            "message": message,
-            "reason": reason,
-            "occurred_at": time.time(),
-        }
-    )
-
-
-def _fail(
-    lifespan_state: dict[str, Any] | None,
-    tool: str,
-    message: str,
-    reason: str = "validation",
-    **extra: Any,
-) -> dict[str, Any]:
-    """Build a failure response dict and record it in ``recent_errors``.
-
-    Convenience for the ``return {"success": False, "error": msg}`` pattern
-    that also needs to push the error onto the diag ring buffer.  Skips
-    recording when *lifespan_state* is ``None`` (no MCP context) so test
-    helpers and pre-context paths stay simple.
-
-    Always includes ``reason`` in the response so the unified envelope
-    is consistent across pet-side failures (set by ``_run_with_pet``)
-    and pre-pet validation failures (set here).
-    """
-    _record_error(lifespan_state, tool=tool, message=message, reason=reason)
-    return {"success": False, "error": message, "reason": reason, **extra}
-
-
-def _no_ctx_fail(tool: str) -> dict[str, Any]:
-    """Canonical "no MCP context" failure envelope for tool wrappers.
-
-    Routes through :func:`_fail` so the response shape and the
-    ``recent_errors`` side-effect policy stay defined in one place; when
-    ``ctx is None`` we have no ``lifespan_state`` to record into, so
-    ``_fail`` no-ops the buffer write (same policy as every other
-    ``lifespan_state is None`` caller).
-    """
-    return _fail(None, tool, "Internal error: no MCP context.")
 
 
 def _resolve_tool_envelope(
@@ -1517,8 +1413,16 @@ async def _run_with_pet(
 
     def _execute() -> Any:
         lock = _pet_lock  # capture local ref (survives _force_release_pet_lock)
+        wait_started = time.monotonic()
         if not lock.acquire(timeout=lock_timeout):
             raise _PetLockTimeout("Could not acquire pet lock")
+        # Contention telemetry for rocq_diag: how long this call parked
+        # on the (globally serializing) pet lock.  Dict writes are
+        # GIL-atomic; last-writer-wins races are fine for diagnostics.
+        wait_ms = (time.monotonic() - wait_started) * 1000.0
+        lifespan_state["lock_wait_ms_last"] = wait_ms
+        if wait_ms > lifespan_state.get("lock_wait_ms_max", 0.0):
+            lifespan_state["lock_wait_ms_max"] = wait_ms
         try:
             pet = _ensure_pet(lifespan_state)
             return fn(pet)
@@ -1588,6 +1492,9 @@ async def _run_with_pet(
                 auto_record=auto_record,
             )
         except _PetLockTimeout:
+            lifespan_state["lock_contended_total"] = (
+                int(lifespan_state.get("lock_contended_total", 0)) + 1
+            )
             return await _handle_pet_failure(
                 lifespan_state,
                 tool,

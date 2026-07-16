@@ -278,6 +278,10 @@ def make_lifespan_state(pet_timeout: float = 30.0, *, full: bool = False) -> dic
                 "peak_pet_rss_mb": 0.0,
                 "pet_generation": 0,
                 "recent_errors": collections.deque(maxlen=_server._RECENT_ERRORS_MAX),
+                "enrichment_failures": {},
+                "lock_wait_ms_last": 0.0,
+                "lock_wait_ms_max": 0.0,
+                "lock_contended_total": 0,
             }
         )
     return state

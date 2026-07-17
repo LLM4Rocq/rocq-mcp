@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import glob as glob_mod
+import os
 import re
 from pathlib import Path
 
@@ -817,14 +818,15 @@ class TestQueryStepWorkflow:
 class TestMiniF2FSample:
     """Test with a real miniF2F problem if the workspace is available."""
 
-    MINIF2F_WORKSPACE = "/Users/gbaudart/Project/llm4rocq/miniF2F-rocq/test"
-
     @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
     def test_real_problem_compile(self):
         """Compile a real miniF2F problem statement (expect Admitted to fail)."""
-        ws = Path(self.MINIF2F_WORKSPACE)
+        ws_path = os.environ.get("MINIF2F_WORKSPACE")
+        if not ws_path:
+            pytest.skip("MINIF2F_WORKSPACE not set")
+        ws = Path(ws_path) / "test"
         if not ws.is_dir():
-            pytest.skip("miniF2F workspace not available")
+            pytest.skip(f"miniF2F workspace not available: {ws}")
 
         from rocq_mcp.server import rocq_compile
 

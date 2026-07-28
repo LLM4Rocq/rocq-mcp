@@ -94,9 +94,9 @@ class TestCompileFileValidation:
     def test_oversized_file(self, workspace, monkeypatch):
         path = workspace / "big.v"
         path.write_text("x" * 100)
-        import rocq_mcp.server as _srv
+        import rocq_mcp.config as _config
 
-        monkeypatch.setattr(_srv, "ROCQ_MAX_SOURCE_SIZE", 50)
+        monkeypatch.setattr(_config, "ROCQ_MAX_SOURCE_SIZE", 50)
         result = run_compile_file(file="big.v", workspace=str(workspace), timeout=60)
         assert result["success"] is False
         assert "size" in result["error"].lower()

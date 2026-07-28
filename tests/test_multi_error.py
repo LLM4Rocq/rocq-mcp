@@ -422,7 +422,7 @@ class TestMultiErrorCap:
     """``ROCQ_COMPILE_MULTI_ERROR_CAP`` truncates / disables the feature."""
 
     async def test_max_errors_cap_truncates(self, workspace, monkeypatch):
-        import rocq_mcp.server as _server
+        import rocq_mcp.config as _config
         from rocq_mcp.server import rocq_compile_file
 
         # Build 30 broken theorems; cap to 5.
@@ -430,16 +430,10 @@ class TestMultiErrorCap:
         path = workspace / "many_broken.v"
         path.write_text("\n".join(lines) + "\n")
 
+        # The env var is parsed once at config import; the live knob is the
+        # config attribute, which the walker reads per call.
         monkeypatch.setenv("ROCQ_COMPILE_MULTI_ERROR_CAP", "5")
-        # Also bump the module attribute if the implementation read it at
-        # import time.  Use ``raising=False`` so this test still runs
-        # before the implementation worktree is merged.
-        monkeypatch.setattr(
-            _server,
-            "_COMPILE_MULTI_ERROR_CAP",
-            5,
-            raising=False,
-        )
+        monkeypatch.setattr(_config, "_COMPILE_MULTI_ERROR_CAP", 5)
 
         ls = _fresh_lifespan_state()
         ctx = _MockContext(ls)
@@ -457,19 +451,14 @@ class TestMultiErrorCap:
         assert len(result["errors"]) == 5
 
     async def test_cap_zero_disables_feature(self, workspace, monkeypatch):
-        import rocq_mcp.server as _server
+        import rocq_mcp.config as _config
         from rocq_mcp.server import rocq_compile_file
 
         path = workspace / "disabled.v"
         path.write_text("Theorem broken : True.\n" "Proof.\n" "  exact 0.\n" "Qed.\n")
 
         monkeypatch.setenv("ROCQ_COMPILE_MULTI_ERROR_CAP", "0")
-        monkeypatch.setattr(
-            _server,
-            "_COMPILE_MULTI_ERROR_CAP",
-            0,
-            raising=False,
-        )
+        monkeypatch.setattr(_config, "_COMPILE_MULTI_ERROR_CAP", 0)
 
         ls = _fresh_lifespan_state()
         ctx = _MockContext(ls)

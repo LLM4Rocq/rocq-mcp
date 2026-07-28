@@ -636,7 +636,7 @@ class TestForceRestart(_MockPetBase):
                 f.write("Theorem foo : True. Proof. exact I. Qed.\n")
 
             with (
-                patch.object(rocq_mcp.server, "_invalidate_pet") as mock_invalidate,
+                patch.object(_pet_runtime, "_invalidate_pet") as mock_invalidate,
                 patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet),
             ):
                 result = await _interactive.run_start(
@@ -680,7 +680,7 @@ class TestForceRestart(_MockPetBase):
                 f.write("Theorem foo : True. Proof. exact I. Qed.\n")
 
             with (
-                patch.object(rocq_mcp.server, "_invalidate_pet") as mock_invalidate,
+                patch.object(_pet_runtime, "_invalidate_pet") as mock_invalidate,
                 patch.object(rocq_mcp.server, "_ensure_pet", return_value=mock_pet),
             ):
                 result = await _interactive.run_start(

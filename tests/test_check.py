@@ -689,12 +689,19 @@ class TestCheckProofTactics:
         assert "proof_tactics_complete" not in cr
 
     @pytest.mark.asyncio
-    async def test_proof_tactics_status_ancestor_evicted(
+    async def test_proof_tactics_survives_ancestor_eviction(
         self, workspace, lifespan_state
     ):
-        """When an ancestor is evicted before the leaf finishes the proof,
-        the result drops proof_tactics and reports ancestor_evicted at the
-        first missing id.
+        """Evicting an ancestor no longer breaks the reconstructed path.
+
+        Each ``_StateEntry`` materializes its cumulative ``tactic_path``
+        at creation, so a finished leaf still carries the whole chain even
+        after an ancestor ages out of the LRU table.  The result therefore
+        reports the complete ``proof_tactics`` with no ``ancestor_evicted``
+        envelope.  (The old walk-the-parents reconstruction reported
+        ``ancestor_evicted`` here; the sole remaining break — the leaf
+        itself missing — is covered as a unit test in
+        ``test_server.py::TestReconstructTacticPath``.)
         """
         from rocq_mcp.interactive import run_start, run_check, _state_remove
 
@@ -721,9 +728,9 @@ class TestCheckProofTactics:
         assert cr_mid["success"] is True
         mid_id = cr_mid["state_id"]
 
-        # Evict the *root* state. The leaf state (created next) and the
-        # mid state both stay alive, so resolution succeeds and the
-        # proof_finished branch runs — but the parent walk dies at root.
+        # Evict the *root* (an ancestor of the leaf).  The leaf's
+        # materialized tactic_path already holds the full chain, so
+        # reconstruction stays complete.
         _state_remove(root_id)
 
         cr = await run_check(
@@ -734,11 +741,12 @@ class TestCheckProofTactics:
         )
         assert cr["success"] is True
         assert cr["proof_finished"] is True
-        assert "proof_tactics" not in cr
-        assert cr["proof_tactics_status"] == "ancestor_evicted"
-        assert cr["proof_tactics_broken_at"] == root_id
-        assert "proof_tactics_hint" in cr
-        assert "proof_hint" not in cr
+        assert cr["proof_tactics"] == ["intros.", "reflexivity."]
+        assert "proof_hint" in cr
+        # No broken-walk envelope: the ancestor eviction is invisible.
+        assert "proof_tactics_status" not in cr
+        assert "proof_tactics_broken_at" not in cr
+        assert "proof_tactics_hint" not in cr
 
 
 # ---------------------------------------------------------------------------

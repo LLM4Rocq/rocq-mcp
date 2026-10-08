@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Launch rocq-mcp inside a pinned opam switch.
+#
+# Configuration (all optional, set in the MCP client's "env" block):
+#   ROCQ_OPAM_SWITCH   opam switch to run under (default: opam's current switch)
+#   ROCQ_MCP_COMMAND   rocq-mcp executable (default: rocq-mcp on PATH)
+#   ROCQ_PET_PREFIX    extra install prefix holding a pet built outside opam;
+#                      its bin/ and lib/ are prepended to PATH and OCAMLPATH
+#   ROCQ_STACK_LIMIT   value for `ulimit -s` (default: unlimited); the native
+#                      compiler can overflow the default stack on large terms
+#   OCAMLRUNPARAM      default b,l=1000000000 (OCaml stack limit for the
+#                      native compiler); an existing value is kept
+# rocq-mcp's own variables (ROCQ_PET_TIMEOUT, ROCQ_WORKSPACE, ...) pass through.
+set -euo pipefail
+
+if [[ -n "${ROCQ_OPAM_SWITCH:-}" ]]; then
+  opam_env=$(opam env --switch="$ROCQ_OPAM_SWITCH" --set-switch)
+else
+  opam_env=$(opam env)
+fi
+eval "$opam_env"
+
+if [[ -n "${ROCQ_PET_PREFIX:-}" ]]; then
+  export PATH="$ROCQ_PET_PREFIX/bin:$PATH"
+  export OCAMLPATH="$ROCQ_PET_PREFIX/lib${OCAMLPATH:+:$OCAMLPATH}"
+fi
+
+ulimit -s "${ROCQ_STACK_LIMIT:-unlimited}"
+export OCAMLRUNPARAM="${OCAMLRUNPARAM:-b,l=1000000000}"
+
+exec "${ROCQ_MCP_COMMAND:-rocq-mcp}" "$@"

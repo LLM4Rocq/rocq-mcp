@@ -362,6 +362,39 @@ Add to your MCP client configuration (e.g., Claude Desktop, Claude Code):
 }
 ```
 
+### Pinning an opam switch
+
+`scripts/rocq-mcp-opam` starts the server inside a given opam switch and
+sets the process limits the native compiler needs on large developments.
+Register it as the server command and configure it through `env`:
+
+```json
+{
+  "mcpServers": {
+    "rocq-mcp": {
+      "command": "/path/to/rocq-mcp/scripts/rocq-mcp-opam",
+      "env": {
+        "ROCQ_OPAM_SWITCH": "rocq-9",
+        "ROCQ_MCP_COMMAND": "/path/to/venv/bin/rocq-mcp",
+        "ROCQ_PET_TIMEOUT": "600"
+      }
+    }
+  }
+}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROCQ_OPAM_SWITCH` | opam's current switch | Switch to run under |
+| `ROCQ_MCP_COMMAND` | `rocq-mcp` on `PATH` | Server executable |
+| `ROCQ_PET_PREFIX` | unset | Prefix of a `pet` built outside opam; its `bin/` and `lib/` are prepended to `PATH` and `OCAMLPATH` |
+| `ROCQ_STACK_LIMIT` | `unlimited` | Value for `ulimit -s`; the native compiler can overflow the default stack |
+| `OCAMLRUNPARAM` | `b,l=1000000000` | Kept if already set |
+
+One server entry per switch (e.g. a second entry with
+`ROCQ_OPAM_SWITCH` set to a HoTT switch) avoids calling `rocq_switch`,
+which clears all live states.
+
 ## Running Tests
 
 ```bash
@@ -382,6 +415,8 @@ src/rocq_mcp/
   health.py              rocq_health / rocq_switch backing: opam-switch detection, toolchain probe
   interactive.py         pytanque-based tools: start, check, step_multi, query, assumptions, toc, notations
   verify.py              Rocq lexer scanner, Module M. verification, Print Assumptions parsing
+scripts/
+  rocq-mcp-opam          Launcher that pins an opam switch and native-compiler limits
 tests/
   conftest.py           Shared fixtures
   test_compile.py       Tests for rocq_compile

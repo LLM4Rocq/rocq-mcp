@@ -486,6 +486,30 @@ class TestParseProjectFlags:
         flags = _parse_project_flags(tmp_path)
         assert flags == []
 
+    def test_q_absolute_path_in_opam_lib_allowed(self, tmp_path, monkeypatch):
+        """-Q with an absolute path under $OPAM_SWITCH_PREFIX/lib/coq is kept."""
+        lib = tmp_path / "switch" / "lib" / "coq" / "user-contrib" / "Lib"
+        lib.mkdir(parents=True)
+        monkeypatch.setenv("OPAM_SWITCH_PREFIX", str(tmp_path / "switch"))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "_CoqProject").write_text(f"-Q {lib} Lib\n")
+        flags = _parse_project_flags(ws)
+        assert flags == ["-Q", str(lib), "Lib"]
+
+    def test_q_absolute_path_outside_opam_lib_rejected(self, tmp_path, monkeypatch):
+        """Absolute paths outside $OPAM_SWITCH_PREFIX/lib/coq stay rejected."""
+        (tmp_path / "switch" / "lib" / "coq").mkdir(parents=True)
+        monkeypatch.setenv("OPAM_SWITCH_PREFIX", str(tmp_path / "switch"))
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        (ws / "_CoqProject").write_text(
+            f"-Q {tmp_path / 'switch' / 'lib'} Evil\n"
+            f"-Q {tmp_path / 'switch' / 'lib' / 'coq' / '..' / '..'} Evil2\n"
+        )
+        flags = _parse_project_flags(ws)
+        assert flags == []
+
     def test_q_subdir_allowed(self, tmp_path):
         """-Q with a subdirectory path is allowed."""
         (tmp_path / "_CoqProject").write_text("-Q theories MyLib\n")

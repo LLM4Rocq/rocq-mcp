@@ -4,7 +4,7 @@ Tests are grouped into:
 - TestCompileSuccess: valid Rocq sources that should compile cleanly
 - TestCompileErrors: sources with type errors, syntax errors, missing imports
 - TestCompileTimeout: diverging tactic with a short timeout
-- TestCompileInputValidation: bad workspace, oversized source, coqc not on PATH
+- TestCompileInputValidation: bad workspace, oversized source, rocq c not on PATH
 - TestCompileCleanup: verify no artifacts are left after compilation
 """
 
@@ -15,17 +15,17 @@ import glob as glob_mod
 import pytest
 
 from tests.conftest import (
-    COQC_AVAILABLE,
+    COMPILER_AVAILABLE,
     _DEFAULT_STDERR,
     _MockContext,
-    _fake_coqc_result,
+    _fake_compiler_result,
     _patch_capture_position_state,
     _patch_compile_error,
     make_lifespan_state,
 )
 from rocq_mcp.server import _PYTANQUE_NOT_INSTALLED_HINT, rocq_compile
 
-pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+pytestmark = pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 
 
 def _call_rocq_compile(**kwargs):
@@ -111,7 +111,7 @@ class TestCompileTimeout:
 
 
 # ---------------------------------------------------------------------------
-# include_warnings=False end-to-end (uses real coqc)
+# include_warnings=False end-to-end (uses real rocq c)
 # ---------------------------------------------------------------------------
 
 
@@ -195,7 +195,7 @@ class TestIncludeWarningsEndToEnd:
 
 
 class TestCompileInputValidation:
-    """Edge cases around bad inputs (no coqc needed for some of these)."""
+    """Edge cases around bad inputs (no rocq c needed for some of these)."""
 
     def test_bad_workspace(self):
         """Non-existent workspace should return a clear error."""
@@ -213,10 +213,10 @@ class TestCompileInputValidation:
         assert result["success"] is False
         assert "size" in result["error"].lower()
 
-    def test_coqc_not_on_path(self, workspace, monkeypatch):
+    def test_compiler_not_on_path(self, workspace, monkeypatch):
         """When ROCQ_COMPILER_BINARY points to a non-existent binary, report error."""
         monkeypatch.setattr(
-            "rocq_mcp.server.ROCQ_COMPILER_BINARY", "nonexistent_coqc_binary_xyz"
+            "rocq_mcp.server.ROCQ_COMPILER_BINARY", "nonexistent_compiler_binary_xyz"
         )
         result = _call_rocq_compile(source="", workspace=str(workspace))
         assert result["success"] is False
@@ -259,7 +259,7 @@ class TestCompileCleanup:
 
 
 class TestCompileWarningsTruncation:
-    """Ensure coqc failures are detected even when stderr starts with
+    """Ensure rocq c failures are detected even when stderr starts with
     voluminous warnings (e.g. math-comp coercion ambiguity notices) that
     exceed the internal _MAX_ERROR_LENGTH budget.
 
@@ -300,7 +300,7 @@ class TestCompileWarningsTruncation:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(fake_stderr),
         )
 
@@ -309,7 +309,7 @@ class TestCompileWarningsTruncation:
 
         assert (
             result["success"] is False
-        ), "rocq_compile must not report success when coqc exits with code 1"
+        ), "rocq_compile must not report success when rocq c exits with code 1"
         assert (
             "map_trmx" in result["error"]
         ), "Error content must be preserved, not lost to warning truncation"
@@ -320,7 +320,7 @@ class TestCompileWarningsTruncation:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(
                 'File "/tmp/tmp.v", line 1, characters 0-10:\nWarning: Deprecated.\n',
                 returncode=0,
@@ -337,13 +337,13 @@ class TestCompileWarningsTruncation:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(""),
         )
 
         result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
-        assert "coqc exited with code" in result["error"]
+        assert "rocq c exited with code" in result["error"]
 
     def test_whitespace_only_stderr_nonzero_returncode(self, workspace, monkeypatch):
         """Whitespace-only stderr with non-zero returncode must still fail."""
@@ -351,13 +351,13 @@ class TestCompileWarningsTruncation:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result("   \n\n  "),
         )
 
         result = _call_rocq_compile(source="x", workspace=str(workspace))
         assert result["success"] is False
-        assert "coqc exited with code" in result["error"]
+        assert "rocq c exited with code" in result["error"]
 
     def test_only_warnings_nonzero_returncode(self, workspace, monkeypatch):
         """Structured warnings but no Error + returncode != 0: must fail
@@ -367,7 +367,7 @@ class TestCompileWarningsTruncation:
         warnings = self._big_warnings()
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(warnings),
         )
 
@@ -390,7 +390,7 @@ class TestCompileWarningsTruncation:
         )
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(warn + error),
         )
 
@@ -418,7 +418,7 @@ class TestCompileWarningsTruncation:
         )
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
+            "_run_compiler",
             lambda *a, **kw: self._make_fake_result(warnings + error),
         )
 
@@ -439,7 +439,7 @@ class TestCompileWarningsTruncation:
 # orchestrator and the PET subprocess) so that the status-derivation logic
 # inside ``_capture_compile_error_state`` is actually exercised.
 #
-# ``_fake_coqc_result``, ``_patch_compile_error``,
+# ``_fake_compiler_result``, ``_patch_compile_error``,
 # ``_patch_capture_position_state``, and ``_DEFAULT_STDERR`` live in
 # ``tests/conftest.py`` so they are reusable across compile / compile_file
 # test modules.
@@ -593,7 +593,7 @@ class TestStateCaptureStatus:
         assert "Use rocq_start" in result["hint"]
 
     def test_status_no_position_when_no_error_positions(self, workspace, monkeypatch):
-        """When the coqc result lacks ``error_positions`` capture is not attempted."""
+        """When the rocq c result lacks ``error_positions`` capture is not attempted."""
         from rocq_mcp import compile as _compile
         from rocq_mcp import server as _server
 
@@ -602,8 +602,8 @@ class TestStateCaptureStatus:
         # fallback (no ``error_positions`` key in the result dict).
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
-            lambda *a, **kw: _fake_coqc_result(
+            "_run_compiler",
+            lambda *a, **kw: _fake_compiler_result(
                 "Toplevel: unstructured error, no File-line marker.\n"
             ),
         )
@@ -678,8 +678,8 @@ class TestStateCaptureStatus:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc",
-            lambda *a, **kw: _fake_coqc_result("", returncode=0),
+            "_run_compiler",
+            lambda *a, **kw: _fake_compiler_result("", returncode=0),
         )
 
         result = asyncio.run(

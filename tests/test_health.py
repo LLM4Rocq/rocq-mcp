@@ -4,7 +4,7 @@ Two concerns are exercised here:
 
 1. *Generic* switch detection in :mod:`rocq_mcp.health` — global opam
    switches, project-local ``_opam`` switches, and the non-opam fallback
-   (which must NOT mislabel ``/usr/bin/coqc`` as switch ``"usr"``).
+   (which must NOT mislabel ``/usr/bin/rocq`` as switch ``"usr"``).
 2. The MCP wrappers: ``rocq_health`` (read-only snapshot) and
    ``rocq_switch`` (env mutation + pet invalidation), with the real opam /
    subprocess boundary mocked.
@@ -87,7 +87,7 @@ def test_switch_from_prefix_name_hint_wins():
 
 def test_switch_from_binary_path_global(monkeypatch):
     monkeypatch.delenv("OPAMROOT", raising=False)
-    d = _switch_from_binary_path("/home/u/.opam/rocq9/bin/coqc")
+    d = _switch_from_binary_path("/home/u/.opam/rocq9/bin/rocq")
     assert d is not None
     assert d["switch"] == "rocq9"
     assert d["switch_source"] == "binary_path"
@@ -95,7 +95,7 @@ def test_switch_from_binary_path_global(monkeypatch):
 
 
 def test_switch_from_binary_path_local():
-    d = _switch_from_binary_path("/work/proj/_opam/bin/coqc")
+    d = _switch_from_binary_path("/work/proj/_opam/bin/rocq")
     assert d is not None
     assert d["switch_is_local"] is True
     assert d["switch"] == "proj"
@@ -104,24 +104,24 @@ def test_switch_from_binary_path_local():
 def test_switch_from_binary_path_honours_opamroot(monkeypatch):
     # A non-default OPAMROOT location is still recognised as opam.
     monkeypatch.setenv("OPAMROOT", "/custom/opamroot")
-    d = _switch_from_binary_path("/custom/opamroot/myswitch/bin/coqc")
+    d = _switch_from_binary_path("/custom/opamroot/myswitch/bin/rocq")
     assert d is not None
     assert d["switch"] == "myswitch"
 
 
 def test_switch_from_binary_path_non_opam_returns_none(monkeypatch):
     monkeypatch.delenv("OPAMROOT", raising=False)
-    # /usr/bin/coqc must NOT be reported as switch "usr".
-    assert _switch_from_binary_path("/usr/bin/coqc") is None
+    # /usr/bin/rocq must NOT be reported as switch "usr".
+    assert _switch_from_binary_path("/usr/bin/rocq") is None
     # bindir not named "bin" — unknown layout.
-    assert _switch_from_binary_path("/opt/coq/coqc") is None
+    assert _switch_from_binary_path("/opt/coq/rocq c") is None
 
 
 def test_detect_switch_prefers_opam_env(monkeypatch):
     monkeypatch.setenv("OPAM_SWITCH_PREFIX", "/home/u/.opam/myswitch")
     monkeypatch.setenv("OPAMSWITCH", "myswitch")
     # Binary path disagrees; env must win.
-    d = _detect_switch("/elsewhere/.opam/other/bin/coqc")
+    d = _detect_switch("/elsewhere/.opam/other/bin/rocq")
     assert d["switch"] == "myswitch"
     assert d["switch_source"] == "opam_env"
 
@@ -130,7 +130,7 @@ def test_detect_switch_falls_back_to_binary(monkeypatch):
     monkeypatch.delenv("OPAM_SWITCH_PREFIX", raising=False)
     monkeypatch.delenv("OPAMSWITCH", raising=False)
     monkeypatch.delenv("OPAMROOT", raising=False)
-    d = _detect_switch("/home/u/.opam/rocq9/bin/coqc")
+    d = _detect_switch("/home/u/.opam/rocq9/bin/rocq")
     assert d["switch"] == "rocq9"
     assert d["switch_source"] == "binary_path"
 
@@ -139,10 +139,10 @@ def test_detect_switch_unknown_for_non_opam(monkeypatch):
     monkeypatch.delenv("OPAM_SWITCH_PREFIX", raising=False)
     monkeypatch.delenv("OPAMSWITCH", raising=False)
     monkeypatch.delenv("OPAMROOT", raising=False)
-    d = _detect_switch("/usr/bin/coqc")
+    d = _detect_switch("/usr/bin/rocq")
     assert d["switch"] is None
     assert d["switch_source"] == "unknown"
-    # No coqc resolved at all → still graceful.
+    # No rocq c resolved at all → still graceful.
     assert _detect_switch(None)["switch_source"] == "unknown"
 
 
@@ -191,7 +191,7 @@ def test_parse_opam_env_unescapes_single_quote():
 
 
 def test_build_health_snapshot_schema(monkeypatch):
-    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "coqc")
+    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "rocq c")
     monkeypatch.setattr(health, "_resolve_binary", lambda n: f"/sw/bin/{n}")
     monkeypatch.setattr(health, "_binary_version", lambda p, a: "ver")
     monkeypatch.setenv("OPAM_SWITCH_PREFIX", "/h/.opam/myswitch")
@@ -207,21 +207,21 @@ def test_build_health_snapshot_schema(monkeypatch):
     assert snap["switch"] == "myswitch"
     assert snap["switch_source"] == "opam_env"
     assert snap["switch_is_local"] is False
-    assert snap["toolchain"]["coqc"]["path"] == "/sw/bin/coqc"
-    assert snap["toolchain"]["coqc"]["version"] == "ver"
+    assert snap["toolchain"]["compiler"]["path"] == "/sw/bin/rocq"
+    assert snap["toolchain"]["compiler"]["version"] == "ver"
     assert snap["toolchain"]["pet"]["path"] == "/sw/bin/pet"
     assert snap["pet"] == {"running": False, "pid": None}
-    # coqc + pet resolved and pytanque importable (it's a dependency).
+    # rocq c + pet resolved and pytanque importable (it's a dependency).
     assert snap["warnings"] == []
 
 
-def test_build_health_snapshot_coqc_missing_is_not_ok(monkeypatch):
-    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "coqc")
+def test_build_health_snapshot_compiler_missing_is_not_ok(monkeypatch):
+    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "rocq c")
     monkeypatch.setattr(health, "_resolve_binary", lambda n: None)
     monkeypatch.setattr(health, "_binary_version", lambda p, a: None)
     snap = build_health_snapshot({"pet_client": None})
     assert snap["ok"] is False
-    assert any("coqc" in w for w in snap["warnings"])
+    assert any("compiler" in w for w in snap["warnings"])
 
 
 def test_build_health_snapshot_reports_running_pet(monkeypatch):
@@ -232,7 +232,7 @@ def test_build_health_snapshot_reports_running_pet(monkeypatch):
 
 
 def test_build_health_snapshot_unknown_switch_warns(monkeypatch):
-    monkeypatch.setattr(health, "_resolve_binary", lambda n: "/usr/bin/coqc")
+    monkeypatch.setattr(health, "_resolve_binary", lambda n: "/usr/bin/rocq")
     monkeypatch.setattr(health, "_binary_version", lambda p, a: "v")
     monkeypatch.delenv("OPAM_SWITCH_PREFIX", raising=False)
     monkeypatch.delenv("OPAMSWITCH", raising=False)
@@ -495,11 +495,11 @@ def test_binary_version_first_line_only(monkeypatch):
         "run",
         _fake_run(returncode=0, stdout="8.20.0 5.2.0\nignored"),
     )
-    assert health._binary_version("/x/coqc", ["--print-version"]) == "8.20.0 5.2.0"
+    assert health._binary_version("/x/rocq", ["--print-version"]) == "8.20.0 5.2.0"
 
 
 def test_binary_version_falls_back_to_stderr(monkeypatch):
-    # Some coqc/pet builds print version info to stderr.
+    # Some rocq c/pet builds print version info to stderr.
     monkeypatch.setattr(
         health.subprocess,
         "run",
@@ -513,15 +513,15 @@ def test_binary_version_ignores_nonzero_exit(monkeypatch):
     monkeypatch.setattr(
         health.subprocess, "run", _fake_run(returncode=3, stdout="L1\n")
     )
-    assert health._binary_version("/x/coqc", ["--version"]) == "L1"
+    assert health._binary_version("/x/rocq", ["--version"]) == "L1"
 
 
 def test_binary_version_timeout_returns_none(monkeypatch):
     def raise_timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="coqc", timeout=5)
+        raise subprocess.TimeoutExpired(cmd="compiler", timeout=5)
 
     monkeypatch.setattr(health.subprocess, "run", raise_timeout)
-    assert health._binary_version("/x/coqc", ["--version"]) is None
+    assert health._binary_version("/x/rocq", ["--version"]) is None
 
 
 def test_binary_version_none_path_skips_subprocess():

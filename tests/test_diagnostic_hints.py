@@ -1,6 +1,6 @@
 """Tests for diagnostic-pattern hints attached to compile errors.
 
-When ``rocq_compile_file`` or ``rocq_compile`` fails with a coqc
+When ``rocq_compile_file`` or ``rocq_compile`` fails with a rocq c
 error, the response carries an ``error`` string and (usually) an
 ``error_positions`` list.  The existing ``hint`` field tells the
 agent how to *recover* (use ``rocq_start`` at the position, etc.)
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import COQC_AVAILABLE
+from tests.conftest import COMPILER_AVAILABLE
 
 
 def test_diagnostic_hint_for_missing_load_path():
@@ -47,7 +47,7 @@ def test_diagnostic_hint_for_missing_load_path():
 
 def test_diagnostic_hint_for_coq_version_mismatch():
     """``makes inconsistent assumptions over library Coq.Init.Prelude``
-    is the canonical signature of a Coq version mismatch: pet's coqc
+    is the canonical signature of a Coq version mismatch: pet's rocq c
     is from a different opam switch than the one that produced the
     workspace ``.vo`` files.  The hint should call this out by name.
     """
@@ -92,10 +92,10 @@ def test_diagnostic_hint_for_empty_error_returns_none():
     assert _diagnostic_hint_for_error(None) is None  # type: ignore[arg-type]
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestDiagnosticHintWiredIntoCompileFile:
     """Integration: ``rocq_compile_file`` should attach
-    ``diagnostic_hint`` to the failure envelope when the coqc error
+    ``diagnostic_hint`` to the failure envelope when the rocq c error
     matches a known configuration-failure pattern.
     """
 
@@ -122,7 +122,7 @@ class TestDiagnosticHintWiredIntoCompileFile:
         )
 
 
-def _coqc_failure(stderr: str) -> dict:
+def _compiler_failure(stderr: str) -> dict:
     return {"returncode": 1, "stdout": "", "stderr": stderr, "timed_out": False}
 
 
@@ -142,7 +142,9 @@ class TestDiagnosticHintBothFailurePaths:
     def test_unstructured_fallback_path_gets_hint(self):
         from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
 
-        res = _build_compile_result(_coqc_failure(_HEADERLESS_LOAD_PATH), "", 60, True)
+        res = _build_compile_result(
+            _compiler_failure(_HEADERLESS_LOAD_PATH), "", 60, True
+        )
         assert res["reason"] == "compile_error"
         assert "error_positions" not in res  # really the fallback path
         assert "Foo.Bar" in res["diagnostic_hint"]
@@ -152,7 +154,7 @@ class TestDiagnosticHintBothFailurePaths:
         from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
 
         res = _build_compile_result(
-            _coqc_failure(_HEADED_LOAD_PATH), "Require Import Foo.Bar.\n", 60, True
+            _compiler_failure(_HEADED_LOAD_PATH), "Require Import Foo.Bar.\n", 60, True
         )
         assert "Foo.Bar" in res["diagnostic_hint"]
         assert "hint" not in res
@@ -161,7 +163,7 @@ class TestDiagnosticHintBothFailurePaths:
         from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
 
         stderr = 'File "Proof.v", line 1, characters 0-10:\nError: No such goal.\n'
-        res = _build_compile_result(_coqc_failure(stderr), "Qed.\n", 60, True)
+        res = _build_compile_result(_compiler_failure(stderr), "Qed.\n", 60, True)
         assert "hint" in res
         assert "diagnostic_hint" not in res
 

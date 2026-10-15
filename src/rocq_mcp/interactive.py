@@ -1329,11 +1329,11 @@ async def run_notations(
                 )
             return {"success": True, "output": output}
         finally:
-            _server._cleanup_coqc_artifacts(str(dummy_path))
+            _server._cleanup_compiler_artifacts(str(dummy_path))
 
     def _on_timeout() -> None:
         for p in _temp_files:
-            _server._cleanup_coqc_artifacts(p)
+            _server._cleanup_compiler_artifacts(p)
 
     return await _server._run_with_pet(
         _do_notations,
@@ -1529,7 +1529,7 @@ async def capture_position_state(
     *tool* is forwarded to ``_run_with_pet`` as both the canonical tool
     name in user-facing error messages and the ``tool`` field on
     ``recent_errors`` entries.  Pass the public MCP tool name of the
-    caller (e.g. ``"rocq_compile"`` for state capture from a coqc error
+    caller (e.g. ``"rocq_compile"`` for state capture from a rocq c error
     position).
 
     ``timeout`` (seconds) is forwarded to ``_run_with_pet``; when ``None``

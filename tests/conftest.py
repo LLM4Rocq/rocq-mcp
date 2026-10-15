@@ -15,8 +15,8 @@ import rocq_mcp.server
 # Availability flags
 # ---------------------------------------------------------------------------
 
-# Follows the compiler the server actually runs (``rocq c`` or ``coqc``).
-COQC_AVAILABLE: bool = shutil.which(rocq_mcp.server._compiler_argv()[0]) is not None
+# Follows the compiler the server actually runs (``rocq c`` or ``rocq c``).
+COMPILER_AVAILABLE: bool = shutil.which(rocq_mcp.server._compiler_argv()[0]) is not None
 PET_AVAILABLE: bool = shutil.which("pet") is not None
 
 
@@ -30,8 +30,8 @@ _DEFAULT_STDERR = (
 )
 
 
-def _fake_coqc_result(stderr, returncode=1):
-    """Build a fake ``_run_coqc`` / ``_run_coqc_file`` return dict."""
+def _fake_compiler_result(stderr, returncode=1):
+    """Build a fake ``_run_compiler`` / ``_run_compiler_file`` return dict."""
     return {
         "returncode": returncode,
         "stdout": "",
@@ -41,13 +41,13 @@ def _fake_coqc_result(stderr, returncode=1):
 
 
 def _patch_compile_error(monkeypatch, stderr):
-    """Force ``_run_coqc`` to produce a failing fake result with *stderr*."""
+    """Force ``_run_compiler`` to produce a failing fake result with *stderr*."""
     from rocq_mcp import compile as _compile
 
     monkeypatch.setattr(
         _compile,
-        "_run_coqc",
-        lambda *a, **kw: _fake_coqc_result(stderr),
+        "_run_compiler",
+        lambda *a, **kw: _fake_compiler_result(stderr),
     )
 
 
@@ -109,7 +109,7 @@ def add_mock_state(parent_id, tactic, step=0):
 
 @pytest.fixture(scope="session")
 def workspace(tmp_path_factory):
-    """Create a temporary workspace directory for coqc tests."""
+    """Create a temporary workspace directory for rocq c tests."""
     ws = tmp_path_factory.mktemp("rocq_workspace")
     return ws
 

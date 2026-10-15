@@ -1,7 +1,7 @@
 """End-to-end integration tests.
 
-TestCompileVerifyWorkflow: compile then verify (require coqc)
-TestSharedDefsVerifyWorkflow: Phase 2 shared-defs verify (require coqc + pet)
+TestCompileVerifyWorkflow: compile then verify (require rocq c)
+TestSharedDefsVerifyWorkflow: Phase 2 shared-defs verify (require rocq c + pet)
 TestQueryStepWorkflow: query then start+check (require pet)
 """
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import COQC_AVAILABLE, PET_AVAILABLE, _MockContext
+from tests.conftest import COMPILER_AVAILABLE, PET_AVAILABLE, _MockContext
 
 
 def _call_rocq_compile(**kwargs):
@@ -30,7 +30,7 @@ def _call_rocq_compile(**kwargs):
 # =========================================================================
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestCompileVerifyWorkflow:
     """End-to-end: compile succeeds, then verify checks correctness."""
 
@@ -221,7 +221,7 @@ class TestCompileVerifyWorkflow:
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
         (tmp_path / "Helper.v").write_text("Definition my_const : nat := 42.\n")
 
-        # Compile Helper.v directly with coqc to produce Helper.vo
+        # Compile Helper.v directly with rocq c to produce Helper.vo
         subprocess.run(
             [*_compiler_argv(), "-Q", ".", "TestProj", "Helper.v"],
             cwd=str(tmp_path),
@@ -321,13 +321,13 @@ class TestCompileVerifyWorkflow:
 
 
 # =========================================================================
-# Shared-defs (Phase 2) verify workflow (require coqc + pet)
+# Shared-defs (Phase 2) verify workflow (require rocq c + pet)
 # =========================================================================
 
 
 @pytest.mark.skipif(
-    not (COQC_AVAILABLE and PET_AVAILABLE),
-    reason="coqc and pet required for compile error state capture",
+    not (COMPILER_AVAILABLE and PET_AVAILABLE),
+    reason="rocq c and pet required for compile error state capture",
 )
 class TestCompileErrorStateWorkflow:
     """End-to-end: compile errors should include the current proof state."""
@@ -355,7 +355,7 @@ class TestCompileErrorStateWorkflow:
         assert "|-True" in result["goals"]
         assert result["file"] == "<proof>"
         # Position is on line 2 (0-indexed: the `exact 0.` line);
-        # the column is set by coqc and may shift across Rocq versions.
+        # the column is set by rocq c and may shift across Rocq versions.
         assert result["theorem"].startswith("@pos(2,")
         assert result["proof_finished"] is False
         # Hint must be rewritten when capture is actionable.
@@ -458,7 +458,7 @@ class TestCompileErrorStateWorkflow:
         assert m, f"theorem should be @pos(line,col), got {result['theorem']!r}"
         line = int(m.group(1))
         # The "exact 0." line of the second theorem is line 5 (0-indexed).
-        # Allow some flexibility for coqc reporting variance, but it must land
+        # Allow some flexibility for rocq c reporting variance, but it must land
         # in the broken theorem's body (line >= 4 = "Theorem broken : True.").
         assert line >= 4, (
             f"capture should land inside the failing second theorem; "
@@ -503,7 +503,7 @@ class TestCompileErrorStateWorkflow:
         assert result["file"] == "<proof>"
         # Capture must point on line 2 and *after* the prior `idtac.` so
         # the goal reflects the earlier successful tactic.  The exact
-        # column is coqc-reported and may shift across Rocq versions.
+        # column is compiler-reported and may shift across Rocq versions.
         m = re.match(r"@pos\((\d+),(\d+)\)", result["theorem"])
         assert m, f"theorem should be @pos(line,col), got {result['theorem']!r}"
         line, col = int(m.group(1)), int(m.group(2))
@@ -516,8 +516,8 @@ class TestCompileErrorStateWorkflow:
 
 
 @pytest.mark.skipif(
-    not (COQC_AVAILABLE and PET_AVAILABLE),
-    reason="coqc and pet required for Phase 2 verification",
+    not (COMPILER_AVAILABLE and PET_AVAILABLE),
+    reason="rocq c and pet required for Phase 2 verification",
 )
 class TestSharedDefsVerifyWorkflow:
     """End-to-end: Phase 2 shared-defs verification via pytanque toc."""
@@ -818,7 +818,7 @@ class TestQueryStepWorkflow:
 class TestMiniF2FSample:
     """Test with a real miniF2F problem if the workspace is available."""
 
-    @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+    @pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
     def test_real_problem_compile(self):
         """Compile a real miniF2F problem statement (expect Admitted to fail)."""
         ws_path = os.environ.get("MINIF2F_WORKSPACE")
@@ -839,6 +839,6 @@ class TestMiniF2FSample:
         source = problem_path.read_text()
 
         # The problem file likely ends with Admitted, so compilation should
-        # succeed (Admitted is accepted by coqc). We just verify no crash.
+        # succeed (Admitted is accepted by rocq c). We just verify no crash.
         result = _call_rocq_compile(source=source, workspace=str(ws))
         assert "success" in result

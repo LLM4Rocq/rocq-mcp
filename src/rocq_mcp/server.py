@@ -33,7 +33,11 @@ from fastmcp.server.lifespan import lifespan
 
 ROCQ_WORKSPACE: str = os.environ.get("ROCQ_WORKSPACE", os.getcwd())
 _ROCQ_WORKSPACE_EXPLICIT: bool = "ROCQ_WORKSPACE" in os.environ
-ROCQ_COQC_TIMEOUT: int = int(os.environ.get("ROCQ_COQC_TIMEOUT", "60"))
+ROCQ_COMPILE_TIMEOUT: int = int(
+    os.environ.get("ROCQ_COMPILE_TIMEOUT")
+    # Legacy name of this variable; kept so existing configs keep working.
+    or os.environ.get("ROCQ_COQC_TIMEOUT", "60")
+)
 ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
 ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
 ROCQ_QUERY_TIMEOUT_CAP: int = int(os.environ.get("ROCQ_QUERY_TIMEOUT_CAP", "300"))
@@ -102,7 +106,7 @@ def _check_pet_availability() -> str | None:
     """Return a warning message when pet (pytanque + ``pet`` binary) is missing.
 
     The interactive tools and the multi-error / state-capture enrichment on
-    ``rocq_compile_file`` all route through pet.  Falling back to coqc-only
+    ``rocq_compile_file`` all route through pet.  Falling back to compiler-only
     operation is a substantial reduction in capability, so the operator
     deserves an up-front signal at server boot rather than discovering it
     only when an agent dispatches the first interactive tool call and gets
@@ -172,10 +176,10 @@ _COMPILE_MULTI_ERROR_TIMEOUT: float = float(
 
 # When True (default) and the compiled file lives in a dune project,
 # ``rocq_compile_file`` builds via ``dune build`` so the ``.vo`` lands in
-# ``_build/default/…`` instead of shadowing the source tree; the coqc
+# ``_build/default/…`` instead of shadowing the source tree; the rocq c
 # fallback (scratch files, ``vos``/``timing`` modes) redirects its output
 # there too via ``-o``.  Set ``ROCQ_DUNE_BUILD=0`` to force the legacy
-# coqc-into-source-tree behavior everywhere.
+# compiler-into-source-tree behavior everywhere.
 _DUNE_BUILD_ENABLED: bool = os.environ.get("ROCQ_DUNE_BUILD", "1") != "0"
 
 # ---------------------------------------------------------------------------
@@ -212,7 +216,7 @@ async def app_lifespan(server: Any) -> Any:
         ws = state.get("workspace")
         if ws:
             cache_file = Path(ws) / f"rocq_mcp_cache_{os.getpid()}_.v"
-            _cleanup_coqc_artifacts(str(cache_file))
+            _cleanup_compiler_artifacts(str(cache_file))
 
 
 mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
@@ -221,9 +225,9 @@ mcp = FastMCP("rocq-mcp", lifespan=app_lifespan)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-# Full set of artifacts cleaned around coqc invocations on temp files
-# (see :func:`_cleanup_coqc_artifacts`).  The user-file path in
-# :func:`rocq_mcp.compile._run_coqc_file` consumes this set too but
+# Full set of artifacts cleaned around rocq c invocations on temp files
+# (see :func:`_cleanup_compiler_artifacts`).  The user-file path in
+# :func:`rocq_mcp.compile._run_compiler_file` consumes this set too but
 # additionally honours ``keep_vo=True`` via the ``_VO_FAMILY`` subset
 # defined alongside that helper in ``compile.py``.
 _CLEANUP_EXTENSIONS: tuple[str, ...] = (
@@ -285,8 +289,8 @@ def _resolve_call_timeout(
     return float(min(timeout, ROCQ_QUERY_TIMEOUT_CAP)), clamped
 
 
-def _cleanup_coqc_artifacts(tmp_path: str) -> None:
-    """Remove all coqc output artifacts for a temp file."""
+def _cleanup_compiler_artifacts(tmp_path: str) -> None:
+    """Remove all rocq c output artifacts for a temp file."""
     base = Path(tmp_path).with_suffix("")
     for ext in _CLEANUP_EXTENSIONS:
         base.with_suffix(ext).unlink(missing_ok=True)
@@ -294,8 +298,8 @@ def _cleanup_coqc_artifacts(tmp_path: str) -> None:
 
 # Allowlisted -arg values for _CoqProject / _RocqProject parsing.
 # Only exact matches or prefix matches are allowed; everything else is
-# silently dropped to prevent coqc flag injection (e.g. -load-vernac-source).
-_SAFE_COQC_ARGS: frozenset[str] = frozenset(
+# silently dropped to prevent rocq c flag injection (e.g. -load-vernac-source).
+_SAFE_COMPILER_ARGS: frozenset[str] = frozenset(
     {
         "-noinit",
         "-indices-matter",
@@ -310,13 +314,13 @@ _SAFE_COQC_ARGS: frozenset[str] = frozenset(
         "-native-compiler no",
     }
 )
-_SAFE_COQC_ARG_PREFIXES: tuple[str, ...] = ("-w ",)
+_SAFE_COMPILER_ARG_PREFIXES: tuple[str, ...] = ("-w ",)
 
 
 def _is_safe_arg(value: str) -> bool:
     """Check if an -arg value is in the allowlist."""
-    return value in _SAFE_COQC_ARGS or any(
-        value.startswith(p) for p in _SAFE_COQC_ARG_PREFIXES
+    return value in _SAFE_COMPILER_ARGS or any(
+        value.startswith(p) for p in _SAFE_COMPILER_ARG_PREFIXES
     )
 
 
@@ -830,8 +834,8 @@ def _parse_dune_args(
 ) -> tuple[list[str], list[str]]:
     """Parse a flat list of ``dune {coq,rocq} top`` args, deduping by semantic key.
 
-    Returns ``(coqc_flags, rocqproject_lines)`` -- the first is what
-    we hand to ``coqc``; the second is what we write to ``_RocqProject``
+    Returns ``(compiler_flags, rocqproject_lines)`` -- the first is what
+    we hand to ``rocq c``; the second is what we write to ``_RocqProject``
     so coq-lsp picks up the same load paths.
 
     Dedup keys: ``(-Q|-R, dir, name)`` / ``(-I, dir)`` / ``(-w, spec)`` /
@@ -877,7 +881,7 @@ def _parse_dune_args(
 
 
 def _parse_dune_flags(ws: Path) -> list[str] | None:
-    """Extract coqc flags from a dune project via ``dune {coq,rocq} top``.
+    """Extract rocq c flags from a dune project via ``dune {coq,rocq} top``.
 
     If a ``dune-project`` file exists in *ws* (or a parent), discovers
     every ``(coq.theory ...)`` / ``(rocq.theory ...)`` directory under
@@ -890,18 +894,18 @@ def _parse_dune_flags(ws: Path) -> list[str] | None:
     silently broken.
 
     On success, writes a ``_RocqProject`` file in *ws* so that both
-    coqc and coq-lsp (interactive tools) use the correct load paths.
+    rocq c and coq-lsp (interactive tools) use the correct load paths.
     Existing user-created ``_RocqProject`` or ``_CoqProject`` files
     are never overwritten.  The generated file stays in the workspace
     and should be added to ``.gitignore``.
 
-    Returns a list of coqc flags, or ``None`` if dune detection fails
+    Returns a list of rocq c flags, or ``None`` if dune detection fails
     (no dune-project, no .v files, dune not installed, etc.).
 
     Security: paths are validated to stay within the dune project root
     (the directory containing ``dune-project``).  Absolute paths outside
     the project root (e.g. system stdlib) are silently dropped since
-    coqc already knows about them.  Accepted absolute paths are
+    rocq c already knows about them.  Accepted absolute paths are
     converted to relative paths (relative to *ws*) in the generated
     ``_RocqProject``.
     """
@@ -935,13 +939,13 @@ def _parse_dune_flags(ws: Path) -> list[str] | None:
         try:
             (ws / "_RocqProject").write_text(_DUNE_HEADER + "\n".join(lines) + "\n")
         except OSError:
-            pass  # Non-fatal: coqc tools still work via returned flags.
+            pass  # Non-fatal: rocq c tools still work via returned flags.
 
     return flags
 
 
 def _parse_project_flags(ws: Path) -> list[str]:
-    """Parse _RocqProject or _CoqProject and return coqc flags.
+    """Parse _RocqProject or _CoqProject and return rocq c flags.
 
     Looks for ``_RocqProject`` first, then ``_CoqProject`` as fallback.
     If neither exists, tries to detect a dune project via
@@ -954,7 +958,7 @@ def _parse_project_flags(ws: Path) -> list[str]:
 
     Security:
     - ``-arg`` values are checked against an allowlist to prevent
-      coqc flag injection (e.g. ``-load-vernac-source``).
+      rocq c flag injection (e.g. ``-load-vernac-source``).
     - Directory paths in ``-Q``/``-R``/``-I`` are validated to stay
       within the workspace (``../`` escapes rejected; absolute paths
       rejected unless under ``$OPAM_SWITCH_PREFIX/lib/coq``).
@@ -1375,14 +1379,14 @@ def _resolve_tool_envelope(
 ) -> dict[str, Any] | tuple[str, dict[str, Any] | None, str | None, bool, float | None]:
     """Resolve the shared envelope steps for ``@mcp.tool`` wrappers.
 
-    Runs the boilerplate every pet-routed / coqc-routed wrapper repeats:
+    Runs the boilerplate every pet-routed / compiler-routed wrapper repeats:
 
     1. ctx-check first — for pet-routed tools, a missing context is a
        programmer error and is reported as the no-ctx envelope without
        touching the workspace (``_no_ctx_fail``).  Pins the order so a
        bad workspace + no-ctx caller gets the no-ctx envelope, not a
        silent validation failure that ``recent_errors`` never sees.
-       Coqc-routed tools (``rocq_compile`` / ``rocq_compile_file`` /
+       Rocq c-routed tools (``rocq_compile`` / ``rocq_compile_file`` /
        ``rocq_verify``) pass ``ctx_optional=True``: they can run without
        an MCP context — ``lifespan_state`` falls through as ``None`` and
        the ``recent_errors`` recording is silently skipped.
@@ -1844,7 +1848,7 @@ async def rocq_compile(
     include_warnings: bool = True,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Compile a finished .v file via coqc.
+    """Compile a finished .v file via rocq c.
 
     For *scratch iteration* on a single proof, prefer the interactive tools:
 
@@ -1855,7 +1859,7 @@ async def rocq_compile(
       state and reports which succeeded.
 
     Use ``rocq_compile`` for finished proofs, axiom audits, and final
-    verification — coqc reloads all imports per call (often several
+    verification — rocq c reloads all imports per call (often several
     seconds on heavy library imports).
 
     On failure, the result includes ``error_positions`` and a ``hint``.
@@ -1882,7 +1886,7 @@ async def rocq_compile(
     Args:
         source: Complete Rocq (.v) file content to compile.
         workspace: Directory to use as workspace (default: ROCQ_WORKSPACE env var).
-        timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+        timeout: Compilation timeout in seconds (default: ROCQ_COMPILE_TIMEOUT env var).
         include_warnings: If True (default), include deduplicated warnings
             before the error in the output.  Set to False to get only the
             error diagnostic, which keeps context compact.
@@ -1895,7 +1899,7 @@ async def rocq_compile(
         ctx=ctx,
         workspace=workspace,
         timeout=timeout,
-        timeout_default=ROCQ_COQC_TIMEOUT,
+        timeout_default=ROCQ_COMPILE_TIMEOUT,
         ctx_optional=True,
     )
     if not isinstance(resolved, tuple):
@@ -1928,7 +1932,7 @@ async def rocq_compile_file(
     timing: bool = False,
     ctx: Context = None,
 ) -> dict[str, Any]:
-    """Compile a finished .v file on disk via coqc.
+    """Compile a finished .v file on disk via rocq c.
 
     For *scratch iteration* on a single proof, prefer the interactive tools:
 
@@ -1939,7 +1943,7 @@ async def rocq_compile_file(
       state and reports which succeeded.
 
     Use ``rocq_compile_file`` for whole-file verification, axiom audits,
-    and final compile — coqc reloads all imports per call (often several
+    and final compile — rocq c reloads all imports per call (often several
     seconds on heavy library imports).  Preferred over ``rocq_compile``
     for large files because the source stays on disk (avoids transmitting
     the full text through the MCP transport).
@@ -1970,7 +1974,7 @@ async def rocq_compile_file(
     by walking the file through pet (one entry per failing chunk).
     Each entry is ``{proof_name, kind, start_line, end_line, code,
     message}``.  Complements ``error_positions`` — the latter is
-    coqc's raw parse of the first diagnostic, while ``errors`` is
+    rocq c's raw parse of the first diagnostic, while ``errors`` is
     pet's structured walk of the whole file.  The walk stops at the
     first top-level / inter-chunk error (a broken ``Require`` /
     ``Import`` / ``Notation``) rather than emitting the downstream
@@ -1979,7 +1983,7 @@ async def rocq_compile_file(
     accumulate.
     The field may be
     *present and empty* (``errors: []``) when the walker ran but pet
-    did not reproduce the coqc-reported failure — treat this as "no
+    did not reproduce the compiler-reported failure — treat this as "no
     additional errors found" rather than "no errors at all."  Absent
     on success, when coq-lsp is unavailable, when the walker could
     not run, and when ``ROCQ_COMPILE_MULTI_ERROR_CAP=0`` (feature
@@ -1992,14 +1996,14 @@ async def rocq_compile_file(
     instead of next to the source, so it never shadows a pre-built artifact
     in the source tree.  Full-mode files that are part of a
     stanza build via ``dune build``; scratch files and ``vos``/``timing``
-    modes compile with coqc redirected (``-o``) into the same
+    modes compile with rocq c redirected (``-o``) into the same
     ``_build/default`` path.  In this mode the ``.vo`` is always retained in
     ``_build`` (usable by sibling ``Require``s once the workspace's load
     path points there — see the dune load-path note under *Prerequisites*),
     so ``keep_vo`` has no effect.  When ``dune build`` cannot build a file
     (it is not part of a stanza), the response carries a
-    ``dune_build_warning`` string noting that coqc was used instead.  Set
-    ``ROCQ_DUNE_BUILD=0`` to force the legacy coqc-into-source-tree behavior.
+    ``dune_build_warning`` string noting that rocq c was used instead.  Set
+    ``ROCQ_DUNE_BUILD=0`` to force the legacy compiler-into-source-tree behavior.
 
     Outside a dune project, compilation artifacts
     (``.vo``/``.vok``/``.vos``/``.glob``/``.aux``) are cleaned up by
@@ -2029,12 +2033,12 @@ async def rocq_compile_file(
             up from *file* looking for ``_RocqProject`` / ``_CoqProject`` /
             ``dune-project``; falls back to the ``ROCQ_WORKSPACE`` env var
             (default: cwd).
-        timeout: Compilation timeout in seconds (default: ROCQ_COQC_TIMEOUT env var).
+        timeout: Compilation timeout in seconds (default: ROCQ_COMPILE_TIMEOUT env var).
         include_warnings: If True (default), include deduplicated warnings
             before the error in the output.  Set to False to get only the
             error diagnostic, which keeps context compact.
         keep_vo: If True, preserve the ``.vo``/``.vok``/``.vos`` outputs
-            after coqc returns (diagnostic artifacts are still cleaned).
+            after rocq c returns (diagnostic artifacts are still cleaned).
             Default False matches today's "clean everything but the
             source" behavior.  Useful when a sibling file in the same
             workspace will ``Require Import`` the result.  **No-op in a
@@ -2047,9 +2051,9 @@ async def rocq_compile_file(
             library ... (while searching for a .vos file)"`` — use
             ``mode="full" keep_vo=True`` when the sibling consumer
             expects a ``.vo``.
-        mode: Which coqc pass to run.  ``"full"`` (default) is today's
-            behavior — coqc fully elaborates every proof body.  ``"vos"``
-            adds ``-vos`` so coqc *skips proof bodies entirely* — it
+        mode: Which rocq c pass to run.  ``"full"`` (default) is today's
+            behavior — rocq c fully elaborates every proof body.  ``"vos"``
+            adds ``-vos`` so rocq c *skips proof bodies entirely* — it
             does NOT execute them.  ``"vos"`` is fast and catches
             missing imports, statement type errors, holes left in
             statements, and notation conflicts.  It does NOT validate
@@ -2057,13 +2061,13 @@ async def rocq_compile_file(
             passes under ``"vos"``.  Use it as a cheap pre-pass during
             iteration, then run ``"full"`` for the real check.
             ``"vos"`` produces a ``.vos`` artifact rather than a ``.vo``.
-        timing: If True, invoke coqc with ``-time`` and attach a
+        timing: If True, invoke rocq c with ``-time`` and attach a
             ``timing`` field to the response with per-sentence
             diagnostics — ``{"total_sentences": int, "top_slowest":
             list[{line, characters, name, duration_seconds}],
             "last_completed": {...} | None}``.  ``top_slowest`` holds
             up to 5 entries sorted by descending duration.  On
-            timeout, ``last_completed`` is the final sentence coqc
+            timeout, ``last_completed`` is the final sentence rocq c
             finished and the ``error`` string names it so "timed out
             after 590s" becomes "Last completed sentence: line 221
             [Theorem.foo] (15.3s)."  On a successful compile,
@@ -2082,7 +2086,7 @@ async def rocq_compile_file(
     list when ``pet`` is available (see the Multi-error callout in the
     README); ``vo_rebuild_warning`` when the call rewrites ``.vo``
     artifacts in a workspace with active sessions; ``dune_build_warning``
-    when a dune project file could not be built by ``dune build`` and coqc
+    when a dune project file could not be built by ``dune build`` and rocq c
     was used instead (see the dune paragraph above); ``clamped_timeout``
     when the per-call timeout was clamped by ``ROCQ_QUERY_TIMEOUT_CAP``;
     ``timing`` when ``timing=True``.
@@ -2096,7 +2100,7 @@ async def rocq_compile_file(
         workspace=workspace,
         file=file,
         timeout=timeout,
-        timeout_default=ROCQ_COQC_TIMEOUT,
+        timeout_default=ROCQ_COMPILE_TIMEOUT,
         ctx_optional=True,
     )
     if not isinstance(resolved, tuple):
@@ -2555,7 +2559,7 @@ async def rocq_start(
        position returned by rocq_compile.
     3. From imports: preamble — set up an import context only.
        **Preferred for scratch iteration** (no project files needed,
-       preferred over ``coqc /tmp/foo.v``): call
+       preferred over ``rocq c /tmp/foo.v``): call
        ``rocq_start(preamble='Require Import ...')`` once, then iterate
        with rocq_check / rocq_step_multi against the returned state_id.
        The import set is content-hashed and warm across iterations even
@@ -2905,7 +2909,7 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
     """Health check: is the server OK, and which Rocq/opam switch is it on?
 
     Call this first when something looks wrong (e.g. a proof that built
-    yesterday now fails, or ``coqc`` behaves like a different version than
+    yesterday now fails, or ``rocq c`` behaves like a different version than
     your shell) — an MCP server inherits its ``PATH`` / opam environment
     from whatever launched it, which can differ from your interactive
     shell.  This tool reports the toolchain the server *actually* resolves.
@@ -2916,9 +2920,9 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
 
     Response shape:
 
-    - ``ok``: ``True`` when ``coqc`` resolves on ``PATH`` (the server can
+    - ``ok``: ``True`` when ``rocq c`` resolves on ``PATH`` (the server can
       do its core job).  Interactive capability is reported separately under
-      ``toolchain.pet`` so a coqc-only deployment still reads as healthy.
+      ``toolchain.pet`` so a compiler-only deployment still reads as healthy.
     - ``server_version``: the rocq-mcp package version.
     - ``switch``: the active switch name (e.g. ``"rocq9"``), or the project
       path for a local ``_opam`` switch, or ``None`` for a non-opam install.
@@ -2927,14 +2931,14 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
     - ``switch_is_local``: ``True`` for a project-local (``_opam``) switch.
     - ``switch_source``: how the switch was determined — ``"opam_env"``
       (from ``$OPAM_SWITCH_PREFIX``, authoritative), ``"binary_path"``
-      (inferred from the resolved ``coqc`` path), or ``"unknown"``
+      (inferred from the resolved ``rocq c`` path), or ``"unknown"``
       (non-opam / unrecognised layout).
-    - ``toolchain``: ``{coqc: {path, version}, pet: {path, version,
+    - ``toolchain``: ``{compiler: {path, version}, pet: {path, version,
       pytanque_importable}}`` — the binaries the server resolves and their
       versions (``None`` when a binary is missing).
     - ``pet``: ``{running, pid}`` — whether the pet subprocess is currently
       live (not spawned by this call).
-    - ``warnings``: human-readable notes (missing ``coqc`` / ``pet`` /
+    - ``warnings``: human-readable notes (missing ``rocq c`` / ``pet`` /
       pytanque, or a switch that could not be identified).
 
     To change switch, see ``rocq_switch`` — and note the caveats there:
@@ -2943,7 +2947,7 @@ async def rocq_health(ctx: Context = None) -> dict[str, Any]:
     """
     if ctx is None:
         return _no_ctx_fail("rocq_health")
-    # build_health_snapshot probes `coqc --print-version` / `pet --version`
+    # build_health_snapshot probes `rocq --print-version` / `pet --version`
     # via subprocess; run off the event-loop thread.
     return await asyncio.to_thread(build_health_snapshot, ctx.lifespan_context)
 
@@ -2960,7 +2964,7 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
     Resolves *name* via ``opam env --switch <name> --set-switch``, applies
     the resulting environment to the live server process, and kills the pet
     subprocess so the next pet-routed call respawns under the new switch.
-    Subsequent ``coqc`` invocations resolve the new switch's binary too.
+    Subsequent ``rocq c`` invocations resolve the new switch's binary too.
 
     **This is a sharp tool — read before use:**
 

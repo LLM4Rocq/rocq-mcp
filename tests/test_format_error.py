@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rocq_mcp.compile import _format_error, _parse_coqc_error_positions
+from rocq_mcp.compile import _format_error, _parse_compiler_error_positions
 
 
 class TestFormatError:
@@ -47,7 +47,7 @@ class TestFormatError:
 
     def test_no_structured_location_fallback(self):
         proof = "some proof"
-        stderr = 'Failed to run coqc on "/tmp/tmpABCDEF.v": not found'
+        stderr = 'Failed to run rocq c on "/tmp/tmpABCDEF.v": not found'
         result = _format_error(stderr, proof)
         assert "<proof>" in result
         assert "tmpABCDEF" not in result
@@ -240,14 +240,14 @@ class TestFormatError:
         assert "Some other context line" in result
 
     def test_include_warnings_false_unstructured_keeps_real_errors(self):
-        """A non-located coqc error (e.g. missing binary) still surfaces."""
-        stderr = "/usr/local/bin/coqc: command not found\n"
+        """A non-located rocq c error (e.g. missing binary) still surfaces."""
+        stderr = "/usr/local/bin/rocq: command not found\n"
         result = _format_error(stderr, "proof", include_warnings=False)
         assert "command not found" in result
 
 
-class TestParseCoqcErrorPositions:
-    """Test _parse_coqc_error_positions warning filtering."""
+class TestParseCompilerErrorPositions:
+    """Test _parse_compiler_error_positions warning filtering."""
 
     STDERR = (
         'File "/tmp/tmp.v", line 1, characters 0-5:\n'
@@ -257,13 +257,13 @@ class TestParseCoqcErrorPositions:
     )
 
     def test_default_includes_warnings(self):
-        positions = _parse_coqc_error_positions(self.STDERR)
+        positions = _parse_compiler_error_positions(self.STDERR)
         assert len(positions) == 2
         kinds = [p["message"].split(":", 1)[0] for p in positions]
         assert "Warning" in kinds
         assert "Error" in kinds
 
     def test_include_warnings_false_filters_warnings(self):
-        positions = _parse_coqc_error_positions(self.STDERR, include_warnings=False)
+        positions = _parse_compiler_error_positions(self.STDERR, include_warnings=False)
         assert len(positions) == 1
         assert positions[0]["message"].startswith("Error:")

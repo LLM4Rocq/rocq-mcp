@@ -267,7 +267,7 @@ def collect_file_errors(
 
     Returns:
         * ``None`` if the initial state cannot be obtained — the caller
-          should fall back to a coqc-only first-error report.
+          should fall back to a compiler-only first-error report.
         * ``[]`` if the walker found no errors.
         * ``list[ProofError]`` when errors were found.
 
@@ -339,8 +339,8 @@ def collect_file_errors(
             # ``Require``, ``Import``, ``Notation`` …) changes the
             # environment for everything after it, so subsequent chunks fail
             # with cascade "reference/library not found" errors that bury the
-            # real cause.  Stop here — coqc's own first-error report
-            # (``error_positions``) already carries it, and matching coqc's
+            # real cause.  Stop here — rocq c's own first-error report
+            # (``error_positions``) already carries it, and matching rocq c's
             # fail-fast keeps ``errors`` to the genuine problem.
             if chunk.kind in _TOP_LEVEL_KINDS:
                 break

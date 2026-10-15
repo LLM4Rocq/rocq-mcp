@@ -9,13 +9,14 @@ import pytest
 
 # Ensure the full module graph is loaded (resolves circular import between
 # server.py and interactive.py) before any test imports individual symbols.
-import rocq_mcp.server  # noqa: F401
+import rocq_mcp.server
 
 # ---------------------------------------------------------------------------
 # Availability flags
 # ---------------------------------------------------------------------------
 
-COQC_AVAILABLE: bool = shutil.which("coqc") is not None
+# Follows the compiler the server actually runs (``rocq c`` or ``coqc``).
+COQC_AVAILABLE: bool = shutil.which(rocq_mcp.server._compiler_argv()[0]) is not None
 PET_AVAILABLE: bool = shutil.which("pet") is not None
 
 

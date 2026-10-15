@@ -28,14 +28,15 @@ jobs:
             ~/.opam
             ~/.cache/opam
             _opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-rocq-v2
-          restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-rocq-v2
-
+          key: ocaml-deps-${{ runner.os }}-5.2.x-${{ hashFiles('.github/opam-packages.txt') }}
+          
       - name: Install Rocq dependencies
         if: steps.cache-ocaml.outputs.cache-hit != 'true'
         run: |
-          opam install -y rocq-prover coq-lsp
+          # coq-core provides the ``coqc`` binary (a compatibility package
+          # since the Rocq renaming); rocq-prover alone does not install it.
+          # The package list also keys the cache: edit it to refresh.
+          xargs opam install -y < .github/opam-packages.txt
 
   test:
     needs: setup-ocaml
@@ -81,9 +82,14 @@ jobs:
             ~/.opam
             ~/.cache/opam
             _opam
-          key: ocaml-deps-${{ runner.os }}-5.2.x-rocq-v2
-          restore-keys: |
-            ocaml-deps-${{ runner.os }}-5.2.x-rocq-v2
+          key: ocaml-deps-${{ runner.os }}-5.2.x-${{ hashFiles('.github/opam-packages.txt') }}
+          
+      - name: Verify Rocq toolchain
+        # Fail fast: a missing coqc silently skips ~200 tests otherwise.
+        run: |
+          eval $(opam env)
+          coqc --version
+          pet --version || command -v pet
 
       - name: Run tests
         run: |

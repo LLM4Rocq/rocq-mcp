@@ -1,6 +1,6 @@
 """Tests for rocq_verify tool and verification helpers in verify.py.
 
-Part A: Unit tests for verify.py helpers (NO coqc needed)
+Part A: Unit tests for verify.py helpers (NO rocq c needed)
     - TestCleanProblemStatement
     - TestAxiomClassification
     - TestParseAssumptionsCategorizedLists
@@ -20,7 +20,7 @@ Part A: Unit tests for verify.py helpers (NO coqc needed)
     - TestParseCheckType
     - TestNormalizeTypeForComparison
 
-Part B: Integration tests for rocq_verify (require coqc)
+Part B: Integration tests for rocq_verify (require rocq c)
     - TestVerifySuccess
     - TestVerifyRejection
     - TestVerifyInputValidation
@@ -36,7 +36,7 @@ import glob as glob_mod
 
 import pytest
 
-from tests.conftest import COQC_AVAILABLE
+from tests.conftest import COMPILER_AVAILABLE
 from rocq_mcp.verify import (
     _check_forbidden_commands,
     _clean_problem_statement,
@@ -61,7 +61,7 @@ from rocq_mcp.verify import (
 )
 
 # =========================================================================
-# PART A: Unit tests (no coqc needed)
+# PART A: Unit tests (no rocq c needed)
 # =========================================================================
 
 
@@ -2163,7 +2163,7 @@ class TestBuildDirectTypeCheckSource:
 
 
 class TestParseCheckType:
-    """Test parsing Check output from coqc stdout."""
+    """Test parsing Check output from rocq c stdout."""
 
     def test_single_line(self):
         stdout = "@t : True\n"
@@ -2306,15 +2306,15 @@ class TestNormalizeTypeForComparison:
 
 
 # =========================================================================
-# PART B: Integration tests (require coqc)
+# PART B: Integration tests (require rocq c)
 # =========================================================================
 
 # We import rocq_verify at the top level so monkeypatch tests work,
-# but skip all integration classes if coqc is not available.
+# but skip all integration classes if rocq c is not available.
 from rocq_mcp.server import rocq_verify  # noqa: E402
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestVerifySuccess:
     """Valid proofs that should pass verification."""
 
@@ -2396,7 +2396,7 @@ class TestVerifySuccess:
         assert result["success"] is True
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestVerifyRejection:
     """Proofs that must be REJECTED by verification."""
 
@@ -2501,7 +2501,7 @@ class TestVerifyRejection:
         assert result["success"] is False
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestVerifyInputValidation:
     """Input validation checks."""
 
@@ -2587,7 +2587,7 @@ class TestVerifyInputValidation:
         assert result["success"] is False
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestVerifyCleanup:
     """Verification should not leave temp files behind."""
 
@@ -2624,7 +2624,7 @@ class TestVerifyCleanup:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestVerifyEnvelopeContract:
     """rocq_verify must emit the same {success, error, reason, ...}
     envelope as every other tool — never the legacy {verified} shape."""
@@ -2808,15 +2808,15 @@ class TestVerifyEnvelopeContract:
 
 
 # ---------------------------------------------------------------------------
-# Shared-defs integration tests (Phase 2 template + coqc)
+# Shared-defs integration tests (Phase 2 template + rocq c)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestSharedDefsIntegration:
-    """Test the shared-defs verification template against real coqc.
+    """Test the shared-defs verification template against real rocq c.
 
-    These tests exercise the Phase 2 template builder + coqc compilation
+    These tests exercise the Phase 2 template builder + rocq c compilation
     directly, without requiring pytanque (no ctx needed).
     """
 
@@ -2849,11 +2849,11 @@ class TestSharedDefsIntegration:
             "Proof. destruct c; reflexivity. Qed.\n"
         )
         source = build_shared_defs_verification_source(proof, "foo", structure)
-        # Actually compile it with coqc
-        from rocq_mcp.compile import _run_coqc
+        # Actually compile it with rocq c
+        from rocq_mcp.compile import _run_compiler
 
-        result = _run_coqc(source, "/tmp", 60)
-        assert result["returncode"] == 0, f"coqc failed: {result['stderr']}"
+        result = _run_compiler(source, "/tmp", 60)
+        assert result["returncode"] == 0, f"rocq c failed: {result['stderr']}"
         assert (
             "Closed under the global context" in result["stdout"]
             or "Axioms" not in result["stdout"]
@@ -2888,9 +2888,9 @@ class TestSharedDefsIntegration:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestDirectVerification:
-    """Test Phase 3 direct verification against real coqc.
+    """Test Phase 3 direct verification against real rocq c.
 
     Phase 3 compiles the proof as-is (no Module M), then verifies via
     Print Assumptions + Check type comparison.
@@ -3058,23 +3058,23 @@ class TestDirectVerification:
         assert result["verification_method"] == "module_m"
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestTimeoutFallbackToPhase3:
     """Phase 1/2 timeout should fall through to Phase 3.
 
     Uses monkeypatch to deterministically force Phase 1 timeout (the
     real-world scenario is compute-heavy proofs where Module M doubles
-    the work, e.g. mathd_numbertheory_543).  Phase 3 calls use real coqc.
+    the work, e.g. mathd_numbertheory_543).  Phase 3 calls use real rocq c.
     """
 
     async def test_phase1_timeout_triggers_phase3(self, workspace, monkeypatch):
         """When Phase 1 times out, Phase 3 should run and succeed."""
         import rocq_mcp.compile as _cpl
 
-        real_run_coqc = _cpl._run_coqc
+        real_run_compiler = _cpl._run_compiler
         call_count = 0
 
-        def mock_run_coqc(source, ws, timeout):
+        def mock_run_compiler(source, ws, timeout):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -3085,10 +3085,10 @@ class TestTimeoutFallbackToPhase3:
                     "stderr": "",
                     "timed_out": True,
                 }
-            # Phase 3 calls — delegate to real coqc
-            return real_run_coqc(source, ws, timeout)
+            # Phase 3 calls — delegate to real rocq c
+            return real_run_compiler(source, ws, timeout)
 
-        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_compiler", mock_run_compiler)
 
         proof = (
             "From Coq Require Import Arith.\n\n"
@@ -3119,14 +3119,14 @@ class TestTimeoutFallbackToPhase3:
         """Phase 1 times out, Phase 3 runs and catches cheating (custom axiom).
 
         Uses monkeypatch to force Phase 1 timeout deterministically,
-        then verifies Phase 3 catches the cheating proof via real coqc.
+        then verifies Phase 3 catches the cheating proof via real rocq c.
         """
         import rocq_mcp.compile as _cpl
 
-        real_run_coqc = _cpl._run_coqc
+        real_run_compiler = _cpl._run_compiler
         call_count = 0
 
-        def mock_run_coqc(source, ws, timeout):
+        def mock_run_compiler(source, ws, timeout):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -3137,9 +3137,9 @@ class TestTimeoutFallbackToPhase3:
                     "stderr": "",
                     "timed_out": True,
                 }
-            return real_run_coqc(source, ws, timeout)
+            return real_run_compiler(source, ws, timeout)
 
-        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_compiler", mock_run_compiler)
 
         proof = (
             "Axiom cheat : False.\n"
@@ -3161,7 +3161,7 @@ class TestTimeoutFallbackToPhase3:
         """When Phase 1 and Phase 3 both timeout, return Phase 1 timeout error."""
         import rocq_mcp.compile as _cpl
 
-        def mock_run_coqc(source, ws, timeout):
+        def mock_run_compiler(source, ws, timeout):
             return {
                 "returncode": -1,
                 "stdout": "",
@@ -3169,7 +3169,7 @@ class TestTimeoutFallbackToPhase3:
                 "timed_out": True,
             }
 
-        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_compiler", mock_run_compiler)
 
         result = await rocq_verify(
             proof="Theorem t : True. Proof. exact I. Qed.",
@@ -3184,10 +3184,10 @@ class TestTimeoutFallbackToPhase3:
         """Phase 1 times out, Phase 3 catches type mismatch (wrong statement)."""
         import rocq_mcp.compile as _cpl
 
-        real_run_coqc = _cpl._run_coqc
+        real_run_compiler = _cpl._run_compiler
         call_count = 0
 
-        def mock_run_coqc(source, ws, timeout):
+        def mock_run_compiler(source, ws, timeout):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -3198,9 +3198,9 @@ class TestTimeoutFallbackToPhase3:
                     "stderr": "",
                     "timed_out": True,
                 }
-            return real_run_coqc(source, ws, timeout)
+            return real_run_compiler(source, ws, timeout)
 
-        monkeypatch.setattr(_cpl, "_run_coqc", mock_run_coqc)
+        monkeypatch.setattr(_cpl, "_run_compiler", mock_run_compiler)
 
         # Proof proves 0 + n = n but problem expects n + 0 = n
         proof = (
@@ -3225,7 +3225,7 @@ class TestTimeoutFallbackToPhase3:
         assert "type mismatch" in result.get("error", "").lower()
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestAdmittedBanInDirectVerification:
     """Test that Admitted, admit, and give_up are banned in Phase 3."""
 
@@ -3272,7 +3272,7 @@ class TestAdmittedBanInDirectVerification:
             )
 
 
-@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+@pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 class TestAxiomBanInDirectVerification:
     """Test that axiom-introducing commands are banned in Phase 3.
 

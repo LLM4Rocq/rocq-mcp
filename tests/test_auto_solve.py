@@ -1,6 +1,6 @@
 """Tests for Rocq sentence utilities and interactive auto-solving via step_multi.
 
-Part A: Unit tests for helper functions (NO coqc/pet needed)
+Part A: Unit tests for helper functions (NO rocq c/pet needed)
     - TestFindSentenceEnd: _find_sentence_end sentence splitting
 
 Part B: Integration tests (require pet)
@@ -44,7 +44,7 @@ AUTO_TACTICS = [
 
 
 # =========================================================================
-# PART A: Unit tests (no coqc/pet needed)
+# PART A: Unit tests (no rocq c/pet needed)
 # =========================================================================
 
 

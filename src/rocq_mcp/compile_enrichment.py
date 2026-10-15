@@ -1,6 +1,6 @@
 """Compile-error-state orchestration.
 
-Wraps the coqc-only ``run_compile`` / ``run_compile_file`` from
+Wraps the compiler-only ``run_compile`` / ``run_compile_file`` from
 :mod:`rocq_mcp.compile` with best-effort PET state capture at the
 error position.  Lives in its own module (not in ``compile.py``) so
 that ``compile.py`` stays free of any pytanque dependency for its
@@ -24,7 +24,7 @@ from rocq_mcp.compile import (
 
 from rocq_mcp.proof_walk import ProofError, collect_file_errors
 
-# Cap on how long enrichment may spend per call.  Coqc has already returned
+# Cap on how long enrichment may spend per call.  Rocq c has already returned
 # the basic error by the time we reach this code, so a stuck pet must not
 # silently steal more than this from the agent.
 _ENRICHMENT_TIMEOUT_CAP: float = float(
@@ -166,7 +166,7 @@ async def _capture_compile_error_state(
             return {"status": "crashed", "state": None}
     finally:
         if temp_path is not None:
-            _server._cleanup_coqc_artifacts(temp_path)
+            _server._cleanup_compiler_artifacts(temp_path)
 
     if not isinstance(state_result, dict):
         return {"status": "crashed", "state": None}
@@ -279,7 +279,7 @@ async def run_compile_with_state(
         return result
     if result.get("success"):
         return result
-    # Record the coqc-level failure with the response's own reason
+    # Record the compiler-level failure with the response's own reason
     # (validation, compile_error, or timeout) before optional pet
     # enrichment.  Falls back to "compile_error" when the helper
     # couldn't classify (defensive — should not happen post-fix).
@@ -369,7 +369,7 @@ async def run_compile_file_with_state(
     """Async wrapper for run_compile_file that enriches failures with PET state.
 
     *keep_vo* is forwarded to :func:`run_compile_file` to preserve the
-    ``.vo``/``.vok``/``.vos`` outputs after a successful (or failed) coqc run.
+    ``.vo``/``.vok``/``.vos`` outputs after a successful (or failed) rocq c run.
 
     *mode* is forwarded to :func:`run_compile_file`.  ``"vos"`` selects the
     fast statements-only pre-pass; see ``rocq_compile_file`` for details.
@@ -382,7 +382,7 @@ async def run_compile_file_with_state(
     except (ValueError, FileNotFoundError):
         resolved_file = None
 
-    # Snapshot .vo mtimes around the coqc call so we can detect rewrites
+    # Snapshot .vo mtimes around the rocq c call so we can detect rewrites
     # that may invalidate cached dependency state held by sibling
     # interactive sessions in the same workspace.  Both snapshots use
     # the same helper; the before/after diff is the only signal.

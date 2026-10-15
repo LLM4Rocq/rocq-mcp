@@ -23,7 +23,7 @@ The feature is gated by:
 The ``errors`` key is present only on ``reason == "compile_error"``
 failures when a ``lifespan_state`` is supplied (pet available).
 
-Most tests require a live coqc + pet on PATH and skip otherwise;
+Most tests require a live rocq c + pet on PATH and skip otherwise;
 the file itself must import cleanly without rocq.
 """
 
@@ -34,15 +34,15 @@ from collections import deque
 import pytest
 
 from tests.conftest import (
-    COQC_AVAILABLE,
+    COMPILER_AVAILABLE,
     PET_AVAILABLE,
     _MockContext,
     make_lifespan_state,
 )
 
 pytestmark = pytest.mark.skipif(
-    not (COQC_AVAILABLE and PET_AVAILABLE),
-    reason="multi-error tests require coqc + pet on PATH",
+    not (COMPILER_AVAILABLE and PET_AVAILABLE),
+    reason="multi-error tests require rocq c + pet on PATH",
 )
 
 
@@ -517,7 +517,7 @@ class TestMultiErrorFallback:
 
     async def test_empty_errors_when_walker_finds_nothing(self, workspace, monkeypatch):
         """``errors`` may be present and empty when the walker ran but pet
-        did not reproduce the coqc failure.
+        did not reproduce the rocq c failure.
 
         Construct this by stubbing ``collect_file_errors`` to return an empty
         list — exercises the contract edge that the README and docstring
@@ -625,7 +625,7 @@ class TestMultiErrorEnvelopeContract:
         from rocq_mcp.server import rocq_compile_file
 
         # Forbidden command (Drop) triggers a validation reason before
-        # coqc ever runs.
+        # rocq c ever runs.
         path = workspace / "forbidden.v"
         path.write_text("Drop.\n")
 
@@ -679,7 +679,7 @@ class TestMultiErrorEnvelopeContract:
 
 
 # ---------------------------------------------------------------------------
-# Walker timeout budget (no coqc/pet needed — _run_with_pet is mocked)
+# Walker timeout budget (no rocq c/pet needed — _run_with_pet is mocked)
 # ---------------------------------------------------------------------------
 
 
@@ -689,7 +689,7 @@ class TestWalkerTimeoutBudget:
     takes effect instead of being silently clamped by the default ceiling
     (issue #29)."""
 
-    pytestmark = []  # override module coqc/pet skip
+    pytestmark = []  # override module rocq c/pet skip
 
     def _captured_timeout(self, tmp_path, monkeypatch, per_call, cap):
         import asyncio

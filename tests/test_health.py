@@ -191,6 +191,7 @@ def test_parse_opam_env_unescapes_single_quote():
 
 
 def test_build_health_snapshot_schema(monkeypatch):
+    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "coqc")
     monkeypatch.setattr(health, "_resolve_binary", lambda n: f"/sw/bin/{n}")
     monkeypatch.setattr(health, "_binary_version", lambda p, a: "ver")
     monkeypatch.setenv("OPAM_SWITCH_PREFIX", "/h/.opam/myswitch")
@@ -215,6 +216,7 @@ def test_build_health_snapshot_schema(monkeypatch):
 
 
 def test_build_health_snapshot_coqc_missing_is_not_ok(monkeypatch):
+    monkeypatch.setattr(_server, "ROCQ_COMPILER_BINARY", "coqc")
     monkeypatch.setattr(health, "_resolve_binary", lambda n: None)
     monkeypatch.setattr(health, "_binary_version", lambda p, a: None)
     snap = build_health_snapshot({"pet_client": None})

@@ -215,7 +215,7 @@ class TestCompileVerifyWorkflow:
         """rocq_compile resolves local imports via _CoqProject flags."""
         import subprocess
 
-        from rocq_mcp.server import rocq_compile, ROCQ_COQC_BINARY
+        from rocq_mcp.server import rocq_compile, _compiler_argv
 
         # Set up a mini project with a helper module
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
@@ -223,7 +223,7 @@ class TestCompileVerifyWorkflow:
 
         # Compile Helper.v directly with coqc to produce Helper.vo
         subprocess.run(
-            [ROCQ_COQC_BINARY, "-Q", ".", "TestProj", "Helper.v"],
+            [*_compiler_argv(), "-Q", ".", "TestProj", "Helper.v"],
             cwd=str(tmp_path),
             check=True,
         )
@@ -241,13 +241,13 @@ class TestCompileVerifyWorkflow:
         """rocq_verify works with local imports resolved via _CoqProject."""
         import subprocess
 
-        from rocq_mcp.server import rocq_compile, rocq_verify, ROCQ_COQC_BINARY
+        from rocq_mcp.server import rocq_compile, rocq_verify, _compiler_argv
 
         # Set up a mini project
         (tmp_path / "_CoqProject").write_text("-Q . TestProj\n")
         (tmp_path / "Helper.v").write_text("Definition my_const : nat := 42.\n")
         subprocess.run(
-            [ROCQ_COQC_BINARY, "-Q", ".", "TestProj", "Helper.v"],
+            [*_compiler_argv(), "-Q", ".", "TestProj", "Helper.v"],
             cwd=str(tmp_path),
             check=True,
         )

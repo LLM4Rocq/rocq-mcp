@@ -36,7 +36,7 @@ from rocq_mcp.verify import (
 )
 
 # Access server attributes through the module reference so that
-# monkeypatching ``rocq_mcp.server.ROCQ_COQC_BINARY`` (or _run_coqc,
+# monkeypatching ``rocq_mcp.server.ROCQ_COMPILER_BINARY`` (or _run_coqc,
 # etc.) in tests is visible here.  A bare ``from server import X``
 # would capture the value at import time, defeating monkeypatch.
 import rocq_mcp.server as _server
@@ -169,7 +169,7 @@ def _run_coqc_process(
         timed_out: bool
     """
     coqc_args: list[str] = [
-        _server.ROCQ_COQC_BINARY,
+        *_server._compiler_argv(),
         *_server._parse_project_flags(workspace),
     ]
     if mode == "vos":

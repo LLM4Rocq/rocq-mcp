@@ -1,3 +1,2 @@
 rocq-prover
-coq-core
 coq-lsp

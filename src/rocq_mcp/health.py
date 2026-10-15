@@ -210,7 +210,8 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     verdict and human-readable ``warnings``.  See ``rocq_health`` for the
     output schema.
     """
-    coqc_path = _resolve_binary(_server.ROCQ_COQC_BINARY)
+    compiler = _server._compiler_argv()
+    coqc_path = _resolve_binary(compiler[0])
     pet_path = _resolve_binary("pet")
 
     try:
@@ -229,8 +230,8 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     warnings: list[str] = []
     if coqc_path is None:
         warnings.append(
-            f"coqc binary {_server.ROCQ_COQC_BINARY!r} not found on PATH — "
-            "compilation tools will fail. Check the switch / ROCQ_COQC_BINARY."
+            f"compiler {compiler[0]!r} not found on PATH — "
+            "compilation tools will fail. Check the switch / ROCQ_COMPILER_BINARY."
         )
     if pet_path is None:
         warnings.append(

@@ -454,6 +454,26 @@ class TestParseProjectFlags:
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-w", "-notation-overridden"]
 
+    def test_arg_native_compiler_allowed(self, tmp_path):
+        """-arg -native-compiler <mode> is split into two coqc arguments."""
+        (tmp_path / "_CoqProject").write_text("-arg -native-compiler no\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-native-compiler", "no"]
+
+    def test_arg_native_compiler_next_line_allowed(self, tmp_path):
+        """Next-line form of -arg -native-compiler is accepted."""
+        (tmp_path / "_CoqProject").write_text("-arg\n-native-compiler ondemand\n")
+        flags = _parse_project_flags(tmp_path)
+        assert flags == ["-native-compiler", "ondemand"]
+
+    def test_arg_native_compiler_bad_value_rejected(self, tmp_path):
+        """Only the documented -native-compiler modes are accepted."""
+        (tmp_path / "_CoqProject").write_text(
+            "-arg -native-compiler no -load-vernac-source x.v\n"
+        )
+        flags = _parse_project_flags(tmp_path)
+        assert flags == []
+
     def test_arg_unknown_rejected(self, tmp_path):
         """Unknown -arg values are silently dropped."""
         (tmp_path / "_CoqProject").write_text("-arg -some-unknown-flag\n")

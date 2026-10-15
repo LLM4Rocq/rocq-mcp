@@ -282,6 +282,11 @@ _SAFE_COQC_ARGS: frozenset[str] = frozenset(
         "-allow-rewrite-rules",
         "-allow-sprop",
         "-cumulative-sprop",
+        # Per-workspace native-compiler policy, e.g. ``no`` when the
+        # build produced no .cmxs files (dune ``(mode vo)``).
+        "-native-compiler ondemand",
+        "-native-compiler yes",
+        "-native-compiler no",
     }
 )
 _SAFE_COQC_ARG_PREFIXES: tuple[str, ...] = ("-w ",)

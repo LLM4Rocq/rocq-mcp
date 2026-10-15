@@ -115,6 +115,93 @@ class TestDiagnosticHintWiredIntoCompileFile:
         assert diag, f"Expected diagnostic_hint, got: {result!r}"
         lower = diag.lower()
         assert any(
-            clue in lower
-            for clue in ("notaproject", "load path", "_coqproject", "-q")
+            clue in lower for clue in ("notaproject", "load path", "_coqproject", "-q")
         )
+
+
+def _coqc_failure(stderr: str) -> dict:
+    return {"returncode": 1, "stdout": "", "stderr": stderr, "timed_out": False}
+
+
+_HEADERLESS_LOAD_PATH = (
+    "Error: Cannot find a physical path bound to logical path Foo.Bar.\n"
+)
+_HEADED_LOAD_PATH = (
+    'File "Proof.v", line 1, characters 0-20:\n'
+    "Error: Cannot find a physical path bound to logical path Foo.Bar.\n"
+)
+
+
+class TestDiagnosticHintBothFailurePaths:
+    """``_build_compile_result`` has a structured and an unstructured
+    (header-less) failure return; both must carry the hint."""
+
+    def test_unstructured_fallback_path_gets_hint(self):
+        from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
+
+        res = _build_compile_result(_coqc_failure(_HEADERLESS_LOAD_PATH), "", 60, True)
+        assert res["reason"] == "compile_error"
+        assert "error_positions" not in res  # really the fallback path
+        assert "Foo.Bar" in res["diagnostic_hint"]
+        assert "hint" not in res
+
+    def test_structured_path_gets_hint_and_drops_recovery_hint(self):
+        from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
+
+        res = _build_compile_result(
+            _coqc_failure(_HEADED_LOAD_PATH), "Require Import Foo.Bar.\n", 60, True
+        )
+        assert "Foo.Bar" in res["diagnostic_hint"]
+        assert "hint" not in res
+
+    def test_proof_error_keeps_recovery_hint_only(self):
+        from rocq_mcp.compile import _build_compile_result  # noqa: PLC0415
+
+        stderr = 'File "Proof.v", line 1, characters 0-10:\nError: No such goal.\n'
+        res = _build_compile_result(_coqc_failure(stderr), "Qed.\n", 60, True)
+        assert "hint" in res
+        assert "diagnostic_hint" not in res
+
+
+class TestVersionMismatchWording:
+    @pytest.mark.parametrize(
+        "prelude", ["Coq.Init.Prelude", "Corelib.Init.Prelude", "Stdlib.Init.Prelude"]
+    )
+    def test_stdlib_prelude_points_at_toolchain_tools(self, prelude):
+        from rocq_mcp.compile import _diagnostic_hint_for_error  # noqa: PLC0415
+
+        err = (
+            "Error: Compiled library A (in file a.vo) makes inconsistent "
+            f"assumptions over library {prelude}"
+        )
+        hint = _diagnostic_hint_for_error(err)
+        assert "rocq_health" in hint and "rocq_switch" in hint
+
+    def test_other_library_says_rebuild_that_library(self):
+        from rocq_mcp.compile import _diagnostic_hint_for_error  # noqa: PLC0415
+
+        err = (
+            "Error: Compiled library A (in file a.vo) makes inconsistent "
+            "assumptions over library My.Dep"
+        )
+        hint = _diagnostic_hint_for_error(err)
+        assert "'My.Dep'" in hint
+        assert "install" not in hint.lower()
+        assert "rocq_switch" not in hint
+
+
+@pytest.mark.asyncio
+async def test_enrichment_merge_keeps_diagnostic_hint():
+    from rocq_mcp.compile_enrichment import _merge_compile_error_state  # noqa: PLC0415
+
+    result = {"success": False, "diagnostic_hint": "fix the load path"}
+    state = {
+        "state_id": 7,
+        "goals": ["g"],
+        "file": "f.v",
+        "theorem": "t",
+        "proof_finished": False,
+    }
+    merged = _merge_compile_error_state(result, state)
+    assert merged["diagnostic_hint"] == "fix the load path"
+    assert "hint" not in merged

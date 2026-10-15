@@ -170,10 +170,11 @@ When a tool returns `pet_restarted: True`, call `rocq_diag` for memory headroom 
 
 `rocq_compile` and `rocq_compile_file` attach a `diagnostic_hint: str` field to the failure envelope when the coqc error matches a known configuration failure pattern. Currently recognised:
 
-- **Missing load path** — `Cannot find a physical path bound to logical path X.` Indicates a missing `-Q` / `-R` entry in `_CoqProject` (or `_RocqProject`), or a workspace pointing at the wrong directory. The hint names the offending logical path and points at the project file.
-- **Coq version mismatch** — `Compiled library X makes inconsistent assumptions over library Coq.Init.Prelude.` Indicates that pet's coqc is from a different opam switch than the one that produced the workspace's `.vo` files. The hint suggests running `coqc --version` and either installing the matching Coq or rebuilding the dependencies.
+- **Missing load path** -- `Cannot find a physical path bound to logical path X.` Indicates a missing `-Q` / `-R` entry in `_CoqProject` (or `_RocqProject`), or a workspace pointing at the wrong directory. The hint names the offending logical path.
+- **Toolchain version mismatch** -- `Compiled library X makes inconsistent assumptions over library <Coq|Corelib>.Init.Prelude.` The coqc in use differs from the one that built the dependencies. The hint points at `rocq_health` / `rocq_switch`.
+- **Stale dependency** -- the same message over any other library `Y`. A `.vo` was built against a different version of `Y`; the hint says to rebuild `Y` and its dependents.
 
-`diagnostic_hint` complements the existing `hint` (which is *recovery* advice — use `rocq_start` at the error position). When both are present, `diagnostic_hint` typically tells the agent how to fix the underlying configuration so the proof effort can actually proceed; `hint` tells it how to inspect the failure point in the meantime.
+When a `diagnostic_hint` is present the recovery `hint` (re-open at the error position with `rocq_start`) is omitted, since it cannot fix a configuration error. The two fields are never both present. This holds whether or not coqc's output carried a `File "...", line` header.
 
 ### Concurrency model
 

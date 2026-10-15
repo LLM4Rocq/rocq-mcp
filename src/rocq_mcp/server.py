@@ -1839,6 +1839,10 @@ async def rocq_compile(
     seconds on heavy library imports).
 
     On failure, the result includes ``error_positions`` and a ``hint``.
+    When the error is a recognised configuration failure (missing
+    ``-Q``/``-R`` load path, ``.vo`` version skew) the result instead
+    carries a ``diagnostic_hint`` naming the offending library and the
+    setting to fix, and the recovery ``hint`` is omitted.
     When coq-lsp is available in the active MCP session, the result
     also includes ``state_capture_status``:
 
@@ -1921,6 +1925,10 @@ async def rocq_compile_file(
     the full text through the MCP transport).
 
     On failure, the result includes ``error_positions`` and a ``hint``.
+    When the error is a recognised configuration failure (missing
+    ``-Q``/``-R`` load path, ``.vo`` version skew) the result instead
+    carries a ``diagnostic_hint`` naming the offending library and the
+    setting to fix, and the recovery ``hint`` is omitted.
     When coq-lsp is available in the active MCP session, the result
     also includes ``state_capture_status``:
 

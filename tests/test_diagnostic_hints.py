@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import COQC_AVAILABLE
+
 
 def test_diagnostic_hint_for_missing_load_path():
     """``Cannot find a physical path bound to logical path X`` is a
@@ -90,6 +92,7 @@ def test_diagnostic_hint_for_empty_error_returns_none():
     assert _diagnostic_hint_for_error(None) is None  # type: ignore[arg-type]
 
 
+@pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
 class TestDiagnosticHintWiredIntoCompileFile:
     """Integration: ``rocq_compile_file`` should attach
     ``diagnostic_hint`` to the failure envelope when the coqc error

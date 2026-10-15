@@ -299,9 +299,26 @@ def _is_safe_arg(value: str) -> bool:
     )
 
 
+def _opam_coq_lib() -> Path | None:
+    """Return the resolved ``$OPAM_SWITCH_PREFIX/lib/coq``, or None if unset."""
+    prefix = os.environ.get("OPAM_SWITCH_PREFIX")
+    if not prefix:
+        return None
+    return (Path(prefix) / "lib" / "coq").resolve()
+
+
 def _check_path_containment(ws: Path, dir_arg: str) -> str | None:
-    """Resolve dir_arg relative to ws and return it if within ws, else None."""
+    """Resolve dir_arg relative to ws and return it if within ws, else None.
+
+    Absolute paths are rejected, except those inside the active opam
+    switch's Rocq library tree (``$OPAM_SWITCH_PREFIX/lib/coq``), where
+    opam installs Stdlib, mathcomp and other packages.  Projects that map
+    such libraries to logical names with ``-Q``/``-R`` need absolute paths.
+    """
     if os.path.isabs(dir_arg):
+        opam_lib = _opam_coq_lib()
+        if opam_lib is not None and _path_within(Path(dir_arg).resolve(), opam_lib):
+            return dir_arg
         return None
     if _path_within((ws / dir_arg).resolve(), ws.resolve()):
         return dir_arg
@@ -919,7 +936,8 @@ def _parse_project_flags(ws: Path) -> list[str]:
     - ``-arg`` values are checked against an allowlist to prevent
       coqc flag injection (e.g. ``-load-vernac-source``).
     - Directory paths in ``-Q``/``-R``/``-I`` are validated to stay
-      within the workspace (absolute paths and ``../`` escapes rejected).
+      within the workspace (``../`` escapes rejected; absolute paths
+      rejected unless under ``$OPAM_SWITCH_PREFIX/lib/coq``).
     """
     for name in ("_RocqProject", "_CoqProject"):
         proj = ws / name

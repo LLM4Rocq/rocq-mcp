@@ -13,6 +13,7 @@ import asyncio
 import collections
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -36,7 +37,27 @@ ROCQ_COQC_TIMEOUT: int = int(os.environ.get("ROCQ_COQC_TIMEOUT", "60"))
 ROCQ_VERIFY_TIMEOUT: int = int(os.environ.get("ROCQ_VERIFY_TIMEOUT", "120"))
 ROCQ_PET_TIMEOUT: float = float(os.environ.get("ROCQ_PET_TIMEOUT", "30"))
 ROCQ_QUERY_TIMEOUT_CAP: int = int(os.environ.get("ROCQ_QUERY_TIMEOUT_CAP", "300"))
-ROCQ_COQC_BINARY: str = os.environ.get("ROCQ_COQC_BINARY", "coqc")
+
+
+# Compile command (split with shlex).  Default: ``rocq c`` when the ``rocq``
+# driver exists, else the legacy ``coqc`` (a compatibility binary since the
+# Rocq renaming).
+def _default_compiler(environ: "os._Environ[str] | dict[str, str]") -> str:
+    return (
+        environ.get("ROCQ_COMPILER_BINARY")
+        # Legacy name of this variable; kept so existing configs keep working.
+        or environ.get("ROCQ_COQC_BINARY")
+        or ("rocq c" if shutil.which("rocq") else "coqc")
+    )
+
+
+ROCQ_COMPILER_BINARY: str = _default_compiler(os.environ)
+
+
+def _compiler_argv() -> list[str]:
+    return shlex.split(ROCQ_COMPILER_BINARY)
+
+
 ROCQ_MAX_SOURCE_SIZE: int = int(os.environ.get("ROCQ_MAX_SOURCE_SIZE", "1000000"))
 
 
@@ -736,7 +757,6 @@ def _run_dune_coq_top(
     a timeout aborts immediately — retrying the other subcommand would hit
     the same wall.
     """
-    import shlex
 
     for subcommand in _DUNE_TOPLEVEL_SUBCOMMANDS:
         try:
@@ -2991,7 +3011,7 @@ async def rocq_switch(name: str = "", ctx: Context = None) -> dict[str, Any]:
         )
     name = name.strip()
 
-    previous = _detect_switch(_resolve_binary(ROCQ_COQC_BINARY))["switch"]
+    previous = _detect_switch(_resolve_binary(_compiler_argv()[0]))["switch"]
 
     env, error = await asyncio.to_thread(compute_switch_env, name)
     if env is None:

@@ -3067,3 +3067,38 @@ class TestCheckPetAvailability:
             "rocq_notations",
         ):
             assert tool in msg
+
+
+class TestCompilerArgv:
+    def test_splits_command_with_arguments(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server, "ROCQ_COMPILER_BINARY", "rocq c")
+        assert server._compiler_argv() == ["rocq", "c"]
+
+    def test_single_binary(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server, "ROCQ_COMPILER_BINARY", "/opt/x/coqc")
+        assert server._compiler_argv() == ["/opt/x/coqc"]
+
+
+class TestDefaultCompiler:
+    def test_legacy_variable_still_honoured(self):
+        from rocq_mcp.server import _default_compiler
+
+        assert _default_compiler({"ROCQ_COQC_BINARY": "/x/coqc"}) == "/x/coqc"
+
+    def test_new_variable_wins_over_legacy(self):
+        from rocq_mcp.server import _default_compiler
+
+        env = {"ROCQ_COMPILER_BINARY": "rocq c", "ROCQ_COQC_BINARY": "/x/coqc"}
+        assert _default_compiler(env) == "rocq c"
+
+    def test_auto_prefers_rocq_then_coqc(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server.shutil, "which", lambda n: f"/bin/{n}")
+        assert server._default_compiler({}) == "rocq c"
+        monkeypatch.setattr(server.shutil, "which", lambda n: None)
+        assert server._default_compiler({}) == "coqc"

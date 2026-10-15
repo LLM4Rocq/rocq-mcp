@@ -214,9 +214,9 @@ class TestCompileInputValidation:
         assert "size" in result["error"].lower()
 
     def test_coqc_not_on_path(self, workspace, monkeypatch):
-        """When ROCQ_COQC_BINARY points to a non-existent binary, report error."""
+        """When ROCQ_COMPILER_BINARY points to a non-existent binary, report error."""
         monkeypatch.setattr(
-            "rocq_mcp.server.ROCQ_COQC_BINARY", "nonexistent_coqc_binary_xyz"
+            "rocq_mcp.server.ROCQ_COMPILER_BINARY", "nonexistent_coqc_binary_xyz"
         )
         result = _call_rocq_compile(source="", workspace=str(workspace))
         assert result["success"] is False

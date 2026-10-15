@@ -268,7 +268,7 @@ Before any Write or `coqc` on a .v file:
 | `ROCQ_DUNE_BUILD` | `1` | When `1` (default), `rocq_compile_file` in a dune project builds via `dune build` / redirects coqc output into `_build/default` so the source tree stays free of `.vo` shadows. Set to `0` to force legacy coqc-into-source-tree compilation. |
 | `ROCQ_MAX_PET_RSS_MB` | `min(50% of system RAM, 16384)` | Maximum pet subprocess RSS (MB). On breach, the call aborts via the timeout recovery path; response includes `reason: "memory_exhausted"` and `pet_restarted: True`. |
 | `ROCQ_MAX_STATES` | `1000` | Cap on the in-memory state table (LRU-evicted). The entry itself is tiny; the real cost lives in pet's Fleche cache and is bounded by `ROCQ_MAX_PET_RSS_MB`. Bump if two or more callers share this process (e.g. parallel sub-agents) and parked states get evicted before they're reused. |
-| `ROCQ_COQC_BINARY` | `coqc` | Path to the `coqc` binary |
+| `ROCQ_COMPILER_BINARY` | `rocq c` if `rocq` is on `PATH`, else `coqc` | Compile command (may contain arguments). `ROCQ_COQC_BINARY` is still read as a legacy alias |
 | `ROCQ_MAX_SOURCE_SIZE` | `1000000` | Maximum source size in bytes |
 
 ## Security Model

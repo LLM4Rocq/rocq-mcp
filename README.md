@@ -166,6 +166,16 @@ Every failure response carries `{success: False, error: str, reason: str}` so an
 
 When a tool returns `pet_restarted: True`, call `rocq_diag` for memory headroom and recent-error history.
 
+### `diagnostic_hint`: pattern-based hints for common configuration errors
+
+`rocq_compile` and `rocq_compile_file` attach a `diagnostic_hint: str` field to the failure envelope when the coqc error matches a known configuration failure pattern. Currently recognised:
+
+- **Missing load path** -- `Cannot find a physical path bound to logical path X.` Indicates a missing `-Q` / `-R` entry in `_CoqProject` (or `_RocqProject`), or a workspace pointing at the wrong directory. The hint names the offending logical path.
+- **Toolchain version mismatch** -- `Compiled library X makes inconsistent assumptions over library <Coq|Corelib>.Init.Prelude.` The coqc in use differs from the one that built the dependencies. The hint points at `rocq_health` / `rocq_switch`.
+- **Stale dependency** -- the same message over any other library `Y`. A `.vo` was built against a different version of `Y`; the hint says to rebuild `Y` and its dependents.
+
+When a `diagnostic_hint` is present the recovery `hint` (re-open at the error position with `rocq_start`) is omitted, since it cannot fix a configuration error. The two fields are never both present. This holds whether or not coqc's output carried a `File "...", line` header.
+
 ### Concurrency model
 
 *Background (both audiences):* `rocq-mcp` is **single-tenant per process**.  All agent-facing state — the live `state_id` table, the import cache, the active workspace, and the single `pet` subprocess — is process-global.  Two correctness floors keep concurrent sessions from clobbering each other:

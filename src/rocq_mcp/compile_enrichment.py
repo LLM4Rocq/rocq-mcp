@@ -198,6 +198,9 @@ def _merge_compile_error_state(
     """
     for key in ("state_id", "goals", "file", "theorem", "proof_finished"):
         result_dict[key] = state_result[key]
+    if "diagnostic_hint" in result_dict:
+        # Config-class error: the diagnostic replaces the recovery hint.
+        return result_dict
     result_dict["hint"] = (
         "Interactive proof state captured at the error position. "
         f"Use rocq_check(from_state={state_result['state_id']}) or "

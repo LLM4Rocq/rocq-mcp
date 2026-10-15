@@ -260,6 +260,95 @@ _COQC_POS_RE = re.compile(
 )
 
 
+# Pattern → diagnostic-hint table for common configuration errors.
+# Each entry pairs a compiled regex against an error string with a
+# template.  Templates may reference named groups from the match
+# (``{name}``) to incorporate the offending identifier into the hint.
+#
+# Why this exists: the bare coqc error tells the agent what failed
+# but not *why* — and the why is almost always a workspace/load-path
+# misconfiguration, not a proof bug.  Hints here steer the agent
+# toward fixing config instead of grinding tactics.
+_MISSING_LOAD_PATH_RE = re.compile(
+    r"Cannot find a physical path bound to logical path\s+(?P<name>[\w.]+)",
+    re.IGNORECASE,
+)
+_VERSION_MISMATCH_RE = re.compile(
+    r"makes inconsistent assumptions over library\s+(?P<library>[\w.]+)",
+    re.IGNORECASE,
+)
+# Prelude of the standard library: ``Coq.Init.Prelude`` up to Coq 8.x,
+# ``Corelib.Init.Prelude`` from Rocq 9.  Skew here means the toolchain
+# differs; skew over any other library means a stale dependency ``.vo``.
+_STDLIB_PRELUDE_RE = re.compile(r"^(?:Coq|Corelib|Stdlib)\.Init\.Prelude$")
+
+
+def _diagnostic_hint_for_error(error: str | None) -> str | None:
+    """Return an actionable diagnostic hint for *error*, or None.
+
+    Pattern-matches the coqc error text against known configuration
+    failure modes (missing load path, ``.vo`` version skew) and names the
+    offending identifier when extractable.  Hints lead with a step the
+    agent can take from inside a tool call (``rocq_health`` /
+    ``rocq_switch``, editing the project file).
+
+    Callers attach the result as ``diagnostic_hint`` and drop the
+    recovery ``hint`` (``rocq_start`` at the error position cannot help
+    with a configuration error).
+
+    Returns None when *error* is empty or None, or when no pattern is
+    currently recognised.
+    """
+    if not error:
+        return None
+    m = _MISSING_LOAD_PATH_RE.search(error)
+    if m is not None:
+        # Strip the trailing sentence period that the regex's [\w.]+
+        # greedily captures — the user expects a clean logical name.
+        name = m.group("name").rstrip(".")
+        return (
+            f"Load-path mismatch: no -Q / -R mapping for logical "
+            f"path '{name}'. Add a line like '-Q <dir> {name}' to the "
+            f"workspace's _CoqProject (or _RocqProject), and verify "
+            f"<dir> exists and contains compiled .vo files; or check "
+            f"that the workspace points at the right project."
+        )
+    m = _VERSION_MISMATCH_RE.search(error)
+    if m is not None:
+        library = m.group("library").rstrip(".")
+        if _STDLIB_PRELUDE_RE.match(library):
+            return (
+                f"Probable Rocq version mismatch: a compiled dependency "
+                f"was built against a different standard library than "
+                f"the coqc in use (over '{library}'). Call rocq_health "
+                f"to see the active toolchain; if it is not the one that "
+                f"built your dependencies, call rocq_switch to select "
+                f"the right opam switch, or rebuild the dependencies "
+                f"with the current toolchain."
+            )
+        return (
+            f"Stale compiled dependency: a .vo file was built against a "
+            f"different version of library '{library}'. Rebuild "
+            f"'{library}' and everything that depends on it (e.g. "
+            f"`dune build` or `make`); if the toolchain also changed, "
+            f"call rocq_health to check the active switch."
+        )
+    return None
+
+
+def _attach_diagnostic_hint(result_dict: dict[str, Any], error_text: str) -> None:
+    """Attach ``diagnostic_hint`` for a recognised config error.
+
+    Also drops the recovery ``hint``: re-opening the file at the error
+    position cannot fix a load-path or ``.vo`` version problem, so only
+    one of the two is ever present.
+    """
+    diagnostic_hint = _diagnostic_hint_for_error(error_text)
+    if diagnostic_hint:
+        result_dict["diagnostic_hint"] = diagnostic_hint
+        result_dict.pop("hint", None)
+
+
 def _parse_coqc_error_positions(
     stderr: str,
     *,
@@ -681,6 +770,7 @@ def _build_compile_result(
             "reason": "compile_error",
             "error": fallback,
         }
+        _attach_diagnostic_hint(fallback_result, fallback)
         if timing_field is not None:
             fallback_result["timing"] = timing_field
         return fallback_result
@@ -707,6 +797,7 @@ def _build_compile_result(
         )
     if timing_field is not None:
         result_dict["timing"] = timing_field
+    _attach_diagnostic_hint(result_dict, error_text)
     return result_dict
 
 

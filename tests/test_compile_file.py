@@ -7,14 +7,14 @@ import glob as glob_mod
 import pytest
 
 from tests.conftest import (
-    COQC_AVAILABLE,
+    COMPILER_AVAILABLE,
     _MockContext,
-    _fake_coqc_result,
+    _fake_compiler_result,
     make_lifespan_state,
 )
 from rocq_mcp.compile import run_compile_file
 
-pytestmark = pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+pytestmark = pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
 
 
 # ---------------------------------------------------------------------------
@@ -176,13 +176,13 @@ class TestCompileFileDirectory:
 
 
 class TestCompileFileTimeout:
-    """Test timeout handling via monkeypatched _run_coqc_file."""
+    """Test timeout handling via monkeypatched _run_compiler_file."""
 
-    # Override module-level skip — these tests use monkeypatch, not real coqc
+    # Override module-level skip — these tests use monkeypatch, not real rocq c
     pytestmark = []
 
     def test_timeout_returns_error(self, workspace, monkeypatch):
-        """When _run_coqc_file reports timed_out=True, result shows timeout error."""
+        """When _run_compiler_file reports timed_out=True, result shows timeout error."""
         path = workspace / "timeout_test.v"
         path.write_text("Theorem t : True. Proof. exact I. Qed.\n")
 
@@ -190,7 +190,7 @@ class TestCompileFileTimeout:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc_file",
+            "_run_compiler_file",
             lambda fp, ws, to, keep_vo=False, mode="full", timing=False, output=None: {
                 "returncode": -1,
                 "stdout": "",
@@ -271,8 +271,8 @@ class TestCompileFileErrorStateCapture:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc_file",
-            lambda *a, **kw: _fake_coqc_result(stderr),
+            "_run_compiler_file",
+            lambda *a, **kw: _fake_compiler_result(stderr),
         )
 
         async def _mock_cps(**kwargs):
@@ -306,8 +306,8 @@ class TestCompileFileErrorStateCapture:
 
         monkeypatch.setattr(
             _compile,
-            "_run_coqc_file",
-            lambda *a, **kw: _fake_coqc_result(stderr),
+            "_run_compiler_file",
+            lambda *a, **kw: _fake_compiler_result(stderr),
         )
 
         async def _mock_cps(**kwargs):
@@ -421,7 +421,7 @@ class TestKeepVo:
         ``rocq_compile_file`` (wrapper)
           -> ``run_compile_file_with_state`` (enrichment)
             -> ``run_compile_file``           (orchestrator)
-              -> ``_run_coqc_file``           (subprocess + cleanup loop)
+              -> ``_run_compiler_file``           (subprocess + cleanup loop)
     """
 
     def test_default_cleans_vo(self, workspace):
@@ -471,7 +471,7 @@ class TestKeepVo:
             assert result["success"] is True
             # The .vo survives.
             assert (workspace / "kv_aux.vo").exists()
-            # But auxiliary artifacts are still cleaned.  coqc does not
+            # But auxiliary artifacts are still cleaned.  rocq c does not
             # always produce every one of these (e.g. .aux is rare on
             # modern Rocq), so we assert absence rather than presence-
             # then-absence — the cleanup loop should have unlinked any
@@ -488,7 +488,7 @@ class TestKeepVo:
     def test_keep_vo_with_compile_error(self, workspace):
         """Cleanup loop tolerates missing .vo on a compile failure.
 
-        coqc does not produce a .vo when compilation fails, so the
+        rocq c does not produce a .vo when compilation fails, so the
         cleanup loop runs against missing files regardless of
         ``keep_vo``.  Both branches must complete without raising.
         """
@@ -502,7 +502,7 @@ class TestKeepVo:
         assert result_default["success"] is False
         assert not (workspace / "kv_err.vo").exists()
 
-        # keep_vo=True — still no exception, still no .vo (coqc never
+        # keep_vo=True — still no exception, still no .vo (rocq c never
         # made one).
         result_keep = run_compile_file(
             file="kv_err.v",
@@ -569,11 +569,11 @@ class TestKeepVo:
     def test_vok_and_vos_also_preserved(self):
         """``.vok`` and ``.vos`` belong to the preserved family.
 
-        Coqc may not emit ``.vok``/``.vos`` by default (they are produced
+        Rocq c may not emit ``.vok``/``.vos`` by default (they are produced
         by ``-vos`` / ``-vok`` modes), so the most robust check is
         structural: the implementation must reference a ``_VO_FAMILY``
         set (or equivalent) that contains all three extensions.  This
-        keeps the test stable across coqc versions and avoids mocking
+        keeps the test stable across rocq c versions and avoids mocking
         the subprocess just to seed artifacts.
         """
         import rocq_mcp.compile as _compile
@@ -603,9 +603,9 @@ class TestKeepVo:
 
 
 class TestKeepVoIntegration:
-    """End-to-end behaviour through the @mcp.tool wrapper with a real coqc.
+    """End-to-end behaviour through the @mcp.tool wrapper with a real rocq c.
 
-    Skipped automatically when ``coqc`` is not on PATH via the module-level
+    Skipped automatically when ``rocq c`` is not on PATH via the module-level
     ``pytestmark``.  Confirms the ``keep_vo=True`` behaviour is observable
     from the outermost entrypoint and does not perturb the envelope shape
     of a successful compile.
@@ -656,12 +656,12 @@ _SAMPLE_TIMING_OUTPUT = (
 
 
 class TestTiming:
-    """The ``timing=True`` option surfaces coqc ``-time`` diagnostics.
+    """The ``timing=True`` option surfaces rocq c ``-time`` diagnostics.
 
     Contract:
 
     * ``timing=False`` (default) — no ``-time`` flag, no ``timing`` field.
-    * ``timing=True`` — coqc is invoked with ``-time``; response gains a
+    * ``timing=True`` — rocq c is invoked with ``-time``; response gains a
       ``timing`` field carrying ``total_sentences``, ``top_slowest``
       (default top 5 by descending duration), and ``last_completed``.
     * On timeout, ``last_completed`` is the final emitted entry from the
@@ -690,9 +690,9 @@ class TestTiming:
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen_timing["value"] = timing
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_run)
         result = run_compile_file(
             file="timing_default.v", workspace=str(workspace), timeout=10
         )
@@ -700,7 +700,7 @@ class TestTiming:
         assert "timing" not in result
 
     def test_timing_true_passes_flag(self, workspace, monkeypatch):
-        """``timing=True`` propagates as a kwarg into ``_run_coqc_file``."""
+        """``timing=True`` propagates as a kwarg into ``_run_compiler_file``."""
         import rocq_mcp.compile as _compile
 
         path = workspace / "timing_flag.v"
@@ -714,13 +714,13 @@ class TestTiming:
             seen_timing["value"] = timing
             return {
                 "returncode": 0,
-                # coqc 9.x emits ``-time`` to stdout
+                # rocq c 9.x emits ``-time`` to stdout
                 "stdout": _SAMPLE_TIMING_OUTPUT,
                 "stderr": "",
                 "timed_out": False,
             }
 
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_run)
         result = run_compile_file(
             file="timing_flag.v",
             workspace=str(workspace),
@@ -734,11 +734,11 @@ class TestTiming:
         # timing-line firehose — they are stripped before truncation.
         assert "Chars 0 - 18" not in result["output"]
 
-    def test_timing_true_passes_time_to_coqc(self, workspace, monkeypatch):
+    def test_timing_true_passes_time_to_compiler(self, workspace, monkeypatch):
         """``timing=True`` adds ``-time`` to the subprocess args.
 
-        Asserts at the lowest layer (``_run_coqc_process``) that the
-        flag actually reaches coqc.
+        Asserts at the lowest layer (``_run_compiler_process``) that the
+        flag actually reaches rocq c.
         """
         import rocq_mcp.compile as _compile
 
@@ -760,12 +760,12 @@ class TestTiming:
 
         monkeypatch.setattr(_compile.subprocess, "Popen", fake_popen)
         # Patch the cleanup target so we don't try to unlink real files.
-        _compile._run_coqc_process(str(path), workspace, 10, timing=True)
+        _compile._run_compiler_process(str(path), workspace, 10, timing=True)
         assert "-time" in captured["args"]
 
         # And without timing, no flag.
         captured.clear()
-        _compile._run_coqc_process(str(path), workspace, 10, timing=False)
+        _compile._run_compiler_process(str(path), workspace, 10, timing=False)
         assert "-time" not in captured["args"]
 
     # ------------------------------------------------------------------ #
@@ -773,7 +773,7 @@ class TestTiming:
     # ------------------------------------------------------------------ #
 
     def test_timing_parser_basic(self):
-        """Parser extracts canonical fields from coqc -time stderr."""
+        """Parser extracts canonical fields from rocq c -time stderr."""
         from rocq_mcp.compile import _parse_timing_lines
 
         # Source matches char ranges so line conversion is deterministic.
@@ -908,14 +908,14 @@ class TestTiming:
         ):
             return {
                 "returncode": -1,
-                # coqc 9.x flushes per-sentence timing to stdout before
+                # rocq c 9.x flushes per-sentence timing to stdout before
                 # the SIGTERM kill on a timeout.
                 "stdout": partial_output,
                 "stderr": "",
                 "timed_out": True,
             }
 
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_run)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_run)
 
         result = run_compile_file(
             file="timing_to.v",
@@ -954,12 +954,12 @@ class TestTiming:
         assert entries[1]["name"] == "C"
 
     # ------------------------------------------------------------------ #
-    # Integration with real coqc                                         #
+    # Integration with real rocq c                                         #
     # ------------------------------------------------------------------ #
 
-    @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+    @pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
     def test_timing_integration_returns_entries(self, workspace):
-        """End-to-end: real coqc with ``timing=True`` yields non-empty
+        """End-to-end: real rocq c with ``timing=True`` yields non-empty
         timing data on a successful compile."""
         path = workspace / "timing_int.v"
         path.write_text(
@@ -1023,25 +1023,25 @@ class TestTiming:
 
 
 class TestVosMode:
-    """The ``mode`` option selects the coqc pass.
+    """The ``mode`` option selects the rocq c pass.
 
     Contract:
 
-    * ``mode="full"`` (default): today's behaviour — full coqc, ``.vo``
+    * ``mode="full"`` (default): today's behaviour — full rocq c, ``.vo``
       artifact.
-    * ``mode="vos"``: passes ``-vos`` to coqc; statements / imports /
+    * ``mode="vos"``: passes ``-vos`` to rocq c; statements / imports /
       notations are checked but proof bodies are skipped.  Produces a
       ``.vos`` artifact rather than ``.vo``.
-    * Any other value is rejected as a validation error before coqc is
+    * Any other value is rejected as a validation error before rocq c is
       invoked.
     """
 
-    # Override the module-level coqc-skip for the mock-based tests; the
+    # Override the module-level compiler-skip for the mock-based tests; the
     # integration tests in this class re-impose the skip individually.
     pytestmark = []
 
     def test_default_mode_is_full(self, workspace, monkeypatch):
-        """No ``mode`` arg => coqc command line does NOT include ``-vos``."""
+        """No ``mode`` arg => rocq c command line does NOT include ``-vos``."""
         import rocq_mcp.compile as _compile
 
         captured: dict = {}
@@ -1052,7 +1052,7 @@ class TestVosMode:
             captured["mode"] = mode
             return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
 
-        monkeypatch.setattr(_compile, "_run_coqc_process", fake_process)
+        monkeypatch.setattr(_compile, "_run_compiler_process", fake_process)
 
         path = workspace / "vos_default.v"
         path.write_text(_TRIVIAL_PROOF)
@@ -1091,10 +1091,10 @@ class TestVosMode:
         assert result["success"] is True
         assert (
             "-vos" in captured["args"]
-        ), f"Expected '-vos' in coqc args; got {captured['args']!r}"
+        ), f"Expected '-vos' in rocq c args; got {captured['args']!r}"
 
     def test_invalid_mode_rejected(self, workspace):
-        """``mode="bogus"`` returns a validation failure without invoking coqc."""
+        """``mode="bogus"`` returns a validation failure without invoking rocq c."""
         path = workspace / "vos_invalid.v"
         path.write_text(_TRIVIAL_PROOF)
         result = run_compile_file(
@@ -1111,7 +1111,7 @@ class TestVosMode:
         assert not (workspace / "vos_invalid.vos").exists()
 
     def test_invalid_mode_rejected_at_wrapper(self, tmp_path):
-        """Wrapper layer rejects an invalid ``mode`` before coqc."""
+        """Wrapper layer rejects an invalid ``mode`` before rocq c."""
         from rocq_mcp.server import rocq_compile_file
 
         mock_ctx = _MockContext(make_lifespan_state())
@@ -1185,10 +1185,10 @@ class TestVosMode:
 
 
 class TestVosModeIntegration:
-    """End-to-end ``mode="vos"`` against a real coqc.
+    """End-to-end ``mode="vos"`` against a real rocq c.
 
-    Skipped automatically when ``coqc`` is not on PATH.  Verifies the
-    actual semantics of ``coqc -vos``: catches statement-level problems,
+    Skipped automatically when ``rocq c`` is not on PATH.  Verifies the
+    actual semantics of ``rocq c -vos``: catches statement-level problems,
     skips proof bodies, produces a ``.vos`` artifact.
     """
 
@@ -1283,10 +1283,10 @@ def _dune_ok():
 class TestCompileFileDuneBuild:
     """rocq_compile_file keeps .vo out of the source tree in dune projects.
 
-    All subprocess layers are mocked, so no real coqc/dune is needed.
+    All subprocess layers are mocked, so no real rocq c/dune is needed.
     """
 
-    pytestmark = []  # override module-level coqc skip
+    pytestmark = []  # override module-level rocq c skip
 
     def test_path_helpers(self, tmp_path):
         from pathlib import Path
@@ -1330,27 +1330,27 @@ class TestCompileFileDuneBuild:
         )
         assert _compile._run_dune_build(tmp_path, "x.vo", 30)["rule_missing"] is False
 
-    def test_dune_build_success_skips_coqc(self, tmp_path, monkeypatch):
+    def test_dune_build_success_skips_compiler(self, tmp_path, monkeypatch):
         import rocq_mcp.compile as _compile
 
         _make_dune_project(tmp_path)
-        seen = {"target": None, "coqc": False}
+        seen = {"target": None, "compiler": False}
 
         def fake_dune(dune_root, target, timeout):
             seen["target"] = target
             return _dune_ok()
 
-        def fake_coqc(*a, **k):
-            seen["coqc"] = True
-            return _fake_coqc_result("", returncode=0)
+        def fake_compiler(*a, **k):
+            seen["compiler"] = True
+            return _fake_compiler_result("", returncode=0)
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60)
         assert result["success"] is True
         assert seen["target"] == "theory/use.vo"
-        assert seen["coqc"] is False  # dune handled it; no coqc fallback
+        assert seen["compiler"] is False  # dune handled it; no direct compile
         assert "dune_build_warning" not in result
 
     def test_dune_compile_error_reported_without_recompile(self, tmp_path, monkeypatch):
@@ -1361,7 +1361,7 @@ class TestCompileFileDuneBuild:
             'File "./theory/use.v", line 2, characters 13-28:\n'
             "Error: The variable nope was not found in the current environment.\n"
         )
-        coqc = {"called": False}
+        compiler = {"called": False}
 
         def fake_dune(dune_root, target, timeout):
             return {
@@ -1372,22 +1372,24 @@ class TestCompileFileDuneBuild:
                 "rule_missing": False,
             }
 
-        def fake_coqc(*a, **k):
-            coqc["called"] = True
-            return _fake_coqc_result("")
+        def fake_compiler(*a, **k):
+            compiler["called"] = True
+            return _fake_compiler_result("")
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60)
         assert result["success"] is False
         assert result["reason"] == "compile_error"
-        # dune's stderr is coqc-format, so positions parse straight through.
+        # dune's stderr is compiler-format, so positions parse straight through.
         assert result.get("error_positions")
-        assert coqc["called"] is False  # no redundant coqc recompile
+        assert compiler["called"] is False  # no redundant rocq c recompile
         assert "dune_build_warning" not in result
 
-    def test_rule_missing_falls_back_to_coqc_into_build(self, tmp_path, monkeypatch):
+    def test_rule_missing_falls_back_to_compiler_into_build(
+        self, tmp_path, monkeypatch
+    ):
         import rocq_mcp.compile as _compile
 
         _make_dune_project(tmp_path)
@@ -1402,27 +1404,27 @@ class TestCompileFileDuneBuild:
                 "rule_missing": True,
             }
 
-        def fake_coqc(
+        def fake_compiler(
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen["ws"] = ws
             seen["output"] = output
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60)
         assert result["success"] is True
         assert "dune_build_warning" in result
-        # coqc fallback compiles from the dune root, output redirected to _build.
+        # rocq c fallback compiles from the dune root, output redirected to _build.
         assert seen["ws"] == str(tmp_path.resolve())
         assert seen["output"] == str(
             tmp_path.resolve() / "_build" / "default" / "theory" / "use.vo"
         )
         assert (tmp_path / "_build" / "default" / "theory").is_dir()
 
-    def test_vos_mode_skips_dune_uses_coqc_into_build(self, tmp_path, monkeypatch):
+    def test_vos_mode_skips_dune_uses_compiler_into_build(self, tmp_path, monkeypatch):
         import rocq_mcp.compile as _compile
 
         _make_dune_project(tmp_path)
@@ -1432,15 +1434,15 @@ class TestCompileFileDuneBuild:
             seen["dune"] = True
             return _dune_ok()
 
-        def fake_coqc(
+        def fake_compiler(
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen["mode"] = mode
             seen["output"] = output
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60, mode="vos")
         assert result["success"] is True
@@ -1449,7 +1451,7 @@ class TestCompileFileDuneBuild:
         assert seen["output"].endswith("/_build/default/theory/use.vos")
         assert "dune_build_warning" not in result
 
-    def test_disabled_uses_source_tree_coqc(self, tmp_path, monkeypatch):
+    def test_disabled_uses_source_tree_compiler(self, tmp_path, monkeypatch):
         import rocq_mcp.compile as _compile
         import rocq_mcp.server as _server
 
@@ -1457,14 +1459,14 @@ class TestCompileFileDuneBuild:
         monkeypatch.setattr(_server, "_DUNE_BUILD_ENABLED", False)
         seen = {}
 
-        def fake_coqc(
+        def fake_compiler(
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen["ws"] = ws
             seen["output"] = output
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
         monkeypatch.setattr(
             _compile,
             "_run_dune_build",
@@ -1481,25 +1483,25 @@ class TestCompileFileDuneBuild:
     def test_non_dune_workspace_unaffected(self, tmp_path, monkeypatch):
         import rocq_mcp.compile as _compile
 
-        # No dune-project marker -> plain coqc, output=None.
+        # No dune-project marker -> plain rocq c, output=None.
         (tmp_path / "solo.v").write_text("Lemma l : 0 = 0.\nProof. reflexivity. Qed.\n")
         seen = {}
 
-        def fake_coqc(
+        def fake_compiler(
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen["output"] = output
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
         result = run_compile_file("solo.v", str(tmp_path), 60)
         assert result["success"] is True
         assert seen["output"] is None
 
     def test_clear_output_artifacts_removes_readonly(self, tmp_path):
-        """coqc -o target artifacts (incl. read-only dune ones) are cleared.
+        """rocq c -o target artifacts (incl. read-only dune ones) are cleared.
 
-        Full mode clears the whole family coqc regenerates; vos mode clears
+        Full mode clears the whole family rocq c regenerates; vos mode clears
         only the .vos so dune's tracked .vo is not orphaned (digest-db desync).
         """
         import os
@@ -1515,7 +1517,7 @@ class TestCompileFileDuneBuild:
                 p.write_text("x")
                 os.chmod(p, stat.S_IRUSR)  # dune-style read-only
 
-        # full: clears the whole family (all recreated by a full coqc compile).
+        # full: clears the whole family (all recreated by a full rocq c compile).
         d = tmp_path / "full" / "theory"
         seed(d)
         _compile._clear_output_artifacts(d / "use.vo", "full")
@@ -1524,7 +1526,7 @@ class TestCompileFileDuneBuild:
         _compile._clear_output_artifacts(d / "use.vo", "full")  # idempotent
 
         # vos: clears ONLY the .vos; dune's .vo/.vok/.glob/.aux stay put
-        # (coqc -vos won't recreate them — deleting would desync dune).
+        # (rocq c -vos won't recreate them — deleting would desync dune).
         d2 = tmp_path / "vos" / "theory"
         seed(d2)
         _compile._clear_output_artifacts(d2 / "use.vos", "vos")
@@ -1557,11 +1559,11 @@ class TestCompileFileDuneBuild:
                 "rule_missing": False,
             }
 
-        def fake_coqc(*a, **k):  # must not run — dune owns the outcome
-            raise AssertionError("coqc must not be invoked for a dune dep error")
+        def fake_compiler(*a, **k):  # must not run — dune owns the outcome
+            raise AssertionError("rocq c must not be invoked for a dune dep error")
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60)
         assert result["success"] is False
@@ -1571,7 +1573,7 @@ class TestCompileFileDuneBuild:
         assert "dependency" in result.get("hint", "")
 
     def test_mkdir_failure_falls_back_to_source_tree(self, tmp_path, monkeypatch):
-        """If staging _build fails, fall back to source-tree coqc and drop the warning."""
+        """If staging _build fails, fall back to source-tree rocq c and drop the warning."""
         from pathlib import Path
         import rocq_mcp.compile as _compile
 
@@ -1592,16 +1594,16 @@ class TestCompileFileDuneBuild:
 
         seen = {}
 
-        def fake_coqc(
+        def fake_compiler(
             fp, ws, to, keep_vo=False, mode="full", *, timing=False, output=None
         ):
             seen["ws"] = ws
             seen["output"] = output
-            return _fake_coqc_result("", returncode=0)
+            return _fake_compiler_result("", returncode=0)
 
         monkeypatch.setattr(_compile, "_run_dune_build", fake_dune)
         monkeypatch.setattr(Path, "mkdir", boom)
-        monkeypatch.setattr(_compile, "_run_coqc_file", fake_coqc)
+        monkeypatch.setattr(_compile, "_run_compiler_file", fake_compiler)
 
         result = run_compile_file("theory/use.v", str(tmp_path), 60)
         assert result["success"] is True
@@ -1611,11 +1613,11 @@ class TestCompileFileDuneBuild:
         # The rule-missing warning was reset — we did not redirect to _build.
         assert "dune_build_warning" not in result
 
-    @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+    @pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
     def test_vos_fallback_preserves_dune_vo(self, tmp_path):
-        """Real dune+coqc: a vos-mode fallback must not orphan dune's .vo.
+        """Real dune+rocq c: a vos-mode fallback must not orphan dune's .vo.
 
-        Regression for the digest-db desync: clearing the .vo (which coqc
+        Regression for the digest-db desync: clearing the .vo (which rocq c
         -vos never recreates) would leave dune believing it still exists and
         refusing to rebuild it. End-to-end: dune's .vo survives and a later
         dune build still succeeds.
@@ -1633,7 +1635,7 @@ class TestCompileFileDuneBuild:
         vo = tmp_path / "_build" / "default" / "theory" / "use.vo"
         assert vo.is_file()
 
-        # vos has no dune target -> coqc -o fallback into _build/default.
+        # vos has no dune target -> rocq c -o fallback into _build/default.
         result = run_compile_file("theory/use.v", str(tmp_path), 60, mode="vos")
         assert result["success"] is True, result
         assert vo.is_file(), "vos fallback must not delete dune's .vo"
@@ -1646,9 +1648,9 @@ class TestCompileFileDuneBuild:
         assert r2.returncode == 0, r2.stderr
         assert vo.is_file()
 
-    @pytest.mark.skipif(not COQC_AVAILABLE, reason="coqc not available")
+    @pytest.mark.skipif(not COMPILER_AVAILABLE, reason="rocq c not available")
     def test_timing_fallback_over_readonly_build(self, tmp_path):
-        """Real dune+coqc: timing fallback overwrites read-only _build artifacts
+        """Real dune+rocq c: timing fallback overwrites read-only _build artifacts
         (via _clear_output_artifacts on the happy path) and leaves dune buildable."""
         import shutil
         import subprocess
@@ -1662,7 +1664,7 @@ class TestCompileFileDuneBuild:
         assert r.returncode == 0, r.stderr
         vo = tmp_path / "_build" / "default" / "theory" / "use.vo"
 
-        # timing forces the coqc -o fallback even for an in-stanza file whose
+        # timing forces the rocq c -o fallback even for an in-stanza file whose
         # _build/.vo is present and read-only.
         result = run_compile_file("theory/use.v", str(tmp_path), 60, timing=True)
         assert result["success"] is True, result

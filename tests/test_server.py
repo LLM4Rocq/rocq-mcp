@@ -1,7 +1,7 @@
-"""Unit tests for server.py helpers (NO coqc needed).
+"""Unit tests for server.py helpers (NO rocq c needed).
 
 TestFormatError: error formatting, annotation, truncation
-TestParseCoqcErrorPositions: structured error position parsing
+TestParseCompilerErrorPositions: structured error position parsing
 TestValidateWorkspace: workspace containment + existence checks
 TestParseProjectFlags: _RocqProject / _CoqProject parsing
 TestParseDuneFlags: dune project detection via dune coq top
@@ -42,7 +42,7 @@ from rocq_mcp.server import (
 )
 from rocq_mcp.compile import (
     _format_error,
-    _parse_coqc_error_positions,
+    _parse_compiler_error_positions,
     _MAX_ERROR_LENGTH,
     _MAX_FORMAT_WARNINGS,
 )
@@ -68,7 +68,7 @@ class TestFormatError:
         assert _format_error("", self.PROOF) == ""
 
     def test_structured_error_with_annotation(self):
-        """Standard coqc error with File/line/characters header."""
+        """Standard rocq c error with File/line/characters header."""
         stderr = (
             'File "/tmp/test.v", line 3, characters 2-9:\n'
             "Error: Not a proposition or a type."
@@ -143,10 +143,10 @@ class TestFormatError:
         assert count == _MAX_FORMAT_WARNINGS
 
     def test_unstructured_error_fallback(self):
-        """Non-coqc error (no File/line header) uses fallback path."""
-        stderr = "coqc not found or not executable: FileNotFoundError"
+        """Non-compiler error (no File/line header) uses fallback path."""
+        stderr = "rocq c not found or not executable: FileNotFoundError"
         result = _format_error(stderr, self.PROOF)
-        assert "coqc not found" in result
+        assert "rocq c not found" in result
 
     def test_unstructured_error_path_cleaned(self):
         """Tmp file paths are replaced with <proof> in fallback."""
@@ -185,21 +185,21 @@ class TestFormatError:
 
 
 # =========================================================================
-# _parse_coqc_error_positions
+# _parse_compiler_error_positions
 # =========================================================================
 
 
-class TestParseCoqcErrorPositions:
-    """Test structured error position parsing from coqc stderr."""
+class TestParseCompilerErrorPositions:
+    """Test structured error position parsing from rocq c stderr."""
 
     def test_single_error(self):
         stderr = (
             'File "/tmp/test.v", line 3, characters 2-9:\n' "Error: Not a proposition."
         )
-        positions = _parse_coqc_error_positions(stderr)
+        positions = _parse_compiler_error_positions(stderr)
         assert len(positions) == 1
         p = positions[0]
-        assert p["line"] == 2  # 0-based (coqc line 3 -> 2)
+        assert p["line"] == 2  # 0-based (rocq c line 3 -> 2)
         assert p["character"] == 2
         assert p["end_character"] == 9
         assert "Not a proposition" in p["message"]
@@ -211,7 +211,7 @@ class TestParseCoqcErrorPositions:
             'File "/tmp/test.v", line 5, characters 3-7:\n'
             "Error: Type mismatch."
         )
-        positions = _parse_coqc_error_positions(stderr)
+        positions = _parse_compiler_error_positions(stderr)
         assert len(positions) == 2
         assert positions[0]["line"] == 0  # line 1 -> 0
         assert positions[0]["message"].startswith("Warning:")
@@ -219,16 +219,16 @@ class TestParseCoqcErrorPositions:
         assert positions[1]["message"].startswith("Error:")
 
     def test_empty_stderr(self):
-        assert _parse_coqc_error_positions("") == []
+        assert _parse_compiler_error_positions("") == []
 
     def test_no_file_header(self):
         """stderr without File/line format returns empty list."""
-        assert _parse_coqc_error_positions("some random output\n") == []
+        assert _parse_compiler_error_positions("some random output\n") == []
 
     def test_message_truncated_at_500(self):
         long_msg = "Error: " + "x" * 600
         stderr = f'File "/tmp/test.v", line 1, characters 0-5:\n' f"{long_msg}"
-        positions = _parse_coqc_error_positions(stderr)
+        positions = _parse_compiler_error_positions(stderr)
         assert len(positions) == 1
         assert len(positions[0]["message"]) <= 500
 
@@ -449,13 +449,13 @@ class TestParseProjectFlags:
         assert flags == ["-noinit"]
 
     def test_arg_safe_warning_allowed(self, tmp_path):
-        """-arg -w <warning> is split into two separate coqc arguments."""
+        """-arg -w <warning> is split into two separate rocq c arguments."""
         (tmp_path / "_CoqProject").write_text("-arg -w -notation-overridden\n")
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-w", "-notation-overridden"]
 
     def test_arg_native_compiler_allowed(self, tmp_path):
-        """-arg -native-compiler <mode> is split into two coqc arguments."""
+        """-arg -native-compiler <mode> is split into two rocq c arguments."""
         (tmp_path / "_CoqProject").write_text("-arg -native-compiler no\n")
         flags = _parse_project_flags(tmp_path)
         assert flags == ["-native-compiler", "no"]
@@ -2367,7 +2367,7 @@ class TestKillPet:
         pet.process.pid = 12345
         # First wait raises TimeoutExpired, second succeeds
         pet.process.wait.side_effect = [
-            subprocess.TimeoutExpired("coqc", 2),
+            subprocess.TimeoutExpired("rocq", 2),
             0,
         ]
         pet.process.stdin = MagicMock()
@@ -2777,7 +2777,7 @@ class TestVoRebuildWarning:
     """End-to-end: rocq_compile_file attaches vo_rebuild_warning iff
     rebuilt .vo files coincide with active sessions in the workspace.
 
-    Stubs the actual coqc call via run_compile_file so we exercise only
+    Stubs the actual rocq c call via run_compile_file so we exercise only
     the snapshot/diff/warning wiring.
     """
 
@@ -2789,7 +2789,7 @@ class TestVoRebuildWarning:
 
     @staticmethod
     def _stub_run_compile_file(monkeypatch, result=None):
-        """Replace ``run_compile_file`` (the source of the coqc call) with
+        """Replace ``run_compile_file`` (the source of the rocq c call) with
         a stub that returns *result* unchanged.  Patched on the
         compile_enrichment module because that's where it's looked up.
         """
@@ -2824,7 +2824,7 @@ class TestVoRebuildWarning:
         )
 
     async def test_no_rebuild_no_warning(self, tmp_path, _ctx, monkeypatch):
-        """coqc succeeds without touching any .vo → no warning."""
+        """rocq c succeeds without touching any .vo → no warning."""
         from rocq_mcp import server as _server
 
         (tmp_path / "_RocqProject").write_text("-Q . M\n")
@@ -3067,3 +3067,38 @@ class TestCheckPetAvailability:
             "rocq_notations",
         ):
             assert tool in msg
+
+
+class TestCompilerArgv:
+    def test_splits_command_with_arguments(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server, "ROCQ_COMPILER_BINARY", "rocq c")
+        assert server._compiler_argv() == ["rocq", "c"]
+
+    def test_single_binary(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server, "ROCQ_COMPILER_BINARY", "/opt/x/coqc")
+        assert server._compiler_argv() == ["/opt/x/coqc"]
+
+
+class TestDefaultCompiler:
+    def test_legacy_variable_still_honoured(self):
+        from rocq_mcp.server import _default_compiler
+
+        assert _default_compiler({"ROCQ_COQC_BINARY": "/x/coqc"}) == "/x/coqc"
+
+    def test_new_variable_wins_over_legacy(self):
+        from rocq_mcp.server import _default_compiler
+
+        env = {"ROCQ_COMPILER_BINARY": "rocq c", "ROCQ_COQC_BINARY": "/x/coqc"}
+        assert _default_compiler(env) == "rocq c"
+
+    def test_auto_prefers_rocq_then_coqc(self, monkeypatch):
+        from rocq_mcp import server
+
+        monkeypatch.setattr(server.shutil, "which", lambda n: f"/bin/{n}")
+        assert server._default_compiler({}) == "rocq c"
+        monkeypatch.setattr(server.shutil, "which", lambda n: None)
+        assert server._default_compiler({}) == "coqc"

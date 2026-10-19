@@ -3,10 +3,10 @@
 
 This module is deliberately *generic*: it does not assume any particular
 opam layout.  It reports the toolchain the running server actually
-resolves (the ``coqc`` / ``pet`` binaries on the server process's
+resolves (the ``rocq c`` / ``pet`` binaries on the server process's
 ``PATH``) and, when the install looks like opam, the active switch.  When
 it does not look like opam (a system install, a Nix store path, a
-hand-built ``coqc``), it degrades gracefully: the binary paths and
+hand-built ``rocq c``), it degrades gracefully: the binary paths and
 versions are still reported and ``switch_source`` is ``"unknown"``.
 
 The MCP tool wrappers (``rocq_health`` / ``rocq_switch``) live in
@@ -32,7 +32,7 @@ from typing import Any
 import rocq_mcp as _rocq_mcp  # for __version__
 import rocq_mcp.server as _server
 
-# Short per-probe budget for the ``coqc --print-version`` / ``pet --version``
+# Short per-probe budget for the ``rocq --print-version`` / ``pet --version``
 # subprocess.  These are fast (tens of ms); the cap is pure insurance against
 # a wedged binary so a health check never hangs the event loop's worker thread.
 _VERSION_TIMEOUT: float = 5.0
@@ -46,7 +46,7 @@ _OPAM_TIMEOUT: float = 15.0
 _OPAM_ENV_LINE = re.compile(r"^(\w+)='(.*)'; export \1;?\s*$")
 
 # Environment keys opam may emit that we propagate into the live process so a
-# respawned pet / next coqc invocation resolves the new switch.  Anything opam
+# respawned pet / next rocq c invocation resolves the new switch.  Anything opam
 # prints that is not in this set is ignored (defensive: we never blindly trust
 # arbitrary KEY=VALUE pairs into our own environment).
 #
@@ -54,7 +54,7 @@ _OPAM_ENV_LINE = re.compile(r"^(\w+)='(.*)'; export \1;?\s*$")
 # materialised.  It MUST be propagated: on a *subsequent* ``opam env --switch``
 # call, opam reads it from our environment to know which switch's ``bin`` to
 # *remove* from ``PATH``.  Drop it and repeated rocq_switch calls leave each
-# prior switch's ``bin`` stranded on ``PATH``, so ``coqc`` can resolve to a
+# prior switch's ``bin`` stranded on ``PATH``, so ``rocq c`` can resolve to a
 # stale switch — the exact wrong-toolchain failure this module exists to catch.
 _SWITCH_ENV_KEYS: frozenset[str] = frozenset(
     {
@@ -81,7 +81,7 @@ def _resolve_binary(name: str) -> str | None:
 
     ``shutil.which`` handles both bare names (searched on ``PATH``) and
     explicit paths (returned if executable), which is exactly the
-    resolution ``coqc`` / ``pet`` undergo at call time.  Returns ``None``
+    resolution ``rocq c`` / ``pet`` undergo at call time.  Returns ``None``
     when nothing resolves.
     """
     return shutil.which(name)
@@ -91,7 +91,7 @@ def _binary_version(path: str | None, args: list[str]) -> str | None:
     """First line of ``<path> <args>``, or ``None`` if it fails/blocks.
 
     Best-effort: any OSError / non-zero exit / timeout yields ``None`` so a
-    health probe never raises.  ``coqc --print-version`` and
+    health probe never raises.  ``rocq --print-version`` and
     ``pet --version`` both return promptly; the timeout is insurance.
     """
     if not path:
@@ -142,21 +142,21 @@ def _switch_from_prefix(
     }
 
 
-def _switch_from_binary_path(coqc_path: str) -> dict[str, Any] | None:
-    """Infer the switch from a resolved ``coqc`` path, or ``None``.
+def _switch_from_binary_path(compiler_path: str) -> dict[str, Any] | None:
+    """Infer the switch from a resolved ``rocq c`` path, or ``None``.
 
     Recognises the two opam layouts and *only* those, to avoid mislabelling
-    a system install (e.g. ``/usr/bin/coqc`` must not report switch
+    a system install (e.g. ``/usr/bin/rocq`` must not report switch
     ``"usr"``):
 
-    - local:  ``<dir>/_opam/bin/coqc``        → local switch ``<dir>``
-    - global: ``<opamroot>/<name>/bin/coqc``  where ``<opamroot>`` is named
+    - local:  ``<dir>/_opam/bin/rocq``        → local switch ``<dir>``
+    - global: ``<opamroot>/<name>/bin/rocq``  where ``<opamroot>`` is named
       ``.opam`` or equals ``$OPAMROOT`` → global switch ``<name>``
 
     Anything else returns ``None`` (caller reports ``switch_source:
     "unknown"``).
     """
-    bindir = os.path.dirname(coqc_path)
+    bindir = os.path.dirname(compiler_path)
     if os.path.basename(bindir) != "bin":
         return None
     prefix = os.path.dirname(bindir)
@@ -172,12 +172,12 @@ def _switch_from_binary_path(coqc_path: str) -> dict[str, Any] | None:
     return None
 
 
-def _detect_switch(coqc_path: str | None) -> dict[str, Any]:
+def _detect_switch(compiler_path: str | None) -> dict[str, Any]:
     """Detect the active switch, preferring opam's own env over path-sniffing.
 
     ``$OPAM_SWITCH_PREFIX`` is authoritative when present — opam sets it via
     ``eval $(opam env)`` / ``opam exec``.  Otherwise we infer from the
-    resolved ``coqc`` path.  Falls back to a ``"unknown"`` descriptor for
+    resolved ``rocq c`` path.  Falls back to a ``"unknown"`` descriptor for
     non-opam installs, where the binary paths/versions still tell the agent
     everything actionable.
     """
@@ -185,8 +185,8 @@ def _detect_switch(coqc_path: str | None) -> dict[str, Any]:
     name_hint = os.environ.get("OPAMSWITCH")
     if prefix:
         return _switch_from_prefix(prefix, source="opam_env", name_hint=name_hint)
-    if coqc_path:
-        parsed = _switch_from_binary_path(coqc_path)
+    if compiler_path:
+        parsed = _switch_from_binary_path(compiler_path)
         if parsed is not None:
             return parsed
     return {
@@ -210,7 +210,8 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     verdict and human-readable ``warnings``.  See ``rocq_health`` for the
     output schema.
     """
-    coqc_path = _resolve_binary(_server.ROCQ_COQC_BINARY)
+    compiler = _server._compiler_argv()
+    compiler_path = _resolve_binary(compiler[0])
     pet_path = _resolve_binary("pet")
 
     try:
@@ -224,13 +225,13 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
     pet_running = client is not None and getattr(client, "process", None) is not None
     pet_pid = client.process.pid if pet_running else None
 
-    switch = _detect_switch(coqc_path)
+    switch = _detect_switch(compiler_path)
 
     warnings: list[str] = []
-    if coqc_path is None:
+    if compiler_path is None:
         warnings.append(
-            f"coqc binary {_server.ROCQ_COQC_BINARY!r} not found on PATH — "
-            "compilation tools will fail. Check the switch / ROCQ_COQC_BINARY."
+            f"compiler {compiler[0]!r} not found on PATH — "
+            "compilation tools will fail. Check the switch / ROCQ_COMPILER_BINARY."
         )
     if pet_path is None:
         warnings.append(
@@ -248,10 +249,10 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
             "unrecognised layout); reporting resolved binary paths instead."
         )
 
-    # "ok" = the server can do its core job: coqc resolves.  Interactive
-    # capability (pet + pytanque) is reported separately so a coqc-only
+    # "ok" = the server can do its core job: rocq c resolves.  Interactive
+    # capability (pet + pytanque) is reported separately so a compiler-only
     # deployment still reads as healthy.
-    ok = coqc_path is not None
+    ok = compiler_path is not None
 
     return {
         "success": True,
@@ -262,9 +263,9 @@ def build_health_snapshot(lifespan_state: dict[str, Any]) -> dict[str, Any]:
         "switch_is_local": switch["switch_is_local"],
         "switch_source": switch["switch_source"],
         "toolchain": {
-            "coqc": {
-                "path": coqc_path,
-                "version": _binary_version(coqc_path, ["--print-version"]),
+            "compiler": {
+                "path": compiler_path,
+                "version": _binary_version(compiler_path, ["--print-version"]),
             },
             "pet": {
                 "path": pet_path,
